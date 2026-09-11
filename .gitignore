@@ -6,4 +6,5 @@ build/
 dist/
 work/
 *.pyc
-
+/LocalPDFEditorDebug.spec
+/MinimalQt.spec

@@ -18,3 +18,21 @@ def checked_font(path, text):
         raise EditorError("FONT_MISSING_GLYPH", "字型缺少部分字元，請更換字型。")
     return font
 
+def embedded_font(pdf, page, run, folder):
+    import hashlib
+    def normalized(name):
+        return name.split('+')[-1].replace(' ', '').replace('-', '').lower()
+    with pymupdf.open(stream=pdf, filetype='pdf') as doc:
+        for item in doc[page].get_fonts(full=True):
+            if normalized(item[3]) != normalized(run.font_name):
+                continue
+            name, extension, kind, content = doc.extract_font(item[0])
+            if content and extension in ('otf', 'ttf', 'cff'):
+                path = Path(folder) / (hashlib.sha256(content).hexdigest() + '.' + extension)
+                path.write_bytes(content)
+                try:
+                    checked_font(path, run.text)
+                    return path
+                except EditorError:
+                    pass
+    return None

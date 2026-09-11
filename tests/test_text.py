@@ -52,3 +52,15 @@ def test_vertical_text_is_read_only(font_path):
     runs = extract_runs(doc.tobytes(), 0)
     assert runs and not runs[0].editable
 
+def test_subset_output_is_compact(pdf_bytes, font_path):
+    out = replace_text(pdf_bytes, request_for(pdf_bytes, font_path))
+    assert len(out) < 500000
+
+def test_second_edit_adds_new_chinese_glyphs(pdf_bytes, font_path):
+    first = replace_text(pdf_bytes, request_for(pdf_bytes, font_path))
+    run = next(r for r in extract_runs(first, 0) if '檢測' in r.text)
+    req = replace(request_for(pdf_bytes, font_path), document_hash=hashlib.sha256(first).hexdigest(),
+        run_id=run.id, text='完成覆核 新增字')
+    second = replace_text(first, req)
+    with pymupdf.open(stream=second) as doc:
+        assert '完成覆核' in doc[0].get_text()

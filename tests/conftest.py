@@ -10,7 +10,7 @@ FONT = Path(__file__).parents[1] / "resources/fonts/NotoSansCJKtc-Regular.otf"
 def font_path():
     return str(FONT)
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def pdf_bytes():
     doc = pymupdf.open()
     page = doc.new_page(width=500, height=400)
@@ -22,7 +22,7 @@ def pdf_bytes():
     page.insert_text((40, 80), "品質檢驗 ABC 123", fontname="noto", fontsize=16)
     page.insert_text((40, 180), "品質檢驗 ABC 123", fontname="noto", fontsize=16)
     page.insert_text((40, 260), "KEEP ME", fontsize=18)
-    doc.subset_fonts()
+    doc.subset_fonts(fallback=True)
     data = doc.tobytes(garbage=4, deflate=True)
     doc.close()
     return data
@@ -32,4 +32,3 @@ def source_path(tmp_path, pdf_bytes):
     path = tmp_path / "原始.pdf"
     path.write_bytes(pdf_bytes)
     return path
-

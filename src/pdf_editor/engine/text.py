@@ -66,6 +66,5 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
         shape.insert_textbox(rect, request.text, fontname="replacement",
             fontsize=request.size, color=request.color)
         shape.commit()
-        doc.subset_fonts()
+        doc.subset_fonts(fallback=True)
         return doc.tobytes(garbage=4, deflate=True)
-
