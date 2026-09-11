@@ -75,6 +75,8 @@ class Canvas(QGraphicsView):
     inline_text_cancelled=Signal()
     note_insertion_requested=Signal(object)
     note_insertion_cancelled=Signal()
+    annotation_selected=Signal(object)
+    annotation_delete_requested=Signal(object)
     layer_selected=Signal(str)
     layer_moved=Signal(object)
 
@@ -86,13 +88,17 @@ class Canvas(QGraphicsView):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.matrix=(1,0,0,1,0,0)
         self.runs=[]
+        self.annotations=[]
         self.highlight=None
+        self.annotation_highlight=None
         self.selected_run=None
+        self.selected_annotation=None
         self._drag_run=None
         self._drag_start_scene=QPointF()
         self._drag_original_rect=None
         self._text_insertion=False
         self._note_insertion=False
+        self._annotation_selection=False
         self.inline_editor=None
         self.inline_run=None
         self.inline_rect=None
@@ -107,10 +113,13 @@ class Canvas(QGraphicsView):
     def display(self,data,layers=()):
         self.scene().clear()
         self.highlight=None
+        self.annotation_highlight=None
         self.selected_run=None
+        self.selected_annotation=None
         self._drag_run=None
         self.matrix=data["matrix"]
         self.runs=data["runs"]
+        self.annotations=data.get("annotations",())
         pix=QPixmap()
         pix.loadFromData(data["png"])
         pix.setDevicePixelRatio(data.get("pixel_ratio",1.0))
@@ -141,14 +150,56 @@ class Canvas(QGraphicsView):
                 return run
         return None
 
+    def _annotation_at(self,scene_pos):
+        x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
+        for item in reversed(self.annotations):
+            x0,y0,x1,y1=item.rect
+            if x0<=x<=x1 and y0<=y<=y1:
+                return item
+        return None
+
     def clear_text_selection(self):
         self.selected_run=None
         if self.highlight:
             self.scene().removeItem(self.highlight)
             self.highlight=None
 
+    def clear_annotation_selection(self):
+        self.selected_annotation=None
+        if self.annotation_highlight:
+            self.scene().removeItem(self.annotation_highlight)
+            self.annotation_highlight=None
+
+    def select_annotation(self,item):
+        self.clear_annotation_selection()
+        self.selected_annotation=item
+        r=transformed_rect(self.matrix,item.rect)
+        pen=QPen(QColor("#7b3fc6"),3,Qt.PenStyle.DashLine)
+        self.annotation_highlight=self.scene().addRect(
+            r[0],r[1],r[2]-r[0],r[3]-r[1],pen)
+        self.annotation_highlight.setZValue(4)
+
+    def start_annotation_selection(self):
+        self.clear_text_selection()
+        self.clear_annotation_selection()
+        self.cancel_text_insertion()
+        self.cancel_note_insertion()
+        self._annotation_selection=True
+        self.insertion_hint.setText("選取註解模式：請點選螢光、底線或文字註解（Esc 取消）")
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setFocus()
+        self._place_insertion_hint()
+        self.insertion_hint.show()
+        self.insertion_hint.raise_()
+
+    def cancel_annotation_selection(self):
+        self._annotation_selection=False
+        self.unsetCursor()
+        self.insertion_hint.hide()
+
     def start_text_insertion(self):
         self.clear_text_selection()
+        self.cancel_annotation_selection()
         self.cancel_note_insertion()
         self._text_insertion=True
         self.insertion_hint.setText("新增文字模式：請在頁面中點選位置（Esc 取消）")
@@ -167,6 +218,7 @@ class Canvas(QGraphicsView):
 
     def start_note_insertion(self):
         self.clear_text_selection()
+        self.cancel_annotation_selection()
         self.cancel_text_insertion()
         self._note_insertion=True
         self.insertion_hint.setText("文字註解模式：請在頁面中點選位置（Esc 取消）")
@@ -278,6 +330,15 @@ class Canvas(QGraphicsView):
         if isinstance(item,LayerItem):
             self.clear_text_selection()
         if not isinstance(item,LayerItem):
+            if self._annotation_selection:
+                annotation=self._annotation_at(scene_pos)
+                if annotation:
+                    self.cancel_annotation_selection()
+                    self.clear_text_selection()
+                    self.select_annotation(annotation)
+                    self.annotation_selected.emit(annotation)
+                event.accept()
+                return
             if self._note_insertion:
                 x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
                 self.cancel_note_insertion()
@@ -290,6 +351,7 @@ class Canvas(QGraphicsView):
                 self.text_insertion_requested.emit((x,y))
                 event.accept()
                 return
+            self.clear_annotation_selection()
             run=self._run_at(scene_pos)
             if run:
                 self.selected_run=run
@@ -338,12 +400,20 @@ class Canvas(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
 
     def keyPressEvent(self,event: QKeyEvent):
+        if event.key()==Qt.Key.Key_Escape and self._annotation_selection:
+            self.cancel_annotation_selection()
+            event.accept()
+            return
         if event.key()==Qt.Key.Key_Escape and self._note_insertion:
             self.cancel_note_insertion(True)
             event.accept()
             return
         if event.key()==Qt.Key.Key_Escape and self._text_insertion:
             self.cancel_text_insertion(True)
+            event.accept()
+            return
+        if event.key()==Qt.Key.Key_Delete and self.selected_annotation is not None:
+            self.annotation_delete_requested.emit(self.selected_annotation)
             event.accept()
             return
         if event.key()==Qt.Key.Key_Delete and self.selected_run is not None:

@@ -17,7 +17,8 @@ from pdf_editor.errors import EditorError
 from pdf_editor.workers import Jobs
 from pdf_editor.assets import AssetStore
 from pdf_editor.pages import merge_pages,split_pages,move_page,rotate_page,delete_page
-from pdf_editor.annotations import mark_text,add_text_note
+from pdf_editor.annotations import (mark_text,add_text_note,delete_annotation,
+    set_highlight_color)
 from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.ui.overlay_panel import OverlayPanel
@@ -63,6 +64,7 @@ class MainWindow(QMainWindow):
         self.run=None
         self.insertion_rect=None
         self.layer_id=None
+        self.annotation=None
         self.token=0
         self.busy=False
         self.render_serial=0
@@ -114,10 +116,16 @@ class MainWindow(QMainWindow):
         for name,label,handler in [
             ("highlight","螢光標記",lambda:self.apply_selected_markup("highlight")),
             ("underline","加底線",lambda:self.apply_selected_markup("underline")),
-            ("text_note","文字註解",self.start_text_note)]:
+            ("text_note","文字註解",self.start_text_note),
+            ("select_annotation","選取註解",self.start_annotation_selection),
+            ("highlight_yellow","螢光色：黃色",lambda:self.change_highlight_color((1.0,0.84,0.18))),
+            ("highlight_green","螢光色：綠色",lambda:self.change_highlight_color((0.30,0.78,0.48))),
+            ("highlight_pink","螢光色：粉紅色",lambda:self.change_highlight_color((1.0,0.45,0.66))),
+            ("highlight_blue","螢光色：藍色",lambda:self.change_highlight_color((0.32,0.67,1.0))),
+            ("delete_annotation","刪除選取註解",self.delete_selected_annotation)]:
             action=QAction(label,self)
             action.triggered.connect(handler)
-            if name=="text_note":
+            if name in ("text_note","select_annotation"):
                 action.setCheckable(True)
             markup_menu.addAction(action)
             self.actions[name]=action
@@ -163,6 +171,8 @@ class MainWindow(QMainWindow):
         self.canvas.inline_text_cancelled.connect(self.cancel_inline_text)
         self.canvas.note_insertion_requested.connect(self.begin_text_note)
         self.canvas.note_insertion_cancelled.connect(self.cancel_text_note)
+        self.canvas.annotation_selected.connect(self.select_annotation)
+        self.canvas.annotation_delete_requested.connect(self.delete_selected_annotation)
         self.canvas.layer_selected.connect(self.select_layer)
         self.canvas.layer_moved.connect(self.move_layer)
         splitter.addWidget(self.canvas)
@@ -211,6 +221,12 @@ class MainWindow(QMainWindow):
         self.actions["highlight"].setEnabled(markup)
         self.actions["underline"].setEnabled(markup)
         self.actions["text_note"].setEnabled(edit)
+        self.actions["select_annotation"].setEnabled(edit)
+        selected_annotation=edit and self.annotation is not None
+        selected_highlight=selected_annotation and self.annotation.kind=="Highlight"
+        for name in ("highlight_yellow","highlight_green","highlight_pink","highlight_blue"):
+            self.actions[name].setEnabled(selected_highlight)
+        self.actions["delete_annotation"].setEnabled(selected_annotation)
         self.markup_menu_button.setEnabled(edit)
         self.thumbs.setEnabled(active and not self.busy)
         self.text_panel.apply_button.setEnabled(edit and self.preview is not None)
@@ -265,12 +281,15 @@ class MainWindow(QMainWindow):
         self.canvas.cancel_inline_editor()
         self.canvas.cancel_note_insertion()
         self.actions["text_note"].setChecked(False)
+        self.canvas.cancel_annotation_selection()
+        self.actions["select_annotation"].setChecked(False)
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.session=session
         self.token+=1
         self.preview=None
         self.run=None
+        self.annotation=None
         self.insertion_rect=None
         self.page_data=None
         self.page=0
@@ -313,9 +332,12 @@ class MainWindow(QMainWindow):
         self.canvas.cancel_inline_editor()
         self.canvas.cancel_note_insertion()
         self.actions["text_note"].setChecked(False)
+        self.canvas.cancel_annotation_selection()
+        self.actions["select_annotation"].setChecked(False)
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.run=None
+        self.annotation=None
         self.insertion_rect=None
         self.text_panel.setEnabled(False)
         self.page_spin.blockSignals(True)
@@ -349,10 +371,13 @@ class MainWindow(QMainWindow):
         self.canvas.cancel_inline_editor()
         self.canvas.cancel_note_insertion()
         self.actions["text_note"].setChecked(False)
+        self.canvas.cancel_annotation_selection()
+        self.actions["select_annotation"].setChecked(False)
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.preview=None
         self.run=None
+        self.annotation=None
         self.insertion_rect=None
         revision=self.session.revision
         token=self.token
@@ -415,8 +440,15 @@ class MainWindow(QMainWindow):
             self.page_data=result
             try:
                 self.canvas.display(result,layers)
+                if self.annotation is not None:
+                    selected=next((item for item in result.get("annotations",())
+                        if item.xref==self.annotation.xref),None)
+                    self.annotation=selected
+                    if selected is not None:
+                        self.canvas.select_annotation(selected)
             except EditorError as exc:
                 self.error((exc.code,str(exc),()))
+            self.refresh_actions()
             status=self.session.access.reason or ("預覽中，尚未套用" if self.preview else
                 "有未儲存變更" if self.session.dirty else "可編輯")
             self.statusBar().showMessage(f"第 {self.page+1} / {self.page_count} 頁  ·  {status}")
@@ -429,6 +461,10 @@ class MainWindow(QMainWindow):
         self.canvas.cancel_inline_editor()
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
+        self.canvas.cancel_annotation_selection()
+        self.actions["select_annotation"].setChecked(False)
+        self.canvas.clear_annotation_selection()
+        self.annotation=None
         self.run=run
         self.insertion_rect=None
         self.panels.setCurrentWidget(self.text_panel)
@@ -548,6 +584,10 @@ class MainWindow(QMainWindow):
         self.canvas.cancel_inline_editor()
         self.canvas.cancel_note_insertion()
         self.actions["text_note"].setChecked(False)
+        self.canvas.cancel_annotation_selection()
+        self.actions["select_annotation"].setChecked(False)
+        self.canvas.clear_annotation_selection()
+        self.annotation=None
         self.run=None
         self.insertion_rect=None
         self.canvas.start_text_insertion()
@@ -569,6 +609,10 @@ class MainWindow(QMainWindow):
         self.canvas.cancel_inline_editor()
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
+        self.canvas.cancel_annotation_selection()
+        self.actions["select_annotation"].setChecked(False)
+        self.canvas.clear_annotation_selection()
+        self.annotation=None
         self.run=None
         self.insertion_rect=None
         self.text_panel.setEnabled(False)
@@ -588,6 +632,56 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("已取消文字註解。")
             return
         self.submit_annotation(add_text_note,(self.page,position,text),"正在新增文字註解…")
+
+    def start_annotation_selection(self,checked=True):
+        if not checked:
+            self.canvas.cancel_annotation_selection()
+            self.statusBar().showMessage("已取消選取註解。")
+            return
+        if not self.session or self.busy or not self.session.access.can_edit:
+            self.actions["select_annotation"].setChecked(False)
+            return
+        self.canvas.cancel_inline_editor()
+        self.canvas.cancel_text_insertion()
+        self.actions["add_text"].setChecked(False)
+        self.canvas.cancel_note_insertion()
+        self.actions["text_note"].setChecked(False)
+        self.annotation=None
+        self.run=None
+        self.insertion_rect=None
+        self.text_panel.setEnabled(False)
+        self.canvas.start_annotation_selection()
+        self.refresh_actions()
+        self.statusBar().showMessage("請直接點選頁面上的螢光、底線或文字註解。")
+
+    def select_annotation(self,item):
+        self.canvas.cancel_annotation_selection()
+        self.actions["select_annotation"].setChecked(False)
+        self.canvas.cancel_inline_editor()
+        self.canvas.clear_text_selection()
+        self.canvas.select_annotation(item)
+        self.annotation=item
+        self.run=None
+        self.insertion_rect=None
+        self.text_panel.setEnabled(False)
+        self.refresh_actions()
+        names={"Highlight":"螢光標記","Underline":"底線","Text":"文字註解"}
+        self.statusBar().showMessage(
+            f"已選取{names.get(item.kind,'註解')}；按 Delete 可直接刪除。")
+
+    def delete_selected_annotation(self,item=None):
+        if hasattr(item,"xref"):
+            self.annotation=item
+        if not self.annotation or self.busy:
+            return
+        selected=self.annotation
+        self.submit_annotation(delete_annotation,(self.page,selected.xref),"正在刪除註解…")
+
+    def change_highlight_color(self,color):
+        if not self.annotation or self.annotation.kind!="Highlight" or self.busy:
+            return
+        self.submit_annotation(set_highlight_color,
+            (self.page,self.annotation.xref,color),"正在變更螢光標記顏色…")
 
     def apply_selected_markup(self,kind):
         if not self.run or self.busy:
@@ -611,8 +705,13 @@ class MainWindow(QMainWindow):
                 return
             self.session.apply_pdf(pdf)
             self.run=None
+            self.annotation=None
             self.canvas.clear_text_selection()
+            self.canvas.clear_annotation_selection()
+            self.canvas.cancel_annotation_selection()
+            self.actions["select_annotation"].setChecked(False)
             self.text_panel.setEnabled(False)
+            self.page_data=None
             self.refresh_actions()
             self.request_render()
             self.queue_thumbnail(0,self.token,self.session.revision)
@@ -741,10 +840,14 @@ class MainWindow(QMainWindow):
         self.canvas.cancel_inline_editor()
         self.canvas.cancel_note_insertion()
         self.actions["text_note"].setChecked(False)
+        self.canvas.cancel_annotation_selection()
+        self.actions["select_annotation"].setChecked(False)
+        self.canvas.clear_annotation_selection()
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.insertion_rect=None
         self.run=None
+        self.annotation=None
         self.session.redo() if redo else self.session.undo()
         self.text_panel.setEnabled(False)
         self.sync_page_navigation()

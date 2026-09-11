@@ -11,6 +11,7 @@ from pdf_editor.engine.geometry import transform_point, inverse_transform
 from pdf_editor.ui.signature_dialog import SignatureDialog
 from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
+from pdf_editor.annotations import mark_text
 from test_text import request_for
 
 def test_reader_preview_apply_undo(qtbot, source_path, font_path):
@@ -645,6 +646,75 @@ def test_window_adds_text_note_at_clicked_position(qtbot,source_path,monkeypatch
             notes=list(page.annots() or [])
             assert notes[0].type[1]=="Text"
             assert notes[0].info["content"]=="請重新確認尺寸"
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_markup_menu_exposes_annotation_selection_delete_and_colors(qtbot):
+    window=MainWindow()
+    qtbot.addWidget(window)
+
+    assert [window.actions[name].text() for name in (
+        "select_annotation","highlight_yellow","highlight_green",
+        "highlight_pink","highlight_blue","delete_annotation"
+    )]==["選取註解","螢光色：黃色","螢光色：綠色","螢光色：粉紅色",
+        "螢光色：藍色","刪除選取註解"]
+
+
+def test_window_selects_and_deletes_annotation_with_delete_key(qtbot,source_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.resize(1100,760)
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        run=next(item for item in window.page_data["runs"] if "品質" in item.text)
+        window.select_run(run)
+        qtbot.waitUntil(lambda:window.canvas.inline_editor is not None,timeout=30000)
+        window.canvas.inline_editor.clearFocus()
+        qtbot.wait(50)
+        window.apply_selected_markup("highlight")
+        qtbot.waitUntil(lambda:not window.busy and window.page_data is not None,timeout=30000)
+
+        window.actions["select_annotation"].trigger()
+        x,y=transform_point(window.page_data["matrix"],
+            (run.rect[0]+run.rect[2])/2,(run.rect[1]+run.rect[3])/2)
+        point=window.canvas.mapFromScene(QPointF(x,y))
+        qtbot.mouseClick(window.canvas.viewport(),Qt.MouseButton.LeftButton,pos=point)
+        assert window.annotation is not None
+        qtbot.keyClick(window.canvas,Qt.Key.Key_Delete)
+
+        qtbot.waitUntil(lambda:not window.busy,timeout=30000)
+        with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
+            assert list(doc[0].annots() or [])==[]
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_changes_selected_highlight_color_immediately(qtbot,source_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        run=next(item for item in window.page_data["runs"] if "品質" in item.text)
+        window.submit_annotation(mark_text,(0,run.rect,"highlight"),"加入標記")
+        qtbot.waitUntil(lambda:not window.busy and window.page_data is not None,timeout=30000)
+        window.select_annotation(window.page_data["annotations"][0])
+
+        window.actions["highlight_green"].trigger()
+
+        qtbot.waitUntil(lambda:not window.busy,timeout=30000)
+        with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
+            color=list(doc[0].annots())[0].colors["stroke"]
+            assert color==pytest.approx((0.30,0.78,0.48),abs=0.01)
+        window.history_step(False)
+        with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
+            color=list(doc[0].annots())[0].colors["stroke"]
+            assert color==pytest.approx((1.0,0.84,0.18),abs=0.01)
     finally:
         window.session.saved_fingerprint=window.session.history.current[2]
         window.close()
