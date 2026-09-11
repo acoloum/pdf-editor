@@ -18,13 +18,16 @@ from pdf_editor.workers import Jobs
 from pdf_editor.assets import AssetStore
 from pdf_editor.pages import (merge_pages,split_pages,move_pages,move_pages_to,rotate_pages,
     delete_pages,duplicate_pages,page_order_after_move,page_order_after_drop)
+from pdf_editor.page_decorations import (crop_pages,add_page_numbers,
+    add_text_watermark,add_image_watermark)
 from pdf_editor.annotations import (mark_text,add_text_note,delete_annotation,
     set_highlight_color)
 from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.ui.overlay_panel import OverlayPanel
 from pdf_editor.ui.signature_dialog import SignatureDialog
-from pdf_editor.ui.page_dialogs import MergeDialog,SplitDialog
+from pdf_editor.ui.page_dialogs import (MergeDialog,SplitDialog,CropPagesDialog,
+    PageDecorationDialog)
 from pdf_editor.ui.style import STYLE
 
 def export_document(pdf,layers,target,source,overwrite):
@@ -52,6 +55,17 @@ def edit_page_document(pdf,layers,operation,pages,target=None):
         return delete_pages(data,pages)
     if operation=="duplicate":
         return duplicate_pages(data,pages)
+    if operation=="crop":
+        return crop_pages(data,pages,target)
+    if operation=="page_number":
+        return add_page_numbers(data,pages,target["start"],target["prefix"],
+            target["suffix"],target["position"],target["font_size"],target["font_path"])
+    if operation=="text_watermark":
+        return add_text_watermark(data,pages,target["text"],target["font_size"],
+            target["opacity"],target["angle"],target["font_path"])
+    if operation=="image_watermark":
+        return add_image_watermark(data,pages,target["image_path"],
+            target["width_percent"],target["opacity"],target["angle"])
     raise EditorError("PAGE_OPERATION","頁面操作無效。")
 
 
@@ -113,7 +127,8 @@ class MainWindow(QMainWindow):
             ("signature","手寫簽名",self.add_signature,None),
             ("collection","常用圖章",self.add_collection,None),
             ("merge","合併",self.merge,None),
-            ("split","拆分",self.split,None)]:
+            ("split","拆分",self.split,None),
+            ("page_marks","頁碼／浮水印",self.show_page_decoration_dialog,None)]:
             action=QAction(label,self)
             action.triggered.connect(handler)
             if key:
@@ -129,6 +144,7 @@ class MainWindow(QMainWindow):
             ("rotate_left","選取頁面向左旋轉",lambda:self.rotate_current_page(-90),"Ctrl+Shift+Left"),
             ("rotate_right","選取頁面向右旋轉",lambda:self.rotate_current_page(90),"Ctrl+Shift+Right"),
             ("duplicate_page","複製選取頁面",self.duplicate_selected_pages,"Ctrl+D"),
+            ("crop_page","裁切選取頁面…",self.show_crop_dialog,None),
             ("delete_page","刪除選取頁面",self.delete_current_page,"Ctrl+Delete")]:
             action=QAction(label,self)
             action.triggered.connect(handler)
@@ -233,7 +249,7 @@ class MainWindow(QMainWindow):
     def refresh_actions(self):
         active=self.session is not None
         edit=active and self.session.access.can_edit and not self.busy
-        for name in ("save","add_text","stamp","signature","collection"):
+        for name in ("save","add_text","stamp","signature","collection","page_marks"):
             self.actions[name].setEnabled(edit)
         self.actions["undo"].setEnabled(edit and self.session.can_undo)
         self.actions["redo"].setEnabled(edit and self.session.can_redo)
@@ -249,8 +265,9 @@ class MainWindow(QMainWindow):
         self.actions["rotate_left"].setEnabled(manage and bool(selected))
         self.actions["rotate_right"].setEnabled(manage and bool(selected))
         self.actions["duplicate_page"].setEnabled(manage and bool(selected))
+        self.actions["crop_page"].setEnabled(edit and bool(selected))
         self.actions["delete_page"].setEnabled(manage and bool(selected) and len(selected)<self.page_count)
-        self.page_menu_button.setEnabled(manage)
+        self.page_menu_button.setEnabled(manage or edit)
         markup=edit and self.run is not None and self.run.editable
         self.actions["highlight"].setEnabled(markup)
         self.actions["underline"].setEnabled(markup)
@@ -410,7 +427,10 @@ class MainWindow(QMainWindow):
         self.queue_thumbnail(0,self.token,self.session.revision)
 
     def submit_page_operation(self,operation,pages,target,status,selected,selected_pages=None):
-        if not self.session or self.busy or not self.session.access.can_reorganize:
+        content_operations={"crop","page_number","text_watermark","image_watermark"}
+        allowed=(self.session.access.can_edit if self.session and operation in content_operations
+            else self.session.access.can_reorganize if self.session else False)
+        if not self.session or self.busy or not allowed:
             return
         self.canvas.cancel_inline_editor()
         self.canvas.cancel_note_insertion()
@@ -502,6 +522,42 @@ class MainWindow(QMainWindow):
         current=first+pages.index(self.page) if self.page in pages else first
         self.submit_page_operation("duplicate",pages,None,
             f"正在複製 {len(pages)} 頁…",current,copies)
+
+    def show_crop_dialog(self):
+        pages=self.selected_page_indices()
+        if not pages:
+            return
+        dialog=CropPagesDialog(len(pages),self)
+        if dialog.exec():
+            self.apply_page_crop(dialog.margins())
+
+    def apply_page_crop(self,margins):
+        pages=self.selected_page_indices()
+        if not pages:
+            return
+        self.submit_page_operation("crop",pages,margins,
+            f"正在裁切 {len(pages)} 頁…",self.page,pages)
+
+    def show_page_decoration_dialog(self):
+        pages=self.selected_page_indices()
+        if not pages:
+            return
+        dialog=PageDecorationDialog(len(pages),self)
+        if dialog.exec():
+            operation,options=dialog.selection()
+            self.apply_page_decoration(operation,options)
+
+    def apply_page_decoration(self,operation,options):
+        pages=self.selected_page_indices()
+        if not pages or operation not in ("page_number","text_watermark","image_watermark"):
+            return
+        target=dict(options)
+        if operation in ("page_number","text_watermark"):
+            target["font_path"]=str(default_font())
+        labels={"page_number":"頁碼","text_watermark":"文字浮水印",
+            "image_watermark":"圖片浮水印"}
+        self.submit_page_operation(operation,pages,target,
+            f"正在加入{labels[operation]}至 {len(pages)} 頁…",self.page,pages)
 
     def change_zoom(self,text):
         self.scale=float(text.rstrip("%"))/100

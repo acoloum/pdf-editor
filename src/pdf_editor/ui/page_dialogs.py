@@ -2,7 +2,10 @@ from pathlib import Path
 import pymupdf
 from PySide6.QtCore import Qt,QSize
 from PySide6.QtGui import QIcon,QPixmap
-from PySide6.QtWidgets import QDialog,QVBoxLayout,QHBoxLayout,QPushButton,QLabel,QListWidget,QListWidgetItem,QAbstractItemView,QFileDialog,QTextEdit,QSpinBox,QCheckBox,QMessageBox,QInputDialog,QLineEdit
+from PySide6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QPushButton,QLabel,
+    QListWidget,QListWidgetItem,QAbstractItemView,QFileDialog,QTextEdit,QSpinBox,
+    QDoubleSpinBox,QCheckBox,QMessageBox,QInputDialog,QLineEdit,QFormLayout,
+    QComboBox,QTabWidget,QWidget)
 from pdf_editor.engine.inspection import unlock_pdf
 from pdf_editor.engine.render import thumbnail
 from pdf_editor.pages import parse_group,fixed_groups
@@ -126,3 +129,179 @@ class SplitDialog(QDialog):
         if self.show_preview() and self.confirm.isChecked():
             self.accept()
 
+
+class CropPagesDialog(QDialog):
+    def __init__(self,page_count,parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("裁切選取頁面")
+        self.resize(390,300)
+        layout=QVBoxLayout(self)
+        layout.addWidget(QLabel(f"將相同裁切邊距套用到 {page_count} 個選取頁面。單位為 PDF 點。"))
+        form=QFormLayout()
+        self.values=[]
+        for label in ("左側","上方","右側","下方"):
+            value=QDoubleSpinBox()
+            value.setRange(0,10000)
+            value.setDecimals(2)
+            value.setSuffix(" 點")
+            form.addRow(label,value)
+            self.values.append(value)
+        layout.addLayout(form)
+        hint=QLabel("裁切只改變可見頁面範圍，可使用 Ctrl+Z 復原。")
+        hint.setObjectName("hint")
+        layout.addWidget(hint)
+        buttons=QHBoxLayout()
+        cancel=QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        apply=QPushButton("套用裁切")
+        apply.setObjectName("primary")
+        apply.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(apply)
+        layout.addLayout(buttons)
+
+    def margins(self):
+        return tuple(value.value() for value in self.values)
+
+
+class PageDecorationDialog(QDialog):
+    def __init__(self,page_count,parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("頁碼與浮水印")
+        self.resize(480,430)
+        layout=QVBoxLayout(self)
+        layout.addWidget(QLabel(f"設定將套用到 {page_count} 個選取頁面，並可使用 Ctrl+Z 復原。"))
+        self.tabs=QTabWidget()
+        self.tabs.addTab(self._page_number_tab(),"頁碼")
+        self.tabs.addTab(self._text_watermark_tab(),"文字浮水印")
+        self.tabs.addTab(self._image_watermark_tab(),"圖片浮水印")
+        layout.addWidget(self.tabs)
+        buttons=QHBoxLayout()
+        cancel=QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        apply=QPushButton("套用到選取頁面")
+        apply.setObjectName("primary")
+        apply.clicked.connect(self.finish)
+        buttons.addWidget(cancel)
+        buttons.addWidget(apply)
+        layout.addLayout(buttons)
+
+    def _page_number_tab(self):
+        tab=QWidget()
+        form=QFormLayout(tab)
+        self.number_start=QSpinBox()
+        self.number_start.setRange(-999999,999999)
+        self.number_start.setValue(1)
+        self.number_prefix=QLineEdit()
+        self.number_suffix=QLineEdit()
+        self.number_position=QComboBox()
+        for label,value in (("頁尾靠左","bottom_left"),("頁尾置中","bottom_center"),
+                ("頁尾靠右","bottom_right"),("頁首靠左","top_left"),
+                ("頁首置中","top_center"),("頁首靠右","top_right")):
+            self.number_position.addItem(label,value)
+        self.number_position.setCurrentIndex(1)
+        self.number_size=QDoubleSpinBox()
+        self.number_size.setRange(4,72)
+        self.number_size.setValue(10)
+        self.number_size.setSuffix(" 點")
+        form.addRow("起始號碼",self.number_start)
+        form.addRow("前置文字",self.number_prefix)
+        form.addRow("後置文字",self.number_suffix)
+        form.addRow("位置",self.number_position)
+        form.addRow("字級",self.number_size)
+        return tab
+
+    def _text_watermark_tab(self):
+        tab=QWidget()
+        form=QFormLayout(tab)
+        self.watermark_text=QLineEdit("機密")
+        self.watermark_size=QDoubleSpinBox()
+        self.watermark_size.setRange(8,200)
+        self.watermark_size.setValue(48)
+        self.watermark_size.setSuffix(" 點")
+        self.watermark_opacity=QSpinBox()
+        self.watermark_opacity.setRange(1,100)
+        self.watermark_opacity.setValue(20)
+        self.watermark_opacity.setSuffix(" %")
+        self.watermark_angle=QSpinBox()
+        self.watermark_angle.setRange(-180,180)
+        self.watermark_angle.setValue(-45)
+        self.watermark_angle.setSuffix("°")
+        form.addRow("文字",self.watermark_text)
+        form.addRow("字級",self.watermark_size)
+        form.addRow("不透明度",self.watermark_opacity)
+        form.addRow("旋轉角度",self.watermark_angle)
+        return tab
+
+    def _image_watermark_tab(self):
+        tab=QWidget()
+        form=QFormLayout(tab)
+        row=QWidget()
+        row_layout=QHBoxLayout(row)
+        row_layout.setContentsMargins(0,0,0,0)
+        self.image_path=QLineEdit()
+        self.image_path.setReadOnly(True)
+        choose=QPushButton("選擇圖片")
+        choose.clicked.connect(self.choose_image)
+        row_layout.addWidget(self.image_path)
+        row_layout.addWidget(choose)
+        self.image_width=QSpinBox()
+        self.image_width.setRange(1,95)
+        self.image_width.setValue(40)
+        self.image_width.setSuffix(" %")
+        self.image_opacity=QSpinBox()
+        self.image_opacity.setRange(1,100)
+        self.image_opacity.setValue(25)
+        self.image_opacity.setSuffix(" %")
+        self.image_angle=QSpinBox()
+        self.image_angle.setRange(-180,180)
+        self.image_angle.setValue(0)
+        self.image_angle.setSuffix("°")
+        form.addRow("圖片",row)
+        form.addRow("頁面寬度占比",self.image_width)
+        form.addRow("不透明度",self.image_opacity)
+        form.addRow("旋轉角度",self.image_angle)
+        return tab
+
+    def choose_image(self):
+        path,_=QFileDialog.getOpenFileName(self,"選擇浮水印圖片","",
+            "圖片 (*.png *.jpg *.jpeg)")
+        if path:
+            self.image_path.setText(path)
+
+    def selection(self):
+        index=self.tabs.currentIndex()
+        if index==0:
+            return "page_number",{
+                "start":self.number_start.value(),
+                "prefix":self.number_prefix.text(),
+                "suffix":self.number_suffix.text(),
+                "position":self.number_position.currentData(),
+                "font_size":self.number_size.value(),
+            }
+        if index==1:
+            text=self.watermark_text.text().strip()
+            if not text:
+                raise EditorError("WATERMARK","請輸入浮水印文字。")
+            return "text_watermark",{
+                "text":text,
+                "font_size":self.watermark_size.value(),
+                "opacity":self.watermark_opacity.value()/100,
+                "angle":self.watermark_angle.value(),
+            }
+        path=self.image_path.text()
+        if not path:
+            raise EditorError("IMAGE","請選擇浮水印圖片。")
+        return "image_watermark",{
+            "image_path":path,
+            "width_percent":self.image_width.value(),
+            "opacity":self.image_opacity.value()/100,
+            "angle":self.image_angle.value(),
+        }
+
+    def finish(self):
+        try:
+            self.selection()
+            self.accept()
+        except EditorError as exc:
+            QMessageBox.warning(self,"設定不完整",str(exc))

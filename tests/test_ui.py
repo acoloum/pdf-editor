@@ -496,9 +496,11 @@ def test_window_page_menu_exposes_management_actions(qtbot):
     assert window.page_menu_button.text() == "頁面操作"
     assert [window.actions[name].text() for name in (
         "page_up", "page_down", "rotate_left", "rotate_right", "duplicate_page",
-        "delete_page"
+        "crop_page", "delete_page"
     )] == ["選取頁面上移", "選取頁面下移", "選取頁面向左旋轉",
-        "選取頁面向右旋轉", "複製選取頁面", "刪除選取頁面"]
+        "選取頁面向右旋轉", "複製選取頁面", "裁切選取頁面…",
+        "刪除選取頁面"]
+    assert window.actions["page_marks"].text()=="頁碼／浮水印"
 
 
 def test_thumbnail_list_supports_extended_selection(qtbot,multi_page_path):
@@ -654,6 +656,51 @@ def test_window_duplicates_selected_pages_and_can_undo(qtbot,multi_page_path):
         window.history_step(False)
         qtbot.waitUntil(lambda:window.page_count==3,timeout=30000)
         assert _document_page_texts(window.session.pdf)==["PAGE 1","PAGE 2","PAGE 3"]
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_crops_selected_pages_and_preserves_selection(qtbot,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(0,2),2)
+
+        window.apply_page_crop((10,20,30,40))
+
+        qtbot.waitUntil(lambda:not window.busy and window.session.dirty,timeout=30000)
+        with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
+            assert (doc[0].cropbox.width,doc[0].cropbox.height)==pytest.approx((260,140))
+            assert (doc[1].cropbox.width,doc[1].cropbox.height)==pytest.approx((300,200))
+            assert (doc[2].cropbox.width,doc[2].cropbox.height)==pytest.approx((260,140))
+        assert window.selected_page_indices()==(0,2)
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_adds_page_numbers_to_selected_pages(qtbot,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(0,2),2)
+
+        window.apply_page_decoration("page_number",{
+            "start":7,"prefix":"頁碼 ","suffix":"","position":"bottom_center",
+            "font_size":10})
+
+        qtbot.waitUntil(lambda:not window.busy and window.session.dirty,timeout=30000)
+        with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
+            texts=[page.get_text().replace("\xa0"," ") for page in doc]
+        assert "頁碼 7" in texts[0]
+        assert "頁碼" not in texts[1]
+        assert "頁碼 8" in texts[2]
+        assert window.selected_page_indices()==(0,2)
     finally:
         window.session.saved_fingerprint=window.session.history.current[2]
         window.close()
