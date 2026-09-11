@@ -11,7 +11,7 @@ from pdf_editor.document.save import write_pdf,publish_batch
 from pdf_editor.engine.render import render_page,thumbnail
 from pdf_editor.engine.text import replace_text, insert_text, find_table_cell
 from pdf_editor.engine.overlay import flatten_overlays
-from pdf_editor.engine.fonts import default_font,embedded_font
+from pdf_editor.engine.fonts import default_font,embedded_font,checked_font
 from pdf_editor.model import TextReplacement,TextInsertion,Overlay
 from pdf_editor.errors import EditorError
 from pdf_editor.workers import Jobs
@@ -112,6 +112,8 @@ class MainWindow(QMainWindow):
         self.canvas.run_delete_requested.connect(self.delete_run)
         self.canvas.text_insertion_requested.connect(self.begin_text_insertion)
         self.canvas.text_insertion_cancelled.connect(self.cancel_text_insertion)
+        self.canvas.inline_text_committed.connect(self.commit_inline_text)
+        self.canvas.inline_text_cancelled.connect(self.cancel_inline_text)
         self.canvas.layer_selected.connect(self.select_layer)
         self.canvas.layer_moved.connect(self.move_layer)
         splitter.addWidget(self.canvas)
@@ -197,6 +199,7 @@ class MainWindow(QMainWindow):
             session=DocumentSession.open(Path(path),password)
         if self.session:
             self.session.close()
+        self.canvas.cancel_inline_editor()
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.session=session
@@ -241,6 +244,7 @@ class MainWindow(QMainWindow):
         if not self.session or not 0<=page<self.page_count or page==self.page:
             return
         self.page=page
+        self.canvas.cancel_inline_editor()
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.run=None
@@ -280,6 +284,7 @@ class MainWindow(QMainWindow):
     def select_run(self,run):
         if not self.session or not self.session.access.can_edit or self.preview:
             return
+        self.canvas.cancel_inline_editor()
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.run=run
@@ -287,7 +292,7 @@ class MainWindow(QMainWindow):
         self.panels.setCurrentWidget(self.text_panel)
         self.text_panel.set_run(run)
         self.text_panel.font_path=str(default_font())
-        self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（預覽確認）")
+        self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
         original=embedded_font(self.session.pdf,self.page,run,self.session.history.root)
         if original:
             self.text_panel.font_path=str(original)
@@ -295,7 +300,53 @@ class MainWindow(QMainWindow):
         cell=find_table_cell(self.session.pdf,self.page,run.rect)
         if cell:
             self.text_panel.set_rect(cell)
+            self.text_panel.alignment.setCurrentIndex(2)
+        self.text_panel.info.setText("請直接在頁面文字框輸入；Enter 或點到別處套用，Esc 取消。")
+        self.canvas.begin_inline_text(self.text_panel.rect(),run.text,run,run.size)
         self.refresh_actions()
+
+    def commit_inline_text(self,payload):
+        if not self.session or self.busy:
+            return
+        run,text,rect=payload
+        p=self.text_panel
+        p.text.setPlainText(text)
+        target_rect=tuple(rect or p.rect())
+        font_path=p.font_path
+        if text:
+            try:
+                checked_font(font_path,text)
+            except EditorError as exc:
+                if exc.code!="FONT_MISSING_GLYPH":
+                    self.error((exc.code,str(exc),()))
+                    return
+                font_path=str(default_font())
+                p.font_path=font_path
+                p.font_label.setText("已自動改用內建中文字型，以完整顯示新文字。")
+        if run is None:
+            if not text:
+                self.run=None
+                self.insertion_rect=None
+                self.text_panel.setEnabled(False)
+                self.refresh_actions()
+                self.request_render()
+                self.statusBar().showMessage("已取消新增文字。")
+                return
+            request=TextInsertion(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
+                text,target_rect,font_path,p.size.value(),p.color,p.alignment.currentData())
+            self.apply_text_immediately(request,"正在新增文字…",insert_text)
+            return
+        request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
+            run.id,text,target_rect,font_path,p.size.value(),p.color,p.alignment.currentData())
+        self.apply_text_immediately(request,"正在更新文字…")
+
+    def cancel_inline_text(self):
+        self.run=None
+        self.insertion_rect=None
+        self.text_panel.setEnabled(False)
+        self.refresh_actions()
+        self.request_render()
+        self.statusBar().showMessage("已取消文字編輯。")
 
     def preview_from_panel(self):
         if not self.session or self.busy:
@@ -317,6 +368,7 @@ class MainWindow(QMainWindow):
     def move_run(self,run):
         if not self.session or not run.editable or self.busy or self.preview:
             return
+        self.canvas.cancel_inline_editor()
         self.run=run
         x0,y0,x1,y1=run.rect
         self.text_panel.set_rect((x0,y0,x1+10,y1+run.size*0.5))
@@ -339,6 +391,7 @@ class MainWindow(QMainWindow):
         if not self.session or self.busy:
             self.actions["add_text"].setChecked(False)
             return
+        self.canvas.cancel_inline_editor()
         self.run=None
         self.insertion_rect=None
         self.canvas.start_text_insertion()
@@ -367,13 +420,15 @@ class MainWindow(QMainWindow):
         self.insertion_rect=rect
         self.panels.setCurrentWidget(self.text_panel)
         self.text_panel.font_path=str(default_font())
-        self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（預覽確認）")
+        self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
         self.text_panel.set_insertion(rect,centered=cell is not None)
+        self.canvas.begin_inline_text(rect,"",None,self.text_panel.size.value())
         self.refresh_actions()
 
     def delete_run(self,run):
         if not self.session or not run.editable or self.busy or self.preview:
             return
+        self.canvas.cancel_inline_editor()
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.run=run
@@ -397,13 +452,14 @@ class MainWindow(QMainWindow):
             self.run=None
             self.insertion_rect=insertion_rect
             self.text_panel.font_path=str(default_font())
-            self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（預覽確認）")
+            self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
             self.text_panel.set_insertion(insertion_rect,run.size,cell is not None)
             self.refresh_actions()
             self.request_render()
+            self.canvas.begin_inline_text(insertion_rect,"",None,run.size)
         self.jobs.submit(replace_text,(self.session.pdf,request),done,self.error)
 
-    def apply_text_immediately(self,request,status):
+    def apply_text_immediately(self,request,status,operation=replace_text):
         if self.busy:
             return
         revision=self.session.revision
@@ -423,7 +479,7 @@ class MainWindow(QMainWindow):
             self.refresh_actions()
             self.request_render()
             self.queue_thumbnail(0,self.token,self.session.revision)
-        self.jobs.submit(replace_text,(self.session.pdf,request),done,self.error)
+        self.jobs.submit(operation,(self.session.pdf,request),done,self.error)
 
     def preview_replacement(self,request,operation=replace_text):
         if self.busy:
@@ -449,6 +505,7 @@ class MainWindow(QMainWindow):
 
     def apply_preview(self):
         if self.preview and self.preview[0]==self.session.revision:
+            self.canvas.cancel_inline_editor()
             self.session.apply_pdf(self.preview[1])
             self.preview=None
             self.canvas.cancel_text_insertion()
@@ -464,6 +521,7 @@ class MainWindow(QMainWindow):
         if not self.session or self.busy:
             return
         self.preview=None
+        self.canvas.cancel_inline_editor()
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.insertion_rect=None
@@ -540,6 +598,7 @@ class MainWindow(QMainWindow):
             self.error((getattr(exc,"code","IMAGE"),str(exc),()))
 
     def select_layer(self,id):
+        self.canvas.cancel_inline_editor()
         self.layer_id=id
         layer=next((o for o in self.session.overlays if o.id==id),None)
         if layer:
@@ -599,6 +658,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("輸出完成："+(result if isinstance(result,str) else f"{len(result)} 份 PDF"))
 
     def closeEvent(self,event):
+        self.canvas.cancel_inline_editor()
         if not self.confirm_leave():
             event.ignore()
             return

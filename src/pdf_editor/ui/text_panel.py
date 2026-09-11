@@ -20,6 +20,7 @@ class TextPanel(QWidget):
         self.text=QTextEdit()
         self.text.setMaximumHeight(140)
         layout.addWidget(self.text)
+        self.text.hide()
         form=QFormLayout()
         self.size=QDoubleSpinBox()
         self.size.setRange(1,300)
@@ -55,13 +56,16 @@ class TextPanel(QWidget):
         self.preview_button.setObjectName("primary")
         self.preview_button.clicked.connect(self.preview_requested)
         layout.addWidget(self.preview_button)
+        self.preview_button.hide()
         self.apply_button=QPushButton("套用預覽")
         self.apply_button.clicked.connect(self.apply_requested)
         self.apply_button.setEnabled(False)
         layout.addWidget(self.apply_button)
-        cancel=QPushButton("取消預覽")
-        cancel.clicked.connect(self.cancel_requested)
-        layout.addWidget(cancel)
+        self.apply_button.hide()
+        self.cancel_button=QPushButton("取消預覽")
+        self.cancel_button.clicked.connect(self.cancel_requested)
+        layout.addWidget(self.cancel_button)
+        self.cancel_button.hide()
         hint=QLabel("單位：PDF 點（72 點 = 1 英吋）\n文字過長時請擴大文字框或減小字級。")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -77,7 +81,7 @@ class TextPanel(QWidget):
 
     def use_default_font(self):
         self.font_path=str(default_font())
-        self.font_label.setText("替代字型：Noto Sans CJK TC（預覽確認）")
+        self.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
 
     def choose_color(self):
         c=QColorDialog.getColor(QColor.fromRgbF(*self.color),self)
@@ -86,7 +90,7 @@ class TextPanel(QWidget):
 
     def set_run(self,run):
         self.setEnabled(run.editable)
-        self.info.setText("原字型："+run.font_name if run.editable else run.reason)
+        self.info.setText("請直接在頁面文字框輸入。" if run.editable else run.reason)
         self.text.setPlainText(run.text)
         self.size.setValue(run.size)
         self.color=run.color
@@ -96,7 +100,7 @@ class TextPanel(QWidget):
 
     def set_insertion(self, rect, size=11, centered=False):
         self.setEnabled(True)
-        self.info.setText("輸入要新增的文字，再預覽並套用。")
+        self.info.setText("請直接在頁面文字框輸入。")
         self.text.clear()
         self.size.setValue(size)
         self.color=(0,0,0)

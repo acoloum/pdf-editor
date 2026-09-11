@@ -239,11 +239,11 @@ def test_window_can_add_text_immediately_after_deletion(qtbot, source_path):
         qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
         assert window.insertion_rect is not None
         assert window.text_panel.isEnabled()
-        window.text_panel.text.setPlainText("重新新增")
         window.text_panel.alignment.setCurrentIndex(2)
-        window.preview_from_panel()
-        qtbot.waitUntil(lambda: window.preview is not None, timeout=30000)
-        window.apply_preview()
+        assert window.canvas.inline_editor is not None
+        window.canvas.inline_editor.setText("重新新增")
+        qtbot.keyClick(window.canvas.inline_editor, Qt.Key.Key_Return)
+        qtbot.waitUntil(lambda: not window.busy, timeout=30000)
         assert "重新新增" in pymupdf.open(stream=window.session.pdf)[0].get_text()
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
@@ -270,10 +270,10 @@ def test_window_toolbar_add_text_completes_insertion(qtbot, source_path):
         assert not window.actions["add_text"].isChecked()
         assert not window.canvas.insertion_hint.isVisible()
 
-        window.text_panel.text.setPlainText("新增內容")
-        window.preview_from_panel()
-        qtbot.waitUntil(lambda: window.preview is not None, timeout=30000)
-        window.apply_preview()
+        assert window.canvas.inline_editor is not None
+        window.canvas.inline_editor.setText("新增內容")
+        qtbot.keyClick(window.canvas.inline_editor, Qt.Key.Key_Return)
+        qtbot.waitUntil(lambda: not window.busy, timeout=30000)
         assert "新增內容" in pymupdf.open(stream=window.session.pdf)[0].get_text()
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
@@ -318,5 +318,109 @@ def test_window_add_text_explains_active_preview(qtbot, source_path, monkeypatch
         assert not window.actions["add_text"].isChecked()
     finally:
         window.preview = None
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+def test_window_selected_text_opens_editor_on_page(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        run = next(item for item in window.page_data["runs"] if "品質" in item.text)
+
+        window.select_run(run)
+
+        assert window.canvas.inline_editor is not None
+        assert window.canvas.inline_editor.isVisible()
+        assert window.canvas.inline_editor.text() == run.text
+        assert window.text_panel.preview_button.isHidden()
+        assert window.text_panel.apply_button.isHidden()
+        assert window.text_panel.cancel_button.isHidden()
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+def test_window_inline_edit_applies_on_enter(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        run = next(item for item in window.page_data["runs"] if "品質" in item.text)
+        window.select_run(run)
+
+        window.canvas.inline_editor.setText("即時修改")
+        qtbot.keyClick(window.canvas.inline_editor, Qt.Key.Key_Return)
+
+        qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
+        assert window.preview is None
+        assert "即時修改" in pymupdf.open(stream=window.session.pdf)[0].get_text()
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+def test_window_inline_edit_applies_when_clicking_away(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        run = next(item for item in window.page_data["runs"] if "品質" in item.text)
+        window.select_run(run)
+        window.canvas.inline_editor.setText("點外套用")
+
+        qtbot.mouseClick(window.canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+
+        qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
+        assert "點外套用" in pymupdf.open(stream=window.session.pdf)[0].get_text()
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+def test_window_inline_edit_escape_cancels(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        run = next(item for item in window.page_data["runs"] if "品質" in item.text)
+        window.select_run(run)
+        window.canvas.inline_editor.setText("不應寫入")
+
+        qtbot.keyClick(window.canvas.inline_editor, Qt.Key.Key_Escape)
+
+        qtbot.waitUntil(lambda: window.canvas.inline_editor is None, timeout=30000)
+        assert not window.session.dirty
+        assert "不應寫入" not in pymupdf.open(stream=window.session.pdf)[0].get_text()
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+def test_window_toolbar_add_text_edits_and_applies_on_page(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.resize(1100, 760)
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        window.actions["add_text"].trigger()
+        x, y = transform_point(window.page_data["matrix"], 300, 330)
+        point = window.canvas.mapFromScene(QPointF(x, y))
+        qtbot.mouseClick(window.canvas.viewport(), Qt.MouseButton.LeftButton, pos=point)
+
+        assert window.canvas.inline_editor is not None
+        window.canvas.inline_editor.setText("直接新增")
+        qtbot.keyClick(window.canvas.inline_editor, Qt.Key.Key_Return)
+
+        qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
+        assert window.preview is None
+        assert "直接新增" in pymupdf.open(stream=window.session.pdf)[0].get_text()
+    finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()

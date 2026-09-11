@@ -1,7 +1,7 @@
 from dataclasses import replace
-from PySide6.QtCore import Qt, Signal, QPointF
+from PySide6.QtCore import Qt, Signal, QPointF, QTimer
 from PySide6.QtGui import QPixmap, QPen, QColor, QTransform, QPainter, QKeyEvent
-from PySide6.QtWidgets import QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,QGraphicsItem,QLabel
+from PySide6.QtWidgets import QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,QGraphicsItem,QLabel,QLineEdit
 from pdf_editor.engine.geometry import transformed_rect, transform_point, inverse_transform
 from pdf_editor.engine.overlay import transformed_image
 
@@ -30,12 +30,49 @@ class LayerItem(QGraphicsPixmapItem):
             r=self.layer.rect
             self.canvas.layer_moved.emit(replace(self.layer,rect=(r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy)))
 
+class InlineTextEditor(QLineEdit):
+    commit_requested=Signal(str)
+    cancel_requested=Signal()
+
+    def __init__(self,text,parent=None):
+        super().__init__(text,parent)
+        self.finished=False
+
+    def commit(self):
+        if self.finished:
+            return
+        self.finished=True
+        self.commit_requested.emit(self.text())
+
+    def cancel(self):
+        if self.finished:
+            return
+        self.finished=True
+        self.cancel_requested.emit()
+
+    def keyPressEvent(self,event):
+        if event.key() in (Qt.Key.Key_Return,Qt.Key.Key_Enter):
+            self.commit()
+            event.accept()
+            return
+        if event.key()==Qt.Key.Key_Escape:
+            self.cancel()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self,event):
+        super().focusOutEvent(event)
+        QTimer.singleShot(0,self.commit)
+
 class Canvas(QGraphicsView):
     run_selected=Signal(object)
     run_moved=Signal(object)
     run_delete_requested=Signal(object)
     text_insertion_requested=Signal(object)
     text_insertion_cancelled=Signal()
+    inline_text_committed=Signal(object)
+    inline_text_cancelled=Signal()
     layer_selected=Signal(str)
     layer_moved=Signal(object)
 
@@ -53,6 +90,9 @@ class Canvas(QGraphicsView):
         self._drag_start_scene=QPointF()
         self._drag_original_rect=None
         self._text_insertion=False
+        self.inline_editor=None
+        self.inline_run=None
+        self.inline_rect=None
         self.insertion_hint=QLabel("新增文字模式：請在頁面中點選位置（Esc 取消）",self.viewport())
         self.insertion_hint.setStyleSheet(
             "background:#1f5f4a;color:white;padding:10px 16px;border-radius:6px;font-weight:600;")
@@ -88,6 +128,7 @@ class Canvas(QGraphicsView):
             item.setPos(screen[0],screen[1])
             item.setZValue(5)
             self.scene().addItem(item)
+        self._position_inline_editor()
 
     def _run_at(self, scene_pos):
         x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
@@ -124,9 +165,76 @@ class Canvas(QGraphicsView):
         x=max(12,(self.viewport().width()-self.insertion_hint.width())//2)
         self.insertion_hint.move(x,12)
 
+    def begin_inline_text(self,rect,text,run=None,size=11):
+        self.cancel_inline_editor()
+        self.inline_run=run
+        self.inline_rect=tuple(rect)
+        editor=InlineTextEditor(text,self.viewport())
+        editor.setPlaceholderText("直接輸入文字")
+        editor.setStyleSheet(
+            "background:rgba(255,255,255,235);color:#17231f;border:2px solid #24765b;"
+            "border-radius:3px;padding:2px 5px;")
+        font=editor.font()
+        font.setPointSizeF(max(6,float(size)))
+        editor.setFont(font)
+        editor.commit_requested.connect(self._commit_inline_text)
+        editor.cancel_requested.connect(self._cancel_inline_text)
+        self.inline_editor=editor
+        self._position_inline_editor()
+        editor.show()
+        editor.raise_()
+        QTimer.singleShot(0,lambda:self._focus_inline_editor(editor,text))
+
+    def _focus_inline_editor(self,editor,text):
+        if self.inline_editor is not editor:
+            return
+        editor.setFocus()
+        if text:
+            editor.selectAll()
+
+    def _position_inline_editor(self):
+        if self.inline_editor is None or self.inline_rect is None:
+            return
+        x0,y0,x1,y1=transformed_rect(self.matrix,self.inline_rect)
+        top_left=self.mapFromScene(QPointF(x0,y0))
+        bottom_right=self.mapFromScene(QPointF(x1,y1))
+        width=max(100,bottom_right.x()-top_left.x()+12)
+        height=max(30,bottom_right.y()-top_left.y()+8)
+        width=min(width,max(100,self.viewport().width()-12))
+        left=max(6,min(top_left.x(),self.viewport().width()-width-6))
+        top=max(6,min(top_left.y(),self.viewport().height()-height-6))
+        self.inline_editor.setGeometry(left,top,width,height)
+
+    def _finish_inline_editor(self):
+        editor=self.inline_editor
+        self.inline_editor=None
+        self.inline_run=None
+        self.inline_rect=None
+        if editor is not None:
+            editor.finished=True
+            editor.hide()
+            editor.deleteLater()
+
+    def _commit_inline_text(self,text):
+        payload=(self.inline_run,text,self.inline_rect)
+        self._finish_inline_editor()
+        self.inline_text_committed.emit(payload)
+
+    def _cancel_inline_text(self):
+        self._finish_inline_editor()
+        self.inline_text_cancelled.emit()
+
+    def cancel_inline_editor(self):
+        self._finish_inline_editor()
+
     def resizeEvent(self,event):
         super().resizeEvent(event)
         self._place_insertion_hint()
+        self._position_inline_editor()
+
+    def scrollContentsBy(self,dx,dy):
+        super().scrollContentsBy(dx,dy)
+        self._position_inline_editor()
 
     def _show_highlight(self, rect):
         if self.highlight:
@@ -137,6 +245,10 @@ class Canvas(QGraphicsView):
         self.highlight.setZValue(2)
 
     def mousePressEvent(self,event):
+        if self.inline_editor is not None:
+            self.inline_editor.commit()
+            event.accept()
+            return
         scene_pos=self.mapToScene(event.position().toPoint())
         item=self.scene().itemAt(scene_pos,QTransform())
         self.setFocus()
