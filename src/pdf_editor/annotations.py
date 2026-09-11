@@ -3,12 +3,60 @@ import math
 import pymupdf
 
 from pdf_editor.errors import EditorError
+from pdf_editor.model import AnnotationInfo
 
 
 def _page(doc,page):
     if not 0<=page<doc.page_count:
         raise EditorError("RANGE","頁碼超出文件範圍。")
     return doc[page]
+
+
+def _annotation(page,xref):
+    if not isinstance(xref,int) or xref<=0:
+        raise EditorError("ANNOTATION","註解識別碼無效。")
+    for item in page.annots() or ():
+        if item.xref==xref:
+            return item
+    raise EditorError("ANNOTATION","找不到選取的註解，請重新選取。")
+
+
+def _checked_color(color):
+    if len(color)!=3 or not all(math.isfinite(value) and 0<=value<=1 for value in color):
+        raise EditorError("COLOR","註解顏色無效。")
+    return tuple(float(value) for value in color)
+
+
+def list_annotations(pdf,page):
+    with pymupdf.open(stream=pdf,filetype="pdf") as doc:
+        selected=_page(doc,page)
+        result=[]
+        for item in selected.annots() or ():
+            stroke=item.colors.get("stroke")
+            color=tuple(float(value) for value in stroke) if stroke else None
+            result.append(AnnotationInfo(item.xref,item.type[1],tuple(item.rect),color,
+                item.info.get("content","") or ""))
+        return tuple(result)
+
+
+def delete_annotation(pdf,page,xref):
+    with pymupdf.open(stream=pdf,filetype="pdf") as doc:
+        selected=_page(doc,page)
+        item=_annotation(selected,xref)
+        selected.delete_annot(item)
+        return doc.tobytes(garbage=4,deflate=True)
+
+
+def set_highlight_color(pdf,page,xref,color):
+    checked=_checked_color(color)
+    with pymupdf.open(stream=pdf,filetype="pdf") as doc:
+        selected=_page(doc,page)
+        item=_annotation(selected,xref)
+        if item.type[0]!=pymupdf.PDF_ANNOT_HIGHLIGHT:
+            raise EditorError("ANNOTATION_TYPE","只有螢光標記可以變更顏色。")
+        item.set_colors(stroke=checked)
+        item.update()
+        return doc.tobytes(garbage=4,deflate=True)
 
 
 def mark_text(pdf,page,rect,kind):

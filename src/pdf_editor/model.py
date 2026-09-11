@@ -50,3 +50,11 @@ class Overlay:
     asset_path: str
     rect: Rect
     angle: float = 0
+
+@dataclass(frozen=True)
+class AnnotationInfo:
+    xref: int
+    kind: str
+    rect: Rect
+    color: Color | None = None
+    content: str = ""

@@ -1,5 +1,6 @@
 import pymupdf
 from pdf_editor.engine.text import extract_runs
+from pdf_editor.annotations import list_annotations
 
 def render_page(pdf, page, scale, pixel_ratio=1.0):
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
@@ -11,7 +12,7 @@ def render_page(pdf, page, scale, pixel_ratio=1.0):
             "pixel_ratio":pixel_ratio,
             "display_size":(pix.width/pixel_ratio,pix.height/pixel_ratio),
             "rotation":p.rotation, "bounds": (0,0,p.cropbox.width,p.cropbox.height),
-            "runs":extract_runs(pdf,page), "page":page}
+            "runs":extract_runs(pdf,page), "annotations":list_annotations(pdf,page), "page":page}
 
 def thumbnail(pdf, page):
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:

@@ -48,3 +48,43 @@ def test_text_note_rejects_empty_content(pdf_bytes):
         _module().add_text_note(pdf_bytes,0,(250,300),"  ")
 
     assert error.value.code=="NOTE_EMPTY"
+
+
+def test_list_annotations_reports_native_annotation(pdf_bytes):
+    marked=_module().mark_text(pdf_bytes,0,(40,60,210,90),"highlight")
+
+    items=_module().list_annotations(marked,0)
+
+    assert len(items)==1
+    assert items[0].xref>0
+    assert items[0].kind=="Highlight"
+    assert items[0].color==pytest.approx((1.0,0.84,0.18),abs=0.01)
+
+
+def test_delete_annotation_removes_selected_xref(pdf_bytes):
+    marked=_module().mark_text(pdf_bytes,0,(40,60,210,90),"highlight")
+    xref=_module().list_annotations(marked,0)[0].xref
+
+    output=_module().delete_annotation(marked,0,xref)
+
+    assert _module().list_annotations(output,0)==()
+
+
+def test_change_highlight_color_updates_native_annotation(pdf_bytes):
+    marked=_module().mark_text(pdf_bytes,0,(40,60,210,90),"highlight")
+    xref=_module().list_annotations(marked,0)[0].xref
+
+    output=_module().set_highlight_color(marked,0,xref,(0.30,0.78,0.48))
+
+    assert _module().list_annotations(output,0)[0].color==pytest.approx(
+        (0.30,0.78,0.48),abs=0.01)
+
+
+def test_change_color_rejects_non_highlight_annotation(pdf_bytes):
+    noted=_module().add_text_note(pdf_bytes,0,(250,300),"請重新確認")
+    xref=_module().list_annotations(noted,0)[0].xref
+
+    with pytest.raises(EditorError) as error:
+        _module().set_highlight_color(noted,0,xref,(1.0,0.0,0.0))
+
+    assert error.value.code=="ANNOTATION_TYPE"
