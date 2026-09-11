@@ -330,7 +330,13 @@ class MainWindow(QMainWindow):
         if not checked:
             self.cancel_text_insertion()
             return
-        if not self.session or self.busy or self.preview:
+        if self.preview:
+            self.actions["add_text"].setChecked(False)
+            message="請先按「套用預覽」或「取消預覽」，再新增文字。"
+            QMessageBox.information(self,"尚有文字預覽",message)
+            self.statusBar().showMessage(message)
+            return
+        if not self.session or self.busy:
             self.actions["add_text"].setChecked(False)
             return
         self.run=None

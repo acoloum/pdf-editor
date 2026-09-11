@@ -297,3 +297,26 @@ def test_window_escape_cancels_visible_text_insertion_mode(qtbot, source_path):
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
+
+def test_window_add_text_explains_active_preview(qtbot, source_path, monkeypatch):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    messages = []
+    monkeypatch.setattr("pdf_editor.ui.main_window.QMessageBox.information",
+        lambda parent, title, message: messages.append((title, message)))
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        window.preview = (window.session.revision, window.session.pdf)
+
+        window.actions["add_text"].trigger()
+
+        assert messages
+        assert "套用預覽" in messages[0][1]
+        assert "取消預覽" in messages[0][1]
+        assert not window.canvas._text_insertion
+        assert not window.actions["add_text"].isChecked()
+    finally:
+        window.preview = None
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
