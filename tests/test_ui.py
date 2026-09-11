@@ -88,6 +88,8 @@ def test_high_resolution_render_keeps_display_geometry(pdf_bytes):
 
 
 def test_canvas_displays_high_resolution_page_at_logical_size(qtbot, pdf_bytes):
+    from PySide6.QtGui import QPainter
+
     canvas = Canvas()
     qtbot.addWidget(canvas)
     data = render_page(pdf_bytes, 0, 1.25, pixel_ratio=2.0)
@@ -98,14 +100,15 @@ def test_canvas_displays_high_resolution_page_at_logical_size(qtbot, pdf_bytes):
     assert page_item.pixmap().devicePixelRatio() == 2.0
     assert canvas.scene().sceneRect().width() == pytest.approx(625)
     assert canvas.scene().sceneRect().height() == pytest.approx(500)
+    assert canvas.renderHints() & QPainter.RenderHint.SmoothPixmapTransform
 
 
-def test_window_requests_high_resolution_page(qtbot, source_path):
+def test_window_renders_at_native_device_pixel_ratio(qtbot, source_path):
     window = MainWindow()
     qtbot.addWidget(window)
     window.show()
     window.open_document(source_path)
     qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
 
-    assert window.page_data["pixel_ratio"] >= 2.0
+    assert window.page_data["pixel_ratio"] == pytest.approx(window.canvas.devicePixelRatioF())
     window.close()

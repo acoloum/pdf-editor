@@ -259,7 +259,7 @@ class MainWindow(QMainWindow):
             status=self.session.access.reason or ("預覽中，尚未套用" if self.preview else
                 "有未儲存變更" if self.session.dirty else "可編輯")
             self.statusBar().showMessage(f"第 {self.page+1} / {self.page_count} 頁  ·  {status}")
-        pixel_ratio=max(2.0,float(self.canvas.devicePixelRatioF()))
+        pixel_ratio=float(self.canvas.devicePixelRatioF())
         self.jobs.submit(render_page,(data,self.page,self.scale,pixel_ratio),done,self.error)
 
     def select_run(self,run):

@@ -1,6 +1,6 @@
 from dataclasses import replace
 from PySide6.QtCore import Qt, Signal, QPointF
-from PySide6.QtGui import QPixmap, QPen, QColor, QTransform
+from PySide6.QtGui import QPixmap, QPen, QColor, QTransform, QPainter
 from PySide6.QtWidgets import QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,QGraphicsItem
 from pdf_editor.engine.geometry import transformed_rect, transform_point, inverse_transform
 from pdf_editor.engine.overlay import transformed_image
@@ -38,6 +38,7 @@ class Canvas(QGraphicsView):
         super().__init__()
         self.setScene(QGraphicsScene(self))
         self.setBackgroundBrush(QColor("#d9dfdb"))
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform,True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.matrix=(1,0,0,1,0,0)
         self.runs=[]
