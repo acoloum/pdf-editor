@@ -49,3 +49,37 @@ def split_pages(pdf, groups):
         raise EditorError("RANGE", "頁面群組為空或重複。")
     return tuple(merge_pages((pdf,), tuple((0, p) for p in group)) for group in groups)
 
+
+def _validate_page(doc, page):
+    if not 0 <= page < doc.page_count:
+        raise EditorError("RANGE", "頁碼超出文件範圍。")
+
+
+def move_page(pdf, page, target):
+    with pymupdf.open(stream=pdf, filetype="pdf") as doc:
+        _validate_page(doc, page)
+        _validate_page(doc, target)
+        order=list(range(doc.page_count))
+        selected=order.pop(page)
+        order.insert(target,selected)
+        doc.select(order)
+        return doc.tobytes(garbage=4, deflate=True)
+
+
+def rotate_page(pdf, page, degrees):
+    if degrees not in (-90, 90):
+        raise EditorError("ROTATION", "頁面只能向左或向右旋轉 90 度。")
+    with pymupdf.open(stream=pdf, filetype="pdf") as doc:
+        _validate_page(doc, page)
+        selected=doc[page]
+        selected.set_rotation((selected.rotation + degrees) % 360)
+        return doc.tobytes(garbage=4, deflate=True)
+
+
+def delete_page(pdf, page):
+    with pymupdf.open(stream=pdf, filetype="pdf") as doc:
+        _validate_page(doc, page)
+        if doc.page_count == 1:
+            raise EditorError("LAST_PAGE", "文件至少必須保留一頁。")
+        doc.delete_page(page)
+        return doc.tobytes(garbage=4, deflate=True)

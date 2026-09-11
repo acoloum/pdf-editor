@@ -2,6 +2,7 @@ import pytest
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import save_as
 from pdf_editor.errors import EditorError
+from pdf_editor.model import Overlay
 
 def test_save_undo_dirty(source_path, tmp_path, pdf_bytes):
     with DocumentSession.open(source_path) as session:
@@ -51,3 +52,15 @@ def test_history_limit(source_path):
             count += 1
         assert count == 30
 
+
+def test_apply_state_can_flatten_overlays_and_undo(source_path):
+    with DocumentSession.open(source_path) as session:
+        layer = Overlay("stamp", 0, "stamp.png", (10, 10, 30, 30), 0)
+        session.set_overlays((layer,))
+        before_pdf = session.pdf
+
+        session.apply_state(before_pdf, ())
+
+        assert session.overlays == ()
+        session.undo()
+        assert session.overlays == (layer,)

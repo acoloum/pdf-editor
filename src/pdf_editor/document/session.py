@@ -40,8 +40,11 @@ class DocumentSession:
             raise EditorError("READ_ONLY", self.access.reason or "文件僅供閱讀。")
 
     def apply_pdf(self, pdf):
+        self.apply_state(pdf, self.overlays)
+
+    def apply_state(self, pdf, overlays):
         self._check_edit()
-        self.history.push(pdf, self.overlays)
+        self.history.push(pdf, tuple(overlays))
         self.revision += 1
 
     def set_overlays(self, items):
@@ -67,4 +70,3 @@ class DocumentSession:
 
     def __exit__(self, *args):
         self.close()
-
