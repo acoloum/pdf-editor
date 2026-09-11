@@ -1,7 +1,8 @@
 import pytest
 import pymupdf
 from pdf_editor import pages
-from pdf_editor.pages import parse_group, fixed_groups, merge_pages, split_pages
+from pdf_editor.pages import (parse_group,fixed_groups,merge_pages,split_pages,
+    insert_pages,insert_blank_page,extract_pages)
 from pdf_editor.document.save import publish_batch
 from pdf_editor.errors import EditorError, BatchPublishError
 
@@ -147,3 +148,33 @@ def test_duplicate_pages_rejects_invalid_selection():
         pages.duplicate_pages(_three_page_pdf(),(0,3))
 
     assert error.value.code=="RANGE"
+
+
+def test_insert_pages_adds_external_document_after_target_page():
+    with pymupdf.open() as external:
+        external.new_page(width=220,height=180).insert_text((30,60),"EXTERNAL A")
+        external.new_page(width=240,height=190).insert_text((30,60),"EXTERNAL B")
+        source=external.tobytes()
+
+    inserted=insert_pages(_three_page_pdf(),source,0)
+
+    assert _page_texts(inserted)==["PAGE 1","EXTERNAL A","EXTERNAL B","PAGE 2","PAGE 3"]
+
+
+def test_insert_blank_page_matches_reference_size_and_rotation():
+    rotated=pages.rotate_page(_three_page_pdf(),1,90)
+
+    inserted=insert_blank_page(rotated,1)
+
+    with pymupdf.open(stream=inserted,filetype="pdf") as doc:
+        assert doc.page_count==4
+        assert doc[2].get_text().strip()==""
+        assert doc[2].cropbox.width==pytest.approx(doc[1].cropbox.width)
+        assert doc[2].cropbox.height==pytest.approx(doc[1].cropbox.height)
+        assert doc[2].rotation==90
+
+
+def test_extract_pages_keeps_selected_order():
+    extracted=extract_pages(_three_page_pdf(),(2,0))
+
+    assert _page_texts(extracted)==["PAGE 3","PAGE 1"]

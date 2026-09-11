@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,Q
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import write_pdf,publish_batch
 from pdf_editor.engine.render import render_page,thumbnail
+from pdf_editor.engine.inspection import unlock_pdf
 from pdf_editor.engine.text import replace_text, insert_text, find_table_cell
 from pdf_editor.engine.overlay import flatten_overlays
 from pdf_editor.engine.fonts import default_font,embedded_font,checked_font
@@ -18,7 +19,8 @@ from pdf_editor.workers import Jobs
 from pdf_editor.assets import AssetStore
 from pdf_editor.templates import HeaderFooterTemplateStore
 from pdf_editor.pages import (merge_pages,split_pages,move_pages,move_pages_to,rotate_pages,
-    delete_pages,duplicate_pages,page_order_after_move,page_order_after_drop)
+    delete_pages,duplicate_pages,page_order_after_move,page_order_after_drop,insert_pages,
+    insert_blank_page,extract_pages)
 from pdf_editor.page_decorations import (crop_pages,add_page_numbers,
     add_text_watermark,add_image_watermark,add_header_footer)
 from pdf_editor.annotations import (mark_text,add_text_note,delete_annotation,
@@ -44,6 +46,12 @@ def export_split(pdf,layers,groups,folder,source):
     targets=tuple(Path(folder)/f"拆分_{i+1:03}.pdf" for i in range(len(groups)))
     return tuple(str(p) for p in publish_batch(documents,targets,(Path(source),)))
 
+
+def export_extract(pdf,layers,pages,target,source):
+    data=flatten_overlays(pdf,layers) if layers else pdf
+    extracted=extract_pages(data,pages)
+    return str(write_pdf(extracted,Path(target),False,(Path(source),)))
+
 def edit_page_document(pdf,layers,operation,pages,target=None):
     data=flatten_overlays(pdf,layers) if layers else pdf
     if operation=="move":
@@ -56,6 +64,10 @@ def edit_page_document(pdf,layers,operation,pages,target=None):
         return delete_pages(data,pages)
     if operation=="duplicate":
         return duplicate_pages(data,pages)
+    if operation=="blank":
+        return insert_blank_page(data,pages[0])
+    if operation=="insert":
+        return insert_pages(data,target,pages[0])
     if operation=="crop":
         return crop_pages(data,pages,target)
     if operation=="page_number":
@@ -152,6 +164,9 @@ class MainWindow(QMainWindow):
             ("rotate_left","選取頁面向左旋轉",lambda:self.rotate_current_page(-90),"Ctrl+Shift+Left"),
             ("rotate_right","選取頁面向右旋轉",lambda:self.rotate_current_page(90),"Ctrl+Shift+Right"),
             ("duplicate_page","複製選取頁面",self.duplicate_selected_pages,"Ctrl+D"),
+            ("blank_page","新增空白頁",self.add_blank_page,None),
+            ("insert_pdf","插入另一份 PDF（全部頁面）…",self.insert_pdf_pages,None),
+            ("extract_pages","抽取選取頁面另存…",self.extract_selected_pages,None),
             ("direct_crop","直接拖曳裁切框",self.toggle_direct_crop,None),
             ("crop_page","精確輸入裁切邊距…",self.show_crop_dialog,None),
             ("delete_page","刪除選取頁面",self.delete_current_page,"Ctrl+Delete")]:
@@ -279,6 +294,9 @@ class MainWindow(QMainWindow):
         self.actions["rotate_left"].setEnabled(manage and bool(selected))
         self.actions["rotate_right"].setEnabled(manage and bool(selected))
         self.actions["duplicate_page"].setEnabled(manage and bool(selected))
+        self.actions["blank_page"].setEnabled(manage and bool(selected))
+        self.actions["insert_pdf"].setEnabled(manage and bool(selected))
+        self.actions["extract_pages"].setEnabled(manage and bool(selected))
         self.actions["crop_page"].setEnabled(edit and bool(selected))
         self.actions["direct_crop"].setEnabled(edit and bool(selected))
         self.actions["delete_page"].setEnabled(manage and bool(selected) and len(selected)<self.page_count)
@@ -541,6 +559,83 @@ class MainWindow(QMainWindow):
         current=first+pages.index(self.page) if self.page in pages else first
         self.submit_page_operation("duplicate",pages,None,
             f"正在複製 {len(pages)} 頁…",current,copies)
+
+    def add_blank_page(self):
+        pages=self.selected_page_indices()
+        if not pages:
+            return
+        after=pages[-1]
+        inserted=after+1
+        self.submit_page_operation("blank",(after,),None,
+            "正在新增空白頁…",inserted,(inserted,))
+
+    def insert_pdf_pages(self):
+        if not self.session or self.busy:
+            return
+        name,_=QFileDialog.getOpenFileName(self,"插入另一份 PDF","","PDF (*.pdf)")
+        if not name:
+            return
+        try:
+            raw=Path(name).read_bytes()
+            try:
+                data,access=unlock_pdf(raw)
+            except EditorError as exc:
+                if exc.code!="PASSWORD":
+                    raise
+                password,ok=QInputDialog.getText(self,"PDF 密碼",Path(name).name,
+                    QLineEdit.EchoMode.Password)
+                if not ok:
+                    return
+                data,access=unlock_pdf(raw,password)
+            if not access.can_reorganize:
+                raise EditorError("READ_ONLY",access.reason)
+            self.apply_insert_pages(data)
+        except Exception as exc:
+            self.error((getattr(exc,"code","OPEN"),str(exc),()))
+
+    def apply_insert_pages(self,source_pdf):
+        pages=self.selected_page_indices()
+        if not pages:
+            return
+        with pymupdf.open(stream=source_pdf,filetype="pdf") as source:
+            count=source.page_count
+        after=pages[-1]
+        inserted=tuple(range(after+1,after+1+count))
+        self.submit_page_operation("insert",(after,),source_pdf,
+            f"正在插入 {count} 頁…",after+1,inserted)
+
+    def extract_selected_pages(self):
+        if not self.session or self.busy:
+            return
+        pages=self.selected_page_indices()
+        if not pages:
+            return
+        suggested=self.session.source.with_name(self.session.source.stem+"-抽取.pdf")
+        name,_=QFileDialog.getSaveFileName(self,"抽取選取頁面",str(suggested),"PDF (*.pdf)")
+        if not name:
+            return
+        target=Path(name)
+        if target.suffix.lower()!=".pdf":
+            target=target.with_suffix(".pdf")
+        self.extract_selected_to(target,pages)
+
+    def extract_selected_to(self,target,pages=None):
+        pages=tuple(pages) if pages is not None else self.selected_page_indices()
+        if not self.session or self.busy or not pages:
+            return
+        revision=self.session.revision
+        token=self.token
+        self.busy=True
+        self.refresh_actions()
+        self.statusBar().showMessage(f"正在抽取 {len(pages)} 頁…")
+        def done(path):
+            self.busy=False
+            if self.closed or token!=self.token or revision!=self.session.revision:
+                return
+            self.refresh_actions()
+            self.statusBar().showMessage("已抽取頁面："+path)
+        self.jobs.submit(export_extract,(self.session.pdf,self.session.overlays,pages,
+            str(target),str(self.session.source)),done,self.error)
 
     def show_crop_dialog(self):
         pages=self.selected_page_indices()

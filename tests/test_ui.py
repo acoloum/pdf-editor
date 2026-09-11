@@ -546,10 +546,12 @@ def test_window_page_menu_exposes_management_actions(qtbot):
     assert window.page_menu_button.text() == "頁面操作"
     assert [window.actions[name].text() for name in (
         "page_up", "page_down", "rotate_left", "rotate_right", "duplicate_page",
-        "direct_crop", "crop_page", "delete_page"
+        "blank_page", "insert_pdf", "extract_pages", "direct_crop", "crop_page",
+        "delete_page"
     )] == ["選取頁面上移", "選取頁面下移", "選取頁面向左旋轉",
-        "選取頁面向右旋轉", "複製選取頁面", "直接拖曳裁切框", "精確輸入裁切邊距…",
-        "刪除選取頁面"]
+        "選取頁面向右旋轉", "複製選取頁面", "新增空白頁",
+        "插入另一份 PDF（全部頁面）…", "抽取選取頁面另存…", "直接拖曳裁切框",
+        "精確輸入裁切邊距…", "刪除選取頁面"]
     assert window.actions["page_marks"].text()=="頁碼／浮水印"
     assert window.actions["header_footer"].text()=="頁首頁尾範本"
 
@@ -707,6 +709,67 @@ def test_window_duplicates_selected_pages_and_can_undo(qtbot,multi_page_path):
         window.history_step(False)
         qtbot.waitUntil(lambda:window.page_count==3,timeout=30000)
         assert _document_page_texts(window.session.pdf)==["PAGE 1","PAGE 2","PAGE 3"]
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_adds_blank_page_after_selection_and_can_undo(qtbot,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(0,2),2)
+
+        window.add_blank_page()
+
+        qtbot.waitUntil(lambda:not window.busy and window.page_count==4,timeout=30000)
+        assert _document_page_texts(window.session.pdf)==["PAGE 1","PAGE 2","PAGE 3",""]
+        assert window.selected_page_indices()==(3,)
+        assert window.page==3
+        window.history_step(False)
+        qtbot.waitUntil(lambda:window.page_count==3,timeout=30000)
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_inserts_external_pdf_and_can_undo(qtbot,source_path,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+
+        window.apply_insert_pages(multi_page_path.read_bytes())
+
+        qtbot.waitUntil(lambda:not window.busy and window.page_count==4,timeout=30000)
+        assert _document_page_texts(window.session.pdf)[1:]==["PAGE 1","PAGE 2","PAGE 3"]
+        assert window.selected_page_indices()==(1,2,3)
+        assert window.page==1
+        window.history_step(False)
+        qtbot.waitUntil(lambda:window.page_count==1,timeout=30000)
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_extracts_selected_pages_to_new_pdf(qtbot,multi_page_path,tmp_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    target=tmp_path/"抽取.pdf"
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(0,2),2)
+
+        window.extract_selected_to(target)
+
+        qtbot.waitUntil(lambda:not window.busy and target.exists(),timeout=30000)
+        with pymupdf.open(target) as doc:
+            assert [page.get_text().strip() for page in doc]==["PAGE 1","PAGE 3"]
+        assert not window.session.dirty
     finally:
         window.session.saved_fingerprint=window.session.history.current[2]
         window.close()

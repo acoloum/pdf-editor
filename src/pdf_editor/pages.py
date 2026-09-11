@@ -174,3 +174,37 @@ def duplicate_pages(pdf,pages):
                 links=False,widgets=False)
             insertion+=1
         return doc.tobytes(garbage=4,deflate=True)
+
+
+def insert_pages(pdf,source_pdf,after):
+    access=inspect_pdf(source_pdf)
+    if not access.can_reorganize:
+        raise EditorError("READ_ONLY",access.reason)
+    with (pymupdf.open(stream=pdf,filetype="pdf") as doc,
+            pymupdf.open(stream=source_pdf,filetype="pdf") as source):
+        _validate_page(doc,after)
+        if source.page_count<1:
+            raise EditorError("EMPTY","插入的 PDF 沒有頁面。")
+        doc.insert_pdf(source,start_at=after+1,links=False,widgets=False)
+        return doc.tobytes(garbage=4,deflate=True)
+
+
+def insert_blank_page(pdf,after):
+    with pymupdf.open(stream=pdf,filetype="pdf") as doc:
+        _validate_page(doc,after)
+        reference=doc[after]
+        width,height=reference.cropbox.width,reference.cropbox.height
+        rotation=reference.rotation
+        blank=doc.new_page(pno=after+1,width=width,height=height)
+        blank.set_rotation(rotation)
+        return doc.tobytes(garbage=4,deflate=True)
+
+
+def extract_pages(pdf,pages):
+    with pymupdf.open(stream=pdf,filetype="pdf") as doc:
+        selected=tuple(pages)
+        if not selected or len(selected)!=len(set(selected)):
+            raise EditorError("RANGE","請選取至少一頁，且頁碼不可重複。")
+        for page in selected:
+            _validate_page(doc,page)
+    return merge_pages((pdf,),tuple((0,page) for page in selected))
