@@ -79,6 +79,35 @@ def add_page_numbers(pdf,pages,start,prefix,suffix,position,font_size,font_path)
         return doc.tobytes(garbage=4,deflate=True)
 
 
+def add_header_footer(pdf,pages,text,position,font_size,font_path):
+    if position not in POSITIONS:
+        raise EditorError("POSITION","頁首頁尾位置無效。")
+    content=str(text).strip()
+    if not content:
+        raise EditorError("HEADER_FOOTER","請輸入頁首頁尾文字。")
+    size=_number(font_size,"頁首頁尾字級",4,72)
+    font=Path(font_path)
+    if not font.is_file():
+        raise EditorError("FONT_INVALID","找不到頁首頁尾字型檔。")
+    vertical,alignment=POSITIONS[position]
+    with pymupdf.open(stream=pdf,filetype="pdf") as doc:
+        selected=_selected_pages(doc,pages)
+        total=doc.page_count
+        for index in selected:
+            page=doc[index]
+            page.insert_font(fontname="localpdfheaderfooter",fontfile=str(font))
+            width,height=page.cropbox.width,page.cropbox.height
+            box_height=max(20,size*2.4)
+            top=8 if vertical=="top" else height-box_height-8
+            rect=pymupdf.Rect(12,top,width-12,top+box_height)
+            rendered=content.replace("{page}",str(index+1)).replace("{pages}",str(total))
+            remaining=page.insert_textbox(rect,rendered,fontname="localpdfheaderfooter",
+                fontsize=size,color=(0,0,0),align=alignment,overlay=True)
+            if remaining<0:
+                raise EditorError("HEADER_FOOTER","頁首頁尾文字太長，請縮小字級或縮短文字。")
+        return doc.tobytes(garbage=4,deflate=True)
+
+
 def _png_bytes(image):
     buffer=io.BytesIO()
     image.save(buffer,format="PNG")

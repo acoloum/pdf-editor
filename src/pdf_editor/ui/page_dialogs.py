@@ -305,3 +305,121 @@ class PageDecorationDialog(QDialog):
             self.accept()
         except EditorError as exc:
             QMessageBox.warning(self,"設定不完整",str(exc))
+
+
+class HeaderFooterTemplatesDialog(QDialog):
+    def __init__(self,store,page_count,parent=None):
+        super().__init__(parent)
+        self.store=store
+        self.setWindowTitle("頁首頁尾範本")
+        self.resize(620,430)
+        layout=QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            f"將頁首頁尾套用到 {page_count} 個選取頁面。可使用 {{page}} 代表頁碼、{{pages}} 代表總頁數。"))
+        body=QHBoxLayout()
+        self.templates=QListWidget()
+        self.templates.setMinimumWidth(170)
+        self.templates.currentRowChanged.connect(self.load_selected)
+        body.addWidget(self.templates)
+        editor=QWidget()
+        form=QFormLayout(editor)
+        self.name=QLineEdit()
+        self.name.setPlaceholderText("例如：公司標準頁尾")
+        self.text=QLineEdit()
+        self.text.setPlaceholderText("例如：內部文件  第 {page} / {pages} 頁")
+        self.position=QComboBox()
+        for label,value in (("頁首靠左","top_left"),("頁首置中","top_center"),
+                ("頁首靠右","top_right"),("頁尾靠左","bottom_left"),
+                ("頁尾置中","bottom_center"),("頁尾靠右","bottom_right")):
+            self.position.addItem(label,value)
+        self.position.setCurrentIndex(4)
+        self.font_size=QDoubleSpinBox()
+        self.font_size.setRange(4,72)
+        self.font_size.setValue(10)
+        self.font_size.setSuffix(" 點")
+        form.addRow("範本名稱",self.name)
+        form.addRow("文字",self.text)
+        form.addRow("位置",self.position)
+        form.addRow("字級",self.font_size)
+        template_buttons=QHBoxLayout()
+        save=QPushButton("儲存範本")
+        save.clicked.connect(self.save_template)
+        delete=QPushButton("刪除範本")
+        delete.clicked.connect(self.delete_template)
+        template_buttons.addWidget(save)
+        template_buttons.addWidget(delete)
+        form.addRow(template_buttons)
+        body.addWidget(editor,1)
+        layout.addLayout(body)
+        hint=QLabel("套用後可使用 Ctrl+Z 復原；範本保存在這台電腦。")
+        hint.setObjectName("hint")
+        layout.addWidget(hint)
+        buttons=QHBoxLayout()
+        cancel=QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        apply=QPushButton("套用到選取頁面")
+        apply.setObjectName("primary")
+        apply.clicked.connect(self.finish)
+        buttons.addWidget(cancel)
+        buttons.addWidget(apply)
+        layout.addLayout(buttons)
+        self.reload_templates()
+
+    def reload_templates(self,selected_name=None):
+        self.templates.blockSignals(True)
+        self.templates.clear()
+        for item in self.store.all():
+            entry=QListWidgetItem(item["name"])
+            entry.setData(Qt.ItemDataRole.UserRole,item)
+            self.templates.addItem(entry)
+            if item["name"]==selected_name:
+                self.templates.setCurrentItem(entry)
+        self.templates.blockSignals(False)
+        if selected_name is None and self.templates.count():
+            self.templates.setCurrentRow(0)
+        if self.templates.currentItem() is not None:
+            self.load_selected(self.templates.currentRow())
+
+    def load_selected(self,row):
+        item=self.templates.item(row)
+        if item is None:
+            return
+        data=item.data(Qt.ItemDataRole.UserRole)
+        self.name.setText(data["name"])
+        self.text.setText(data["text"])
+        index=self.position.findData(data["position"])
+        if index>=0:
+            self.position.setCurrentIndex(index)
+        self.font_size.setValue(data["font_size"])
+
+    def selection(self):
+        text=self.text.text().strip()
+        if not text:
+            raise EditorError("HEADER_FOOTER","請輸入頁首頁尾文字。")
+        return {"text":text,"position":self.position.currentData(),
+            "font_size":self.font_size.value()}
+
+    def save_template(self):
+        try:
+            values=self.selection()
+            self.store.save(self.name.text(),values["text"],values["position"],
+                values["font_size"])
+            self.reload_templates(self.name.text().strip())
+        except EditorError as exc:
+            QMessageBox.warning(self,"無法儲存範本",str(exc))
+
+    def delete_template(self):
+        item=self.templates.currentItem()
+        if item is None:
+            return
+        self.store.delete(item.text())
+        self.reload_templates()
+        self.name.clear()
+        self.text.clear()
+
+    def finish(self):
+        try:
+            self.selection()
+            self.accept()
+        except EditorError as exc:
+            QMessageBox.warning(self,"設定不完整",str(exc))

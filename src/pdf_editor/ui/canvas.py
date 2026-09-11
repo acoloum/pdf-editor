@@ -1,7 +1,8 @@
 from dataclasses import replace
 from PySide6.QtCore import Qt, Signal, QPointF, QTimer, QRectF
 from PySide6.QtGui import QPixmap, QPen, QColor, QTransform, QPainter, QKeyEvent, QBrush
-from PySide6.QtWidgets import QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,QGraphicsItem,QLabel,QLineEdit
+from PySide6.QtWidgets import (QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,
+    QGraphicsItem,QLabel,QLineEdit)
 from pdf_editor.engine.geometry import transformed_rect, transform_point, inverse_transform
 from pdf_editor.engine.overlay import transformed_image
 
@@ -180,6 +181,8 @@ class Canvas(QGraphicsView):
     annotation_delete_requested=Signal(object)
     layer_selected=Signal(str)
     layer_moved=Signal(object)
+    crop_requested=Signal(object)
+    crop_cancelled=Signal()
 
     def __init__(self):
         super().__init__()
@@ -200,6 +203,14 @@ class Canvas(QGraphicsView):
         self._text_insertion=False
         self._note_insertion=False
         self._annotation_selection=False
+        self._crop_mode=False
+        self._crop_rect=None
+        self._crop_bounds=None
+        self._crop_frame=None
+        self._crop_handles=[]
+        self._crop_drag_handle=None
+        self._crop_drag_start=None
+        self._crop_start_rect=None
         self.inline_editor=None
         self.inline_run=None
         self.inline_rect=None
@@ -212,6 +223,8 @@ class Canvas(QGraphicsView):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def display(self,data,layers=(),selected_layer_id=None):
+        self._clear_crop_items()
+        self._crop_mode=False
         self.scene().clear()
         self.highlight=None
         self.annotation_highlight=None
@@ -286,6 +299,7 @@ class Canvas(QGraphicsView):
         self.clear_annotation_selection()
         self.cancel_text_insertion()
         self.cancel_note_insertion()
+        self.cancel_crop(True)
         self._annotation_selection=True
         self.insertion_hint.setText("選取註解模式：請點選螢光、底線或文字註解（Esc 取消）")
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -303,6 +317,7 @@ class Canvas(QGraphicsView):
         self.clear_text_selection()
         self.cancel_annotation_selection()
         self.cancel_note_insertion()
+        self.cancel_crop(True)
         self._text_insertion=True
         self.insertion_hint.setText("新增文字模式：請在頁面中點選位置（Esc 取消）")
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -322,6 +337,7 @@ class Canvas(QGraphicsView):
         self.clear_text_selection()
         self.cancel_annotation_selection()
         self.cancel_text_insertion()
+        self.cancel_crop(True)
         self._note_insertion=True
         self.insertion_hint.setText("文字註解模式：請在頁面中點選位置（Esc 取消）")
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -336,6 +352,137 @@ class Canvas(QGraphicsView):
         self.insertion_hint.hide()
         if notify:
             self.note_insertion_cancelled.emit()
+
+    def start_crop(self,page_rect):
+        self.cancel_inline_editor()
+        self.cancel_text_insertion()
+        self.cancel_note_insertion()
+        self.cancel_annotation_selection()
+        self.clear_text_selection()
+        self.clear_annotation_selection()
+        self.cancel_crop()
+        transformed=transformed_rect(self.matrix,page_rect)
+        self._crop_bounds=QRectF(transformed[0],transformed[1],
+            transformed[2]-transformed[0],transformed[3]-transformed[1]).normalized()
+        self._crop_rect=QRectF(self._crop_bounds)
+        self._crop_mode=True
+        self._create_crop_items()
+        self.insertion_hint.setText("裁切模式：拖曳綠框的邊線或角落，放開立即套用（Esc 取消）")
+        self.setFocus()
+        self._place_insertion_hint()
+        self.insertion_hint.show()
+        self.insertion_hint.raise_()
+
+    def _create_crop_items(self):
+        pen=QPen(QColor("#16a36f"),3,Qt.PenStyle.SolidLine)
+        pen.setCosmetic(True)
+        self._crop_frame=self.scene().addRect(self._crop_rect,pen,
+            QBrush(QColor(22,163,111,24)))
+        self._crop_frame.setZValue(20)
+        self._crop_handles=[]
+        for _ in range(8):
+            handle=self.scene().addRect(QRectF(),QPen(QColor("#0f6d4c"),1),
+                QBrush(QColor("white")))
+            handle.setZValue(21)
+            self._crop_handles.append(handle)
+        self._update_crop_items()
+
+    def _update_crop_items(self):
+        if self._crop_frame is None:
+            return
+        self._crop_frame.setRect(self._crop_rect)
+        rect=self._crop_rect
+        points=(rect.topLeft(),QPointF(rect.center().x(),rect.top()),rect.topRight(),
+            QPointF(rect.right(),rect.center().y()),rect.bottomRight(),
+            QPointF(rect.center().x(),rect.bottom()),rect.bottomLeft(),
+            QPointF(rect.left(),rect.center().y()))
+        for item,point in zip(self._crop_handles,points):
+            item.setRect(point.x()-5,point.y()-5,10,10)
+
+    def _clear_crop_items(self):
+        for item in ([self._crop_frame] if self._crop_frame is not None else [])+self._crop_handles:
+            try:
+                if item.scene() is self.scene():
+                    self.scene().removeItem(item)
+            except RuntimeError:
+                pass
+        self._crop_frame=None
+        self._crop_handles=[]
+
+    def cancel_crop(self,notify=False):
+        was_active=self._crop_mode
+        self._crop_mode=False
+        self._crop_drag_handle=None
+        self._crop_drag_start=None
+        self._crop_start_rect=None
+        self._clear_crop_items()
+        if was_active:
+            self.insertion_hint.hide()
+            self.unsetCursor()
+            if notify:
+                self.crop_cancelled.emit()
+
+    def _crop_handle_at(self,point):
+        rect=self._crop_rect
+        tolerance=12
+        near_left=abs(point.x()-rect.left())<=tolerance
+        near_right=abs(point.x()-rect.right())<=tolerance
+        near_top=abs(point.y()-rect.top())<=tolerance
+        near_bottom=abs(point.y()-rect.bottom())<=tolerance
+        within_x=rect.left()-tolerance<=point.x()<=rect.right()+tolerance
+        within_y=rect.top()-tolerance<=point.y()<=rect.bottom()+tolerance
+        if near_left and near_top:
+            return "top_left"
+        if near_right and near_top:
+            return "top_right"
+        if near_left and near_bottom:
+            return "bottom_left"
+        if near_right and near_bottom:
+            return "bottom_right"
+        if near_left and within_y:
+            return "left"
+        if near_right and within_y:
+            return "right"
+        if near_top and within_x:
+            return "top"
+        if near_bottom and within_x:
+            return "bottom"
+        if rect.contains(point):
+            return "move"
+        return None
+
+    def _drag_crop(self,point):
+        start=QRectF(self._crop_start_rect)
+        bounds=self._crop_bounds
+        delta=point-self._crop_drag_start
+        handle=self._crop_drag_handle
+        minimum=10
+        if handle=="move":
+            width,height=start.width(),start.height()
+            left=max(bounds.left(),min(start.left()+delta.x(),bounds.right()-width))
+            top=max(bounds.top(),min(start.top()+delta.y(),bounds.bottom()-height))
+            self._crop_rect=QRectF(left,top,width,height)
+        else:
+            left,right,top,bottom=start.left(),start.right(),start.top(),start.bottom()
+            if "left" in handle:
+                left=max(bounds.left(),min(point.x(),right-minimum))
+            if "right" in handle:
+                right=min(bounds.right(),max(point.x(),left+minimum))
+            if "top" in handle:
+                top=max(bounds.top(),min(point.y(),bottom-minimum))
+            if "bottom" in handle:
+                bottom=min(bounds.bottom(),max(point.y(),top+minimum))
+            self._crop_rect=QRectF(QPointF(left,top),QPointF(right,bottom))
+        self._update_crop_items()
+
+    def _crop_page_rect(self):
+        inv=inverse_transform(self.matrix)
+        rect=self._crop_rect
+        points=(rect.topLeft(),rect.topRight(),rect.bottomLeft(),rect.bottomRight())
+        mapped=[transform_point(inv,point.x(),point.y()) for point in points]
+        xs=[point[0] for point in mapped]
+        ys=[point[1] for point in mapped]
+        return (min(xs),min(ys),max(xs),max(ys))
 
     def _place_insertion_hint(self):
         self.insertion_hint.adjustSize()
@@ -427,6 +574,26 @@ class Canvas(QGraphicsView):
             event.accept()
             return
         scene_pos=self.mapToScene(event.position().toPoint())
+        if self._crop_mode and event.button()==Qt.MouseButton.LeftButton:
+            handle=self._crop_handle_at(scene_pos)
+            if handle:
+                self._crop_drag_handle=handle
+                self._crop_drag_start=scene_pos
+                self._crop_start_rect=QRectF(self._crop_rect)
+                if handle in ("top_left","bottom_right"):
+                    self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+                elif handle in ("top_right","bottom_left"):
+                    self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+                elif handle in ("left","right"):
+                    self.setCursor(Qt.CursorShape.SizeHorCursor)
+                elif handle in ("top","bottom"):
+                    self.setCursor(Qt.CursorShape.SizeVerCursor)
+                else:
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                event.accept()
+                return
+            event.accept()
+            return
         item=self.scene().itemAt(scene_pos,QTransform())
         self.setFocus()
         if isinstance(item,LayerItem):
@@ -469,6 +636,10 @@ class Canvas(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self,event):
+        if self._crop_mode and self._crop_drag_handle:
+            self._drag_crop(self.mapToScene(event.position().toPoint()))
+            event.accept()
+            return
         if self._drag_run:
             scene_pos=self.mapToScene(event.position().toPoint())
             delta=scene_pos-self._drag_start_scene
@@ -483,6 +654,17 @@ class Canvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self,event):
+        if self._crop_mode and self._crop_drag_handle:
+            changed=self._crop_rect!=self._crop_start_rect
+            self._crop_drag_handle=None
+            self._crop_drag_start=None
+            self._crop_start_rect=None
+            if changed:
+                result=self._crop_page_rect()
+                self.cancel_crop()
+                self.crop_requested.emit(result)
+            event.accept()
+            return
         if self._drag_run:
             scene_pos=self.mapToScene(event.position().toPoint())
             delta=scene_pos-self._drag_start_scene
@@ -502,6 +684,10 @@ class Canvas(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
 
     def keyPressEvent(self,event: QKeyEvent):
+        if event.key()==Qt.Key.Key_Escape and self._crop_mode:
+            self.cancel_crop(True)
+            event.accept()
+            return
         if event.key()==Qt.Key.Key_Escape and self._annotation_selection:
             self.cancel_annotation_selection()
             event.accept()

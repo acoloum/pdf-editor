@@ -219,6 +219,56 @@ def test_canvas_text_insertion_mode_emits_page_position(qtbot, pdf_bytes):
     assert spy.count() == 1
     assert spy.at(0)[0] == pytest.approx((300, 330), abs=2)
 
+
+def test_canvas_crop_frame_corner_drag_emits_page_rectangle(qtbot,pdf_bytes):
+    canvas=Canvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(700,600)
+    canvas.show()
+    canvas.display(render_page(pdf_bytes,0,1.0))
+    qtbot.waitExposed(canvas)
+    spy=QSignalSpy(canvas.crop_requested)
+
+    canvas.start_crop((0,0,500,400))
+    start=canvas.mapFromScene(QPointF(500,400))
+    end=canvas.mapFromScene(QPointF(460,360))
+    qtbot.mousePress(canvas.viewport(),Qt.MouseButton.LeftButton,pos=start)
+    qtbot.mouseMove(canvas.viewport(),end)
+    qtbot.mouseRelease(canvas.viewport(),Qt.MouseButton.LeftButton,pos=end)
+
+    assert spy.count()==1
+    assert tuple(spy.at(0)[0])==pytest.approx((0,0,460,360),abs=2)
+    assert not canvas._crop_mode
+
+
+def test_canvas_escape_cancels_crop_without_applying(qtbot,pdf_bytes):
+    canvas=Canvas()
+    qtbot.addWidget(canvas)
+    canvas.display(render_page(pdf_bytes,0,1.0))
+    requested=QSignalSpy(canvas.crop_requested)
+    cancelled=QSignalSpy(canvas.crop_cancelled)
+
+    canvas.start_crop((0,0,500,400))
+    qtbot.keyClick(canvas,Qt.Key.Key_Escape)
+
+    assert requested.count()==0
+    assert cancelled.count()==1
+    assert not canvas._crop_mode
+
+
+def test_starting_text_mode_cancels_crop_mode(qtbot,pdf_bytes):
+    canvas=Canvas()
+    qtbot.addWidget(canvas)
+    canvas.display(render_page(pdf_bytes,0,1.0))
+    cancelled=QSignalSpy(canvas.crop_cancelled)
+
+    canvas.start_crop((0,0,500,400))
+    canvas.start_text_insertion()
+
+    assert cancelled.count()==1
+    assert not canvas._crop_mode
+    assert canvas._text_insertion
+
 def test_text_panel_has_alignment_choices(qtbot):
     panel = TextPanel()
     qtbot.addWidget(panel)
@@ -496,11 +546,12 @@ def test_window_page_menu_exposes_management_actions(qtbot):
     assert window.page_menu_button.text() == "頁面操作"
     assert [window.actions[name].text() for name in (
         "page_up", "page_down", "rotate_left", "rotate_right", "duplicate_page",
-        "crop_page", "delete_page"
+        "direct_crop", "crop_page", "delete_page"
     )] == ["選取頁面上移", "選取頁面下移", "選取頁面向左旋轉",
-        "選取頁面向右旋轉", "複製選取頁面", "裁切選取頁面…",
+        "選取頁面向右旋轉", "複製選取頁面", "直接拖曳裁切框", "精確輸入裁切邊距…",
         "刪除選取頁面"]
     assert window.actions["page_marks"].text()=="頁碼／浮水印"
+    assert window.actions["header_footer"].text()=="頁首頁尾範本"
 
 
 def test_thumbnail_list_supports_extended_selection(qtbot,multi_page_path):
@@ -677,6 +728,52 @@ def test_window_crops_selected_pages_and_preserves_selection(qtbot,multi_page_pa
             assert (doc[1].cropbox.width,doc[1].cropbox.height)==pytest.approx((300,200))
             assert (doc[2].cropbox.width,doc[2].cropbox.height)==pytest.approx((260,140))
         assert window.selected_page_indices()==(0,2)
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_direct_crop_applies_dragged_rectangle_to_captured_pages(qtbot,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(0,2),2)
+
+        window.start_direct_crop()
+        assert window.canvas._crop_mode
+        assert window.crop_pages==(0,2)
+        window.apply_direct_crop((10,20,270,160))
+
+        qtbot.waitUntil(lambda:not window.busy and window.session.dirty,timeout=30000)
+        with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
+            assert (doc[0].cropbox.width,doc[0].cropbox.height)==pytest.approx((260,140))
+            assert (doc[1].cropbox.width,doc[1].cropbox.height)==pytest.approx((300,200))
+            assert (doc[2].cropbox.width,doc[2].cropbox.height)==pytest.approx((260,140))
+        assert window.selected_page_indices()==(0,2)
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_adds_header_footer_to_selected_pages(qtbot,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(0,2),2)
+
+        window.apply_header_footer({"text":"內部文件 {page}/{pages}",
+            "position":"bottom_right","font_size":9})
+
+        qtbot.waitUntil(lambda:not window.busy and window.session.dirty,timeout=30000)
+        with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
+            texts=[page.get_text().replace("\xa0"," ") for page in doc]
+        assert "內部文件 1/3" in texts[0]
+        assert "內部文件" not in texts[1]
+        assert "內部文件 3/3" in texts[2]
     finally:
         window.session.saved_fingerprint=window.session.history.current[2]
         window.close()

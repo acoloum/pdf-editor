@@ -6,7 +6,7 @@ from PIL import Image
 
 from pdf_editor.errors import EditorError
 from pdf_editor.page_decorations import (crop_pages,add_page_numbers,
-    add_text_watermark,add_image_watermark)
+    add_text_watermark,add_image_watermark,add_header_footer)
 
 
 def _three_page_pdf():
@@ -49,6 +49,17 @@ def test_add_page_numbers_rejects_unknown_position(font_path):
         add_page_numbers(_three_page_pdf(),(0,),1,"","","middle",10,font_path)
 
     assert error.value.code=="POSITION"
+
+
+def test_add_header_footer_replaces_document_page_fields(font_path):
+    result=add_header_footer(_three_page_pdf(),(0,2),
+        "檢驗報告  第 {page} / {pages} 頁","top_center",11,font_path)
+
+    with pymupdf.open(stream=result,filetype="pdf") as doc:
+        texts=[page.get_text().replace("\xa0"," ") for page in doc]
+        assert "檢驗報告  第 1 / 3 頁" in texts[0]
+        assert "檢驗報告" not in texts[1]
+        assert "檢驗報告  第 3 / 3 頁" in texts[2]
 
 
 def test_add_text_watermark_inserts_image_only_on_selected_pages(font_path):

@@ -16,10 +16,11 @@ from pdf_editor.model import TextReplacement,TextInsertion,Overlay
 from pdf_editor.errors import EditorError
 from pdf_editor.workers import Jobs
 from pdf_editor.assets import AssetStore
+from pdf_editor.templates import HeaderFooterTemplateStore
 from pdf_editor.pages import (merge_pages,split_pages,move_pages,move_pages_to,rotate_pages,
     delete_pages,duplicate_pages,page_order_after_move,page_order_after_drop)
 from pdf_editor.page_decorations import (crop_pages,add_page_numbers,
-    add_text_watermark,add_image_watermark)
+    add_text_watermark,add_image_watermark,add_header_footer)
 from pdf_editor.annotations import (mark_text,add_text_note,delete_annotation,
     set_highlight_color)
 from pdf_editor.ui.canvas import Canvas
@@ -27,7 +28,7 @@ from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.ui.overlay_panel import OverlayPanel
 from pdf_editor.ui.signature_dialog import SignatureDialog
 from pdf_editor.ui.page_dialogs import (MergeDialog,SplitDialog,CropPagesDialog,
-    PageDecorationDialog)
+    PageDecorationDialog,HeaderFooterTemplatesDialog)
 from pdf_editor.ui.style import STYLE
 
 def export_document(pdf,layers,target,source,overwrite):
@@ -66,6 +67,9 @@ def edit_page_document(pdf,layers,operation,pages,target=None):
     if operation=="image_watermark":
         return add_image_watermark(data,pages,target["image_path"],
             target["width_percent"],target["opacity"],target["angle"])
+    if operation=="header_footer":
+        return add_header_footer(data,pages,target["text"],target["position"],
+            target["font_size"],target["font_path"])
     raise EditorError("PAGE_OPERATION","頁面操作無效。")
 
 
@@ -106,6 +110,7 @@ class MainWindow(QMainWindow):
         self.insertion_rect=None
         self.layer_id=None
         self.annotation=None
+        self.crop_pages=()
         self.token=0
         self.busy=False
         self.render_serial=0
@@ -113,6 +118,8 @@ class MainWindow(QMainWindow):
         self.jobs=Jobs(self)
         self.asset_root=Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))/"assets"
         self.assets=AssetStore(self.asset_root)
+        self.header_footer_templates=HeaderFooterTemplateStore(
+            self.asset_root.parent/"header-footer-templates.json")
         toolbar=QToolBar("文件工具",self)
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
@@ -128,7 +135,8 @@ class MainWindow(QMainWindow):
             ("collection","常用圖章",self.add_collection,None),
             ("merge","合併",self.merge,None),
             ("split","拆分",self.split,None),
-            ("page_marks","頁碼／浮水印",self.show_page_decoration_dialog,None)]:
+            ("page_marks","頁碼／浮水印",self.show_page_decoration_dialog,None),
+            ("header_footer","頁首頁尾範本",self.show_header_footer_dialog,None)]:
             action=QAction(label,self)
             action.triggered.connect(handler)
             if key:
@@ -144,11 +152,14 @@ class MainWindow(QMainWindow):
             ("rotate_left","選取頁面向左旋轉",lambda:self.rotate_current_page(-90),"Ctrl+Shift+Left"),
             ("rotate_right","選取頁面向右旋轉",lambda:self.rotate_current_page(90),"Ctrl+Shift+Right"),
             ("duplicate_page","複製選取頁面",self.duplicate_selected_pages,"Ctrl+D"),
-            ("crop_page","裁切選取頁面…",self.show_crop_dialog,None),
+            ("direct_crop","直接拖曳裁切框",self.toggle_direct_crop,None),
+            ("crop_page","精確輸入裁切邊距…",self.show_crop_dialog,None),
             ("delete_page","刪除選取頁面",self.delete_current_page,"Ctrl+Delete")]:
             action=QAction(label,self)
             action.triggered.connect(handler)
             action.setShortcut(QKeySequence(key))
+            if name=="direct_crop":
+                action.setCheckable(True)
             page_menu.addAction(action)
             self.actions[name]=action
         self.page_menu_button=QToolButton()
@@ -221,6 +232,8 @@ class MainWindow(QMainWindow):
         self.canvas.annotation_delete_requested.connect(self.delete_selected_annotation)
         self.canvas.layer_selected.connect(self.select_layer)
         self.canvas.layer_moved.connect(self.move_layer)
+        self.canvas.crop_requested.connect(self.apply_direct_crop)
+        self.canvas.crop_cancelled.connect(self.cancel_direct_crop)
         splitter.addWidget(self.canvas)
         self.panels=QStackedWidget()
         self.text_panel=TextPanel()
@@ -249,7 +262,8 @@ class MainWindow(QMainWindow):
     def refresh_actions(self):
         active=self.session is not None
         edit=active and self.session.access.can_edit and not self.busy
-        for name in ("save","add_text","stamp","signature","collection","page_marks"):
+        for name in ("save","add_text","stamp","signature","collection","page_marks",
+                "header_footer"):
             self.actions[name].setEnabled(edit)
         self.actions["undo"].setEnabled(edit and self.session.can_undo)
         self.actions["redo"].setEnabled(edit and self.session.can_redo)
@@ -266,6 +280,7 @@ class MainWindow(QMainWindow):
         self.actions["rotate_right"].setEnabled(manage and bool(selected))
         self.actions["duplicate_page"].setEnabled(manage and bool(selected))
         self.actions["crop_page"].setEnabled(edit and bool(selected))
+        self.actions["direct_crop"].setEnabled(edit and bool(selected))
         self.actions["delete_page"].setEnabled(manage and bool(selected) and len(selected)<self.page_count)
         self.page_menu_button.setEnabled(manage or edit)
         markup=edit and self.run is not None and self.run.editable
@@ -336,6 +351,7 @@ class MainWindow(QMainWindow):
         self.actions["select_annotation"].setChecked(False)
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
+        self.cancel_direct_crop()
         self.session=session
         self.token+=1
         self.preview=None
@@ -391,6 +407,7 @@ class MainWindow(QMainWindow):
         self.actions["select_annotation"].setChecked(False)
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
+        self.cancel_direct_crop()
         self.run=None
         self.annotation=None
         self.insertion_rect=None
@@ -427,7 +444,8 @@ class MainWindow(QMainWindow):
         self.queue_thumbnail(0,self.token,self.session.revision)
 
     def submit_page_operation(self,operation,pages,target,status,selected,selected_pages=None):
-        content_operations={"crop","page_number","text_watermark","image_watermark"}
+        content_operations={"crop","page_number","text_watermark","image_watermark",
+            "header_footer"}
         allowed=(self.session.access.can_edit if self.session and operation in content_operations
             else self.session.access.can_reorganize if self.session else False)
         if not self.session or self.busy or not allowed:
@@ -439,6 +457,7 @@ class MainWindow(QMainWindow):
         self.actions["select_annotation"].setChecked(False)
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
+        self.cancel_direct_crop()
         self.preview=None
         self.run=None
         self.annotation=None
@@ -531,12 +550,56 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             self.apply_page_crop(dialog.margins())
 
-    def apply_page_crop(self,margins):
-        pages=self.selected_page_indices()
+    def apply_page_crop(self,margins,pages=None):
+        pages=tuple(pages) if pages is not None else self.selected_page_indices()
         if not pages:
             return
         self.submit_page_operation("crop",pages,margins,
             f"正在裁切 {len(pages)} 頁…",self.page,pages)
+
+    def toggle_direct_crop(self,checked):
+        if checked:
+            self.start_direct_crop()
+        else:
+            self.canvas.cancel_crop()
+            self.cancel_direct_crop()
+
+    def start_direct_crop(self):
+        if not self.page_data or not self.session or self.busy:
+            self.actions["direct_crop"].setChecked(False)
+            return
+        pages=self.selected_page_indices()
+        if not pages:
+            self.actions["direct_crop"].setChecked(False)
+            return
+        self.canvas.cancel_text_insertion()
+        self.actions["add_text"].setChecked(False)
+        self.canvas.cancel_note_insertion()
+        self.actions["text_note"].setChecked(False)
+        self.canvas.cancel_annotation_selection()
+        self.actions["select_annotation"].setChecked(False)
+        self.crop_pages=pages
+        self.actions["direct_crop"].setChecked(True)
+        self.canvas.start_crop(self.page_data["bounds"])
+        self.statusBar().showMessage(
+            f"拖曳綠色裁切框的邊線或四角；放開後套用到 {len(pages)} 個選取頁面。")
+
+    def cancel_direct_crop(self):
+        if self.canvas._crop_mode:
+            self.canvas.cancel_crop()
+        self.crop_pages=()
+        self.actions["direct_crop"].setChecked(False)
+
+    def apply_direct_crop(self,rect):
+        pages=self.crop_pages
+        if not pages or not self.page_data:
+            self.cancel_direct_crop()
+            return
+        x0,y0,x1,y1=(float(value) for value in rect)
+        bx0,by0,bx1,by1=self.page_data["bounds"]
+        margins=(max(0,x0-bx0),max(0,y0-by0),max(0,bx1-x1),max(0,by1-y1))
+        self.cancel_direct_crop()
+        self.apply_page_crop(margins,pages)
 
     def show_page_decoration_dialog(self):
         pages=self.selected_page_indices()
@@ -558,6 +621,23 @@ class MainWindow(QMainWindow):
             "image_watermark":"圖片浮水印"}
         self.submit_page_operation(operation,pages,target,
             f"正在加入{labels[operation]}至 {len(pages)} 頁…",self.page,pages)
+
+    def show_header_footer_dialog(self):
+        pages=self.selected_page_indices()
+        if not pages:
+            return
+        dialog=HeaderFooterTemplatesDialog(self.header_footer_templates,len(pages),self)
+        if dialog.exec():
+            self.apply_header_footer(dialog.selection())
+
+    def apply_header_footer(self,options):
+        pages=self.selected_page_indices()
+        if not pages:
+            return
+        target=dict(options)
+        target["font_path"]=str(default_font())
+        self.submit_page_operation("header_footer",pages,target,
+            f"正在加入頁首頁尾至 {len(pages)} 頁…",self.page,pages)
 
     def change_zoom(self,text):
         self.scale=float(text.rstrip("%"))/100
