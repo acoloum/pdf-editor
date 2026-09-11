@@ -546,11 +546,12 @@ def test_window_page_menu_exposes_management_actions(qtbot):
     assert window.page_menu_button.text() == "頁面操作"
     assert [window.actions[name].text() for name in (
         "page_up", "page_down", "rotate_left", "rotate_right", "duplicate_page",
-        "blank_page", "insert_pdf", "extract_pages", "direct_crop", "crop_page",
+        "blank_page", "insert_pdf", "extract_pages", "export_png", "direct_crop", "crop_page",
         "delete_page"
     )] == ["選取頁面上移", "選取頁面下移", "選取頁面向左旋轉",
         "選取頁面向右旋轉", "複製選取頁面", "新增空白頁",
-        "插入另一份 PDF（全部頁面）…", "抽取選取頁面另存…", "直接拖曳裁切框",
+        "插入另一份 PDF（全部頁面）…", "抽取選取頁面另存…", "匯出選取頁面為 PNG…",
+        "直接拖曳裁切框",
         "精確輸入裁切邊距…", "刪除選取頁面"]
     assert window.actions["page_marks"].text()=="頁碼／浮水印"
     assert window.actions["header_footer"].text()=="頁首頁尾範本"
@@ -769,6 +770,67 @@ def test_window_extracts_selected_pages_to_new_pdf(qtbot,multi_page_path,tmp_pat
         qtbot.waitUntil(lambda:not window.busy and target.exists(),timeout=30000)
         with pymupdf.open(target) as doc:
             assert [page.get_text().strip() for page in doc]==["PAGE 1","PAGE 3"]
+        assert not window.session.dirty
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_searches_document_and_navigates_results(qtbot,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+
+        window.perform_search("PAGE")
+
+        qtbot.waitUntil(lambda:not window.busy and len(window.search_results)==3,timeout=30000)
+        assert window.search_count.text()=="1 / 3"
+        assert window.canvas.search_highlight is not None
+        window.next_search_result()
+        qtbot.waitUntil(lambda:window.page==1 and window.page_data["page"]==1,timeout=30000)
+        assert window.search_count.text()=="2 / 3"
+        assert window.canvas.search_highlight is not None
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_fit_page_and_width_update_zoom(qtbot,source_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.resize(1200,800)
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+
+        window.fit_zoom("page")
+        page_scale=window.scale
+        window.fit_zoom("width")
+
+        assert page_scale>0
+        assert window.scale>=page_scale
+        assert window.zoom.currentText()=="適合寬度"
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_exports_selected_pages_as_png(qtbot,multi_page_path,tmp_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(0,2),2)
+
+        window.export_selected_png_to(tmp_path,144)
+
+        targets=(tmp_path/"三頁-第001頁.png",tmp_path/"三頁-第003頁.png")
+        qtbot.waitUntil(lambda:not window.busy and all(path.exists() for path in targets),
+            timeout=30000)
         assert not window.session.dirty
     finally:
         window.session.saved_fingerprint=window.session.history.current[2]

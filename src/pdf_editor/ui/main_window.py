@@ -18,6 +18,8 @@ from pdf_editor.errors import EditorError
 from pdf_editor.workers import Jobs
 from pdf_editor.assets import AssetStore
 from pdf_editor.templates import HeaderFooterTemplateStore
+from pdf_editor.search import find_text
+from pdf_editor.page_images import export_pages_as_png
 from pdf_editor.pages import (merge_pages,split_pages,move_pages,move_pages_to,rotate_pages,
     delete_pages,duplicate_pages,page_order_after_move,page_order_after_drop,insert_pages,
     insert_blank_page,extract_pages)
@@ -51,6 +53,12 @@ def export_extract(pdf,layers,pages,target,source):
     data=flatten_overlays(pdf,layers) if layers else pdf
     extracted=extract_pages(data,pages)
     return str(write_pdf(extracted,Path(target),False,(Path(source),)))
+
+
+def export_page_images(pdf,layers,pages,folder,stem,dpi):
+    data=flatten_overlays(pdf,layers) if layers else pdf
+    return tuple(str(path) for path in export_pages_as_png(
+        data,pages,Path(folder),stem,dpi))
 
 def edit_page_document(pdf,layers,operation,pages,target=None):
     data=flatten_overlays(pdf,layers) if layers else pdf
@@ -123,6 +131,9 @@ class MainWindow(QMainWindow):
         self.layer_id=None
         self.annotation=None
         self.crop_pages=()
+        self.search_results=()
+        self.search_index=-1
+        self.search_revision=None
         self.token=0
         self.busy=False
         self.render_serial=0
@@ -167,6 +178,7 @@ class MainWindow(QMainWindow):
             ("blank_page","新增空白頁",self.add_blank_page,None),
             ("insert_pdf","插入另一份 PDF（全部頁面）…",self.insert_pdf_pages,None),
             ("extract_pages","抽取選取頁面另存…",self.extract_selected_pages,None),
+            ("export_png","匯出選取頁面為 PNG…",self.export_selected_pages_png,None),
             ("direct_crop","直接拖曳裁切框",self.toggle_direct_crop,None),
             ("crop_page","精確輸入裁切邊距…",self.show_crop_dialog,None),
             ("delete_page","刪除選取頁面",self.delete_current_page,"Ctrl+Delete")]:
@@ -211,11 +223,37 @@ class MainWindow(QMainWindow):
         self.page_spin.setRange(1,1)
         self.page_spin.valueChanged.connect(lambda n:self.goto_page(n-1))
         toolbar.addWidget(self.page_spin)
-        zoom=QComboBox()
-        zoom.addItems(["75%","100%","125%","150%","200%"])
-        zoom.setCurrentText("125%")
-        zoom.currentTextChanged.connect(self.change_zoom)
-        toolbar.addWidget(zoom)
+        self.zoom=QComboBox()
+        self.zoom.addItems(["適合頁面","適合寬度","75%","100%","125%","150%","200%"])
+        self.zoom.setCurrentText("125%")
+        self.zoom.currentTextChanged.connect(self.change_zoom)
+        toolbar.addWidget(self.zoom)
+        self.addToolBarBreak()
+        search_toolbar=QToolBar("文件搜尋",self)
+        search_toolbar.setMovable(False)
+        self.addToolBar(search_toolbar)
+        search_action=QAction("搜尋",self)
+        search_action.setShortcut(QKeySequence("Ctrl+F"))
+        search_action.triggered.connect(self.focus_search)
+        search_toolbar.addAction(search_action)
+        self.actions["search"]=search_action
+        self.search_input=QLineEdit()
+        self.search_input.setPlaceholderText("輸入全文搜尋文字後按 Enter")
+        self.search_input.setMaximumWidth(360)
+        self.search_input.returnPressed.connect(lambda:self.perform_search())
+        search_toolbar.addWidget(self.search_input)
+        previous=QAction("上一筆",self)
+        previous.setShortcut(QKeySequence("Shift+F3"))
+        previous.triggered.connect(lambda:self.next_search_result(-1))
+        search_toolbar.addAction(previous)
+        self.actions["search_previous"]=previous
+        next_result=QAction("下一筆",self)
+        next_result.setShortcut(QKeySequence("F3"))
+        next_result.triggered.connect(self.next_search_result)
+        search_toolbar.addAction(next_result)
+        self.actions["search_next"]=next_result
+        self.search_count=QLabel("0 / 0")
+        search_toolbar.addWidget(self.search_count)
         splitter=QSplitter()
         self.thumbs=ThumbnailList()
         self.thumbs.setIconSize(QSize(110,140))
@@ -297,6 +335,7 @@ class MainWindow(QMainWindow):
         self.actions["blank_page"].setEnabled(manage and bool(selected))
         self.actions["insert_pdf"].setEnabled(manage and bool(selected))
         self.actions["extract_pages"].setEnabled(manage and bool(selected))
+        self.actions["export_png"].setEnabled(manage and bool(selected))
         self.actions["crop_page"].setEnabled(edit and bool(selected))
         self.actions["direct_crop"].setEnabled(edit and bool(selected))
         self.actions["delete_page"].setEnabled(manage and bool(selected) and len(selected)<self.page_count)
@@ -312,6 +351,11 @@ class MainWindow(QMainWindow):
             self.actions[name].setEnabled(selected_highlight)
         self.actions["delete_annotation"].setEnabled(selected_annotation)
         self.markup_menu_button.setEnabled(edit)
+        self.actions["search"].setEnabled(active and not self.busy)
+        valid_search=active and not self.busy and bool(self.search_results) and self.search_revision==self.session.revision
+        self.actions["search_previous"].setEnabled(valid_search)
+        self.actions["search_next"].setEnabled(valid_search)
+        self.search_input.setEnabled(active and not self.busy)
         self.thumbs.setEnabled(active and not self.busy)
         self.text_panel.apply_button.setEnabled(edit and self.preview is not None)
         self.canvas.setEnabled(not self.busy)
@@ -370,6 +414,7 @@ class MainWindow(QMainWindow):
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.cancel_direct_crop()
+        self.clear_search_results(True)
         self.session=session
         self.token+=1
         self.preview=None
@@ -637,6 +682,35 @@ class MainWindow(QMainWindow):
         self.jobs.submit(export_extract,(self.session.pdf,self.session.overlays,pages,
             str(target),str(self.session.source)),done,self.error)
 
+    def export_selected_pages_png(self):
+        if not self.session or self.busy:
+            return
+        folder=QFileDialog.getExistingDirectory(self,"選擇 PNG 輸出資料夾",
+            str(self.session.source.parent))
+        if not folder:
+            return
+        dpi,ok=QInputDialog.getInt(self,"PNG 解析度","DPI：",150,72,600,1)
+        if ok:
+            self.export_selected_png_to(Path(folder),dpi)
+
+    def export_selected_png_to(self,folder,dpi,pages=None):
+        pages=tuple(pages) if pages is not None else self.selected_page_indices()
+        if not self.session or self.busy or not pages:
+            return
+        revision=self.session.revision
+        token=self.token
+        self.busy=True
+        self.refresh_actions()
+        self.statusBar().showMessage(f"正在將 {len(pages)} 頁輸出為 PNG…")
+        def done(paths):
+            self.busy=False
+            if self.closed or token!=self.token or revision!=self.session.revision:
+                return
+            self.refresh_actions()
+            self.statusBar().showMessage(f"已輸出 {len(paths)} 張 PNG 至：{folder}")
+        self.jobs.submit(export_page_images,(self.session.pdf,self.session.overlays,pages,
+            str(folder),self.session.source.stem,dpi),done,self.error)
+
     def show_crop_dialog(self):
         pages=self.selected_page_indices()
         if not pages:
@@ -735,8 +809,97 @@ class MainWindow(QMainWindow):
             f"正在加入頁首頁尾至 {len(pages)} 頁…",self.page,pages)
 
     def change_zoom(self,text):
+        if text=="適合頁面":
+            self.fit_zoom("page")
+            return
+        if text=="適合寬度":
+            self.fit_zoom("width")
+            return
         self.scale=float(text.rstrip("%"))/100
         self.request_render()
+
+    def fit_zoom(self,mode):
+        if not self.page_data or mode not in ("page","width"):
+            return
+        base_width=self.page_data["display_size"][0]/self.scale
+        base_height=self.page_data["display_size"][1]/self.scale
+        available_width=max(100,self.canvas.viewport().width()-32)
+        available_height=max(100,self.canvas.viewport().height()-32)
+        scale=available_width/base_width
+        if mode=="page":
+            scale=min(scale,available_height/base_height)
+        self.scale=max(0.1,min(5.0,scale))
+        label="適合頁面" if mode=="page" else "適合寬度"
+        self.zoom.blockSignals(True)
+        self.zoom.setCurrentText(label)
+        self.zoom.blockSignals(False)
+        self.request_render()
+
+    def focus_search(self):
+        if not self.session:
+            return
+        self.search_input.setFocus()
+        self.search_input.selectAll()
+
+    def clear_search_results(self,clear_query=False):
+        self.search_results=()
+        self.search_index=-1
+        self.search_revision=None
+        self.search_count.setText("0 / 0")
+        self.canvas.clear_search_result()
+        if clear_query:
+            self.search_input.clear()
+
+    def perform_search(self,query=None):
+        if not self.session or self.busy:
+            return
+        text=(self.search_input.text() if query is None else str(query)).strip()
+        if not text:
+            self.clear_search_results()
+            self.statusBar().showMessage("請輸入要搜尋的文字。")
+            return
+        self.search_input.setText(text)
+        revision=self.session.revision
+        token=self.token
+        self.busy=True
+        self.refresh_actions()
+        self.statusBar().showMessage("正在搜尋整份文件…")
+        def done(matches):
+            self.busy=False
+            if self.closed or token!=self.token or revision!=self.session.revision:
+                return
+            self.search_results=matches
+            self.search_index=0 if matches else -1
+            self.search_revision=revision
+            self.refresh_actions()
+            if matches:
+                self.show_search_result()
+            else:
+                self.search_count.setText("0 / 0")
+                self.canvas.clear_search_result()
+                self.statusBar().showMessage(f"找不到「{text}」。")
+        self.jobs.submit(find_text,(self.session.pdf,text),done,self.error)
+
+    def next_search_result(self,step=1):
+        if (not self.session or not self.search_results or
+                self.search_revision!=self.session.revision):
+            self.clear_search_results()
+            self.refresh_actions()
+            return
+        self.search_index=(self.search_index+step)%len(self.search_results)
+        self.show_search_result()
+
+    def show_search_result(self):
+        if not self.search_results or not 0<=self.search_index<len(self.search_results):
+            return
+        match=self.search_results[self.search_index]
+        self.search_count.setText(f"{self.search_index+1} / {len(self.search_results)}")
+        if self.page!=match.page:
+            self.goto_page(match.page)
+        elif self.page_data and self.page_data["page"]==match.page:
+            self.canvas.show_search_result(match.rect)
+        self.statusBar().showMessage(
+            f"搜尋結果 {self.search_index+1} / {len(self.search_results)}，第 {match.page+1} 頁")
 
     def request_render(self):
         if not self.session:
@@ -752,6 +915,9 @@ class MainWindow(QMainWindow):
             self.page_data=result
             try:
                 self.canvas.display(result,layers,self.layer_id)
+                if (self.search_results and self.search_revision==self.session.revision and
+                        self.search_results[self.search_index].page==self.page):
+                    self.canvas.show_search_result(self.search_results[self.search_index].rect)
                 if self.annotation is not None:
                     selected=next((item for item in result.get("annotations",())
                         if item.xref==self.annotation.xref),None)

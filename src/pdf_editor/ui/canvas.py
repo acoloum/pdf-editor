@@ -195,6 +195,7 @@ class Canvas(QGraphicsView):
         self.annotations=[]
         self.highlight=None
         self.annotation_highlight=None
+        self.search_highlight=None
         self.selected_run=None
         self.selected_annotation=None
         self._drag_run=None
@@ -228,6 +229,7 @@ class Canvas(QGraphicsView):
         self.scene().clear()
         self.highlight=None
         self.annotation_highlight=None
+        self.search_highlight=None
         self.selected_run=None
         self.selected_annotation=None
         self._drag_run=None
@@ -284,6 +286,21 @@ class Canvas(QGraphicsView):
         if self.annotation_highlight:
             self.scene().removeItem(self.annotation_highlight)
             self.annotation_highlight=None
+
+    def show_search_result(self,rect):
+        self.clear_search_result()
+        transformed=transformed_rect(self.matrix,rect)
+        pen=QPen(QColor("#c58a00"),2)
+        pen.setCosmetic(True)
+        self.search_highlight=self.scene().addRect(transformed[0],transformed[1],
+            transformed[2]-transformed[0],transformed[3]-transformed[1],pen,
+            QBrush(QColor(255,210,35,105)))
+        self.search_highlight.setZValue(3)
+
+    def clear_search_result(self):
+        if self.search_highlight:
+            self.scene().removeItem(self.search_highlight)
+            self.search_highlight=None
 
     def select_annotation(self,item):
         self.clear_annotation_selection()

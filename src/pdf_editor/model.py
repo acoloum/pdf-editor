@@ -58,3 +58,9 @@ class AnnotationInfo:
     rect: Rect
     color: Color | None = None
     content: str = ""
+
+
+@dataclass(frozen=True)
+class SearchMatch:
+    page: int
+    rect: Rect
