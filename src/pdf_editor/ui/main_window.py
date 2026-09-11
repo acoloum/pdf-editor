@@ -5,7 +5,7 @@ import uuid
 import pymupdf
 from PySide6.QtCore import Qt,QStandardPaths,QSize
 from PySide6.QtGui import QAction,QKeySequence,QIcon,QPixmap
-from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton
+from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton,QAbstractItemView
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import write_pdf,publish_batch
 from pdf_editor.engine.render import render_page,thumbnail
@@ -128,10 +128,13 @@ class MainWindow(QMainWindow):
         self.thumbs.setFlow(QListView.Flow.TopToBottom)
         self.thumbs.setWrapping(False)
         self.thumbs.setWordWrap(True)
+        self.thumbs.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.thumbs.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.thumbs.setGridSize(QSize(145,165))
         self.thumbs.setMinimumWidth(160)
         self.thumbs.setMaximumWidth(220)
         self.thumbs.currentRowChanged.connect(self.goto_page)
+        self.thumbs.model().rowsMoved.connect(self.thumbnail_rows_moved)
         splitter.addWidget(self.thumbs)
         self.canvas=Canvas()
         self.canvas.run_selected.connect(self.select_run)
@@ -184,6 +187,7 @@ class MainWindow(QMainWindow):
         self.actions["rotate_right"].setEnabled(manage)
         self.actions["delete_page"].setEnabled(manage and self.page_count>1)
         self.page_menu_button.setEnabled(manage)
+        self.thumbs.setEnabled(active and not self.busy)
         self.text_panel.apply_button.setEnabled(edit and self.preview is not None)
         self.canvas.setEnabled(not self.busy)
         self.overlay_panel.setEnabled(edit)
@@ -254,6 +258,7 @@ class MainWindow(QMainWindow):
         self.thumbs.clear()
         for i in range(self.page_count):
             self.thumbs.addItem(QListWidgetItem(f"第 {i+1} 頁"))
+        self.thumbs.setCurrentRow(0)
         self.thumbs.blockSignals(False)
         self.setWindowTitle(f"{session.source.name} — 墨頁 PDF")
         self.refresh_actions()
@@ -335,9 +340,19 @@ class MainWindow(QMainWindow):
 
     def move_current_page(self,offset):
         target=self.page+offset
-        if not 0<=target<self.page_count:
+        self.move_page_to(self.page,target)
+
+    def move_page_to(self,source,target):
+        if not 0<=source<self.page_count or not 0<=target<self.page_count or source==target:
             return
+        self.page=source
         self.submit_page_operation("move",target,"正在移動頁面…",target)
+
+    def thumbnail_rows_moved(self,parent,start,end,destination_parent,destination):
+        if start!=end or self.busy:
+            return
+        target=destination if destination<start else destination-1
+        self.move_page_to(start,target)
 
     def rotate_current_page(self,degrees):
         if degrees not in (-90,90):

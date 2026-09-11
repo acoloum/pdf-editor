@@ -2,7 +2,8 @@ import hashlib
 from dataclasses import replace
 import pytest
 import pymupdf
-from PySide6.QtCore import Qt, QPoint, QPointF
+from PySide6.QtCore import Qt, QPoint, QPointF, QModelIndex
+from PySide6.QtWidgets import QAbstractItemView
 from PySide6.QtTest import QSignalSpy
 from pdf_editor.ui.main_window import MainWindow
 from pdf_editor.engine.render import render_page
@@ -520,6 +521,27 @@ def test_window_page_actions_follow_current_page(qtbot, multi_page_path, source_
         window.open_document(source_path)
         qtbot.waitUntil(lambda: window.page_count == 1, timeout=30000)
         assert not window.actions["delete_page"].isEnabled()
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_thumbnail_list_supports_internal_drag_reordering(qtbot, multi_page_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+
+        assert window.thumbs.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
+        assert window.thumbs.currentRow() == 0
+        moved = window.thumbs.model().moveRow(QModelIndex(), 0, QModelIndex(), 3)
+
+        assert moved
+        qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
+        assert _document_page_texts(window.session.pdf) == ["PAGE 2", "PAGE 3", "PAGE 1"]
+        assert window.page == 2
+        assert window.thumbs.currentRow() == 2
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
