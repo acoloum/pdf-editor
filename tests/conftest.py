@@ -32,3 +32,15 @@ def source_path(tmp_path, pdf_bytes):
     path = tmp_path / "原始.pdf"
     path.write_bytes(pdf_bytes)
     return path
+
+
+@pytest.fixture
+def multi_page_path(tmp_path):
+    doc = pymupdf.open()
+    for index in range(3):
+        page = doc.new_page(width=300, height=200)
+        page.insert_text((40, 80), f"PAGE {index + 1}", fontsize=18)
+    path = tmp_path / "三頁.pdf"
+    path.write_bytes(doc.tobytes())
+    doc.close()
+    return path

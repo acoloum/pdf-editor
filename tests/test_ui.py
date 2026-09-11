@@ -424,3 +424,102 @@ def test_window_toolbar_add_text_edits_and_applies_on_page(qtbot, source_path):
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
+
+
+def _document_page_texts(pdf):
+    with pymupdf.open(stream=pdf, filetype="pdf") as doc:
+        return [page.get_text().strip() for page in doc]
+
+
+def test_window_page_menu_exposes_management_actions(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert window.page_menu_button.text() == "頁面操作"
+    assert [window.actions[name].text() for name in (
+        "page_up", "page_down", "rotate_left", "rotate_right", "delete_page"
+    )] == ["上移一頁", "下移一頁", "逆時針旋轉", "順時針旋轉", "刪除此頁"]
+
+
+def test_window_moves_current_page_and_refreshes_navigation(qtbot, multi_page_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+
+        window.move_current_page(1)
+
+        qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
+        assert _document_page_texts(window.session.pdf) == ["PAGE 2", "PAGE 1", "PAGE 3"]
+        assert window.page == 1
+        assert window.page_count == 3
+        assert window.thumbs.count() == 3
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_window_rotates_current_page(qtbot, multi_page_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+
+        window.rotate_current_page(90)
+
+        qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
+        with pymupdf.open(stream=window.session.pdf, filetype="pdf") as doc:
+            assert doc[0].rotation == 90
+        assert window.page == 0
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_window_deletes_page_and_keeps_valid_selection(qtbot, multi_page_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        window.goto_page(2)
+        qtbot.waitUntil(lambda: window.page == 2, timeout=30000)
+
+        window.delete_current_page()
+
+        qtbot.waitUntil(lambda: not window.busy and window.page_count == 2, timeout=30000)
+        assert _document_page_texts(window.session.pdf) == ["PAGE 1", "PAGE 2"]
+        assert window.page == 1
+        assert window.thumbs.count() == 2
+
+        window.history_step(False)
+        qtbot.waitUntil(lambda: window.page_count == 3, timeout=30000)
+        assert _document_page_texts(window.session.pdf) == ["PAGE 1", "PAGE 2", "PAGE 3"]
+        assert window.thumbs.count() == 3
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_window_page_actions_follow_current_page(qtbot, multi_page_path, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        assert not window.actions["page_up"].isEnabled()
+        assert window.actions["page_down"].isEnabled()
+        assert window.actions["delete_page"].isEnabled()
+
+        window.goto_page(2)
+        assert window.actions["page_up"].isEnabled()
+        assert not window.actions["page_down"].isEnabled()
+
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_count == 1, timeout=30000)
+        assert not window.actions["delete_page"].isEnabled()
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()

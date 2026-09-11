@@ -5,7 +5,7 @@ import uuid
 import pymupdf
 from PySide6.QtCore import Qt,QStandardPaths,QSize
 from PySide6.QtGui import QAction,QKeySequence,QIcon,QPixmap
-from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView
+from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import write_pdf,publish_batch
 from pdf_editor.engine.render import render_page,thumbnail
@@ -16,7 +16,7 @@ from pdf_editor.model import TextReplacement,TextInsertion,Overlay
 from pdf_editor.errors import EditorError
 from pdf_editor.workers import Jobs
 from pdf_editor.assets import AssetStore
-from pdf_editor.pages import merge_pages,split_pages
+from pdf_editor.pages import merge_pages,split_pages,move_page,rotate_page,delete_page
 from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.ui.overlay_panel import OverlayPanel
@@ -36,6 +36,16 @@ def export_split(pdf,layers,groups,folder,source):
     documents=split_pages(data,groups)
     targets=tuple(Path(folder)/f"拆分_{i+1:03}.pdf" for i in range(len(groups)))
     return tuple(str(p) for p in publish_batch(documents,targets,(Path(source),)))
+
+def edit_page_document(pdf,layers,operation,page,target=None):
+    data=flatten_overlays(pdf,layers) if layers else pdf
+    if operation=="move":
+        return move_page(data,page,target)
+    if operation=="rotate":
+        return rotate_page(data,page,target)
+    if operation=="delete":
+        return delete_page(data,page)
+    raise EditorError("PAGE_OPERATION","頁面操作無效。")
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -82,6 +92,23 @@ class MainWindow(QMainWindow):
                 action.setCheckable(True)
             toolbar.addAction(action)
             self.actions[name]=action
+        page_menu=QMenu(self)
+        for name,label,handler,key in [
+            ("page_up","上移一頁",lambda:self.move_current_page(-1),"Alt+Up"),
+            ("page_down","下移一頁",lambda:self.move_current_page(1),"Alt+Down"),
+            ("rotate_left","逆時針旋轉",lambda:self.rotate_current_page(-90),"Ctrl+Shift+Left"),
+            ("rotate_right","順時針旋轉",lambda:self.rotate_current_page(90),"Ctrl+Shift+Right"),
+            ("delete_page","刪除此頁",self.delete_current_page,"Ctrl+Delete")]:
+            action=QAction(label,self)
+            action.triggered.connect(handler)
+            action.setShortcut(QKeySequence(key))
+            page_menu.addAction(action)
+            self.actions[name]=action
+        self.page_menu_button=QToolButton()
+        self.page_menu_button.setText("頁面操作")
+        self.page_menu_button.setMenu(page_menu)
+        self.page_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        toolbar.addWidget(self.page_menu_button)
         toolbar.addSeparator()
         self.page_spin=QSpinBox()
         self.page_spin.setPrefix("第 ")
@@ -150,6 +177,13 @@ class MainWindow(QMainWindow):
         self.actions["split"].setEnabled(active and self.session.access.can_reorganize and not self.busy)
         self.actions["open"].setEnabled(not self.busy)
         self.actions["merge"].setEnabled(not self.busy)
+        manage=active and self.session.access.can_reorganize and not self.busy
+        self.actions["page_up"].setEnabled(manage and self.page>0)
+        self.actions["page_down"].setEnabled(manage and self.page<self.page_count-1)
+        self.actions["rotate_left"].setEnabled(manage)
+        self.actions["rotate_right"].setEnabled(manage)
+        self.actions["delete_page"].setEnabled(manage and self.page_count>1)
+        self.page_menu_button.setEnabled(manage)
         self.text_panel.apply_button.setEnabled(edit and self.preview is not None)
         self.canvas.setEnabled(not self.busy)
         self.overlay_panel.setEnabled(edit)
@@ -253,7 +287,69 @@ class MainWindow(QMainWindow):
         self.page_spin.blockSignals(True)
         self.page_spin.setValue(page+1)
         self.page_spin.blockSignals(False)
+        self.refresh_actions()
         self.request_render()
+
+    def sync_page_navigation(self,selected=None):
+        with pymupdf.open(stream=self.session.pdf,filetype="pdf") as doc:
+            self.page_count=doc.page_count
+        self.page=max(0,min(self.page if selected is None else selected,self.page_count-1))
+        self.page_spin.blockSignals(True)
+        self.page_spin.setRange(1,self.page_count)
+        self.page_spin.setValue(self.page+1)
+        self.page_spin.blockSignals(False)
+        self.thumbs.blockSignals(True)
+        self.thumbs.clear()
+        for index in range(self.page_count):
+            self.thumbs.addItem(QListWidgetItem(f"第 {index+1} 頁"))
+        self.thumbs.setCurrentRow(self.page)
+        self.thumbs.blockSignals(False)
+        self.page_data=None
+        self.refresh_actions()
+        self.request_render()
+        self.queue_thumbnail(0,self.token,self.session.revision)
+
+    def submit_page_operation(self,operation,target,status,selected):
+        if not self.session or self.busy or not self.session.access.can_reorganize:
+            return
+        self.canvas.cancel_inline_editor()
+        self.canvas.cancel_text_insertion()
+        self.actions["add_text"].setChecked(False)
+        self.preview=None
+        self.run=None
+        self.insertion_rect=None
+        revision=self.session.revision
+        token=self.token
+        self.busy=True
+        self.refresh_actions()
+        self.statusBar().showMessage(status)
+        def done(pdf):
+            self.busy=False
+            if self.closed or token!=self.token or revision!=self.session.revision:
+                return
+            self.session.apply_state(pdf,())
+            self.text_panel.setEnabled(False)
+            self.sync_page_navigation(selected)
+        self.jobs.submit(edit_page_document,
+            (self.session.pdf,self.session.overlays,operation,self.page,target),done,self.error)
+
+    def move_current_page(self,offset):
+        target=self.page+offset
+        if not 0<=target<self.page_count:
+            return
+        self.submit_page_operation("move",target,"正在移動頁面…",target)
+
+    def rotate_current_page(self,degrees):
+        if degrees not in (-90,90):
+            return
+        direction="逆時針" if degrees<0 else "順時針"
+        self.submit_page_operation("rotate",degrees,f"正在{direction}旋轉頁面…",self.page)
+
+    def delete_current_page(self):
+        if self.page_count<=1:
+            return
+        selected=min(self.page,self.page_count-2)
+        self.submit_page_operation("delete",None,"正在刪除頁面…",selected)
 
     def change_zoom(self,text):
         self.scale=float(text.rstrip("%"))/100
@@ -528,8 +624,7 @@ class MainWindow(QMainWindow):
         self.run=None
         self.session.redo() if redo else self.session.undo()
         self.text_panel.setEnabled(False)
-        self.refresh_actions()
-        self.request_render()
+        self.sync_page_navigation()
 
     def save(self):
         if not self.session or self.busy:
