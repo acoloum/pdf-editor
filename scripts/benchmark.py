@@ -44,7 +44,7 @@ def main():
             pages=doc.page_count
         opened=time.perf_counter()-t
         t=time.perf_counter()
-        render_page(data,0,1.25)
+        render_page(data,0,1.25,pixel_ratio=2.0)
         render=time.perf_counter()-t
         run=extract_runs(data,0)[0]
         req=TextReplacement(hashlib.sha256(data).hexdigest(),0,run.id,
@@ -61,10 +61,9 @@ def main():
             "render_seconds":render,"edit_seconds":edit,"save_seconds":save,"peak_rss_bytes":peak[0]})
     info={"os":platform.platform(),"python":platform.python_version(),"cpu":platform.processor(),
         "physical_memory_bytes":psutil.virtual_memory().total,"sample_interval_seconds":0.05,
-        "method":"單程序引擎測量；主程序及子程序 RSS 每 50 毫秒採樣，不含其他應用程式。",
+        "method":"單程序引擎測量；頁面以 125% 縮放及 2 倍像素密度渲染；主程序及子程序 RSS 每 50 毫秒採樣，不含其他應用程式。",
         "results":results}
     (output/"results.json").write_text(json.dumps(info,ensure_ascii=False,indent=2),encoding="utf-8")
     print(json.dumps(results))
 if __name__=="__main__":
     main()
-

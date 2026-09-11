@@ -51,8 +51,10 @@ class Canvas(QGraphicsView):
         self.runs=data["runs"]
         pix=QPixmap()
         pix.loadFromData(data["png"])
+        pix.setDevicePixelRatio(data.get("pixel_ratio",1.0))
         self.scene().addPixmap(pix)
-        self.scene().setSceneRect(0,0,pix.width(),pix.height())
+        width,height=data.get("display_size",(pix.width(),pix.height()))
+        self.scene().setSceneRect(0,0,width,height)
         for layer in layers:
             if layer.page!=data["page"]:
                 continue
@@ -85,4 +87,3 @@ class Canvas(QGraphicsView):
                     self.run_selected.emit(run)
                     break
         super().mousePressEvent(event)
-

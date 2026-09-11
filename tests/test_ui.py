@@ -6,6 +6,7 @@ from pdf_editor.ui.main_window import MainWindow
 from pdf_editor.engine.render import render_page
 from pdf_editor.engine.geometry import transform_point, inverse_transform
 from pdf_editor.ui.signature_dialog import SignatureDialog
+from pdf_editor.ui.canvas import Canvas
 from test_text import request_for
 
 def test_reader_preview_apply_undo(qtbot, source_path, font_path):
@@ -72,3 +73,39 @@ def test_render_maps_known_corner(pdf_bytes, rotation):
     expected = {0:(0,0), 90:(400,0), 180:(500,400), 270:(0,500)}[rotation]
     assert transform_point(data["matrix"],0,0) == pytest.approx(expected)
     assert transform_point(inverse_transform(data["matrix"]),*expected) == pytest.approx((0,0))
+
+
+def test_high_resolution_render_keeps_display_geometry(pdf_bytes):
+    from PIL import Image
+    import io
+
+    data = render_page(pdf_bytes, 0, 1.25, pixel_ratio=2.0)
+    with Image.open(io.BytesIO(data["png"])) as image:
+        assert image.size == (1250, 1000)
+    assert data["display_size"] == pytest.approx((625, 500))
+    assert data["pixel_ratio"] == 2.0
+    assert transform_point(data["matrix"], 500, 400) == pytest.approx((625, 500))
+
+
+def test_canvas_displays_high_resolution_page_at_logical_size(qtbot, pdf_bytes):
+    canvas = Canvas()
+    qtbot.addWidget(canvas)
+    data = render_page(pdf_bytes, 0, 1.25, pixel_ratio=2.0)
+
+    canvas.display(data)
+
+    page_item = canvas.scene().items()[-1]
+    assert page_item.pixmap().devicePixelRatio() == 2.0
+    assert canvas.scene().sceneRect().width() == pytest.approx(625)
+    assert canvas.scene().sceneRect().height() == pytest.approx(500)
+
+
+def test_window_requests_high_resolution_page(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window.open_document(source_path)
+    qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+
+    assert window.page_data["pixel_ratio"] >= 2.0
+    window.close()
