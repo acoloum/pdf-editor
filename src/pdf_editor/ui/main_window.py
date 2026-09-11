@@ -78,6 +78,8 @@ class MainWindow(QMainWindow):
             action.triggered.connect(handler)
             if key:
                 action.setShortcut(QKeySequence(key))
+            if name=="add_text":
+                action.setCheckable(True)
             toolbar.addAction(action)
             self.actions[name]=action
         toolbar.addSeparator()
@@ -109,6 +111,7 @@ class MainWindow(QMainWindow):
         self.canvas.run_moved.connect(self.move_run)
         self.canvas.run_delete_requested.connect(self.delete_run)
         self.canvas.text_insertion_requested.connect(self.begin_text_insertion)
+        self.canvas.text_insertion_cancelled.connect(self.cancel_text_insertion)
         self.canvas.layer_selected.connect(self.select_layer)
         self.canvas.layer_moved.connect(self.move_layer)
         splitter.addWidget(self.canvas)
@@ -194,6 +197,8 @@ class MainWindow(QMainWindow):
             session=DocumentSession.open(Path(path),password)
         if self.session:
             self.session.close()
+        self.canvas.cancel_text_insertion()
+        self.actions["add_text"].setChecked(False)
         self.session=session
         self.token+=1
         self.preview=None
@@ -236,6 +241,8 @@ class MainWindow(QMainWindow):
         if not self.session or not 0<=page<self.page_count or page==self.page:
             return
         self.page=page
+        self.canvas.cancel_text_insertion()
+        self.actions["add_text"].setChecked(False)
         self.run=None
         self.insertion_rect=None
         self.text_panel.setEnabled(False)
@@ -273,6 +280,8 @@ class MainWindow(QMainWindow):
     def select_run(self,run):
         if not self.session or not self.session.access.can_edit or self.preview:
             return
+        self.canvas.cancel_text_insertion()
+        self.actions["add_text"].setChecked(False)
         self.run=run
         self.insertion_rect=None
         self.panels.setCurrentWidget(self.text_panel)
@@ -317,8 +326,12 @@ class MainWindow(QMainWindow):
             p.alignment.currentData())
         self.apply_text_immediately(request,"正在移動文字…")
 
-    def start_text_insertion(self):
+    def start_text_insertion(self,checked=True):
+        if not checked:
+            self.cancel_text_insertion()
+            return
         if not self.session or self.busy or self.preview:
+            self.actions["add_text"].setChecked(False)
             return
         self.run=None
         self.insertion_rect=None
@@ -326,10 +339,16 @@ class MainWindow(QMainWindow):
         self.text_panel.setEnabled(False)
         self.statusBar().showMessage("請在頁面空白處或空白儲存格中點一下。")
 
+    def cancel_text_insertion(self):
+        self.canvas.cancel_text_insertion()
+        self.actions["add_text"].setChecked(False)
+        self.statusBar().showMessage("已取消新增文字。")
+
     def begin_text_insertion(self,position):
         if not self.session or self.busy or self.preview:
             return
         x,y=position
+        self.actions["add_text"].setChecked(False)
         cell=find_table_cell(self.session.pdf,self.page,(x,y,x,y))
         if cell:
             rect=cell
@@ -349,6 +368,8 @@ class MainWindow(QMainWindow):
     def delete_run(self,run):
         if not self.session or not run.editable or self.busy or self.preview:
             return
+        self.canvas.cancel_text_insertion()
+        self.actions["add_text"].setChecked(False)
         self.run=run
         p=self.text_panel
         cell=find_table_cell(self.session.pdf,self.page,run.rect)
@@ -424,6 +445,8 @@ class MainWindow(QMainWindow):
         if self.preview and self.preview[0]==self.session.revision:
             self.session.apply_pdf(self.preview[1])
             self.preview=None
+            self.canvas.cancel_text_insertion()
+            self.actions["add_text"].setChecked(False)
             self.insertion_rect=None
             self.run=None
             self.text_panel.setEnabled(False)
@@ -435,6 +458,8 @@ class MainWindow(QMainWindow):
         if not self.session or self.busy:
             return
         self.preview=None
+        self.canvas.cancel_text_insertion()
+        self.actions["add_text"].setChecked(False)
         self.insertion_rect=None
         self.run=None
         self.session.redo() if redo else self.session.undo()

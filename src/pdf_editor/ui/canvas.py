@@ -1,7 +1,7 @@
 from dataclasses import replace
 from PySide6.QtCore import Qt, Signal, QPointF
 from PySide6.QtGui import QPixmap, QPen, QColor, QTransform, QPainter, QKeyEvent
-from PySide6.QtWidgets import QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,QGraphicsItem
+from PySide6.QtWidgets import QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,QGraphicsItem,QLabel
 from pdf_editor.engine.geometry import transformed_rect, transform_point, inverse_transform
 from pdf_editor.engine.overlay import transformed_image
 
@@ -35,6 +35,7 @@ class Canvas(QGraphicsView):
     run_moved=Signal(object)
     run_delete_requested=Signal(object)
     text_insertion_requested=Signal(object)
+    text_insertion_cancelled=Signal()
     layer_selected=Signal(str)
     layer_moved=Signal(object)
 
@@ -52,6 +53,11 @@ class Canvas(QGraphicsView):
         self._drag_start_scene=QPointF()
         self._drag_original_rect=None
         self._text_insertion=False
+        self.insertion_hint=QLabel("新增文字模式：請在頁面中點選位置（Esc 取消）",self.viewport())
+        self.insertion_hint.setStyleSheet(
+            "background:#1f5f4a;color:white;padding:10px 16px;border-radius:6px;font-weight:600;")
+        self.insertion_hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.insertion_hint.hide()
         self.setMinimumWidth(400)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -101,10 +107,26 @@ class Canvas(QGraphicsView):
         self.clear_text_selection()
         self._text_insertion=True
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setFocus()
+        self._place_insertion_hint()
+        self.insertion_hint.show()
+        self.insertion_hint.raise_()
 
-    def cancel_text_insertion(self):
+    def cancel_text_insertion(self,notify=False):
         self._text_insertion=False
         self.unsetCursor()
+        self.insertion_hint.hide()
+        if notify:
+            self.text_insertion_cancelled.emit()
+
+    def _place_insertion_hint(self):
+        self.insertion_hint.adjustSize()
+        x=max(12,(self.viewport().width()-self.insertion_hint.width())//2)
+        self.insertion_hint.move(x,12)
+
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        self._place_insertion_hint()
 
     def _show_highlight(self, rect):
         if self.highlight:
@@ -175,6 +197,10 @@ class Canvas(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
 
     def keyPressEvent(self,event: QKeyEvent):
+        if event.key()==Qt.Key.Key_Escape and self._text_insertion:
+            self.cancel_text_insertion(True)
+            event.accept()
+            return
         if event.key()==Qt.Key.Key_Delete and self.selected_run is not None:
             self.run_delete_requested.emit(self.selected_run)
             event.accept()

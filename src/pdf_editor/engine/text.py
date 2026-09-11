@@ -38,6 +38,11 @@ def _vertical_centered_rect(rect, text, size):
     top = box.y0 + max(0, (box.height - content_height) / 2)
     return pymupdf.Rect(box.x0, top, box.x1, top + content_height)
 
+def _font_resource_name(prefix, font_path, text):
+    """依字型與內容產生資源名稱，避免重用已子集化且缺字的字型。"""
+    token = hashlib.sha256(f"{font_path}\0{text}".encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}_{token}"
+
 def _new_text_shape(page, rect, text, font_path, font, size, color, alignment, fontname):
     """建立文字形狀；單行文字以基準線寫入，避免窄表格列被誤判為溢位。"""
     box = pymupdf.Rect(rect)
@@ -88,7 +93,8 @@ def insert_text(pdf: bytes, request: TextInsertion) -> bytes:
         if not bounds.contains(rect):
             raise EditorError("GEOMETRY", "文字框必須位於頁面內。")
         shape = _new_text_shape(page, rect, request.text, request.font_path, font,
-            request.size, request.color, request.alignment, "insertion")
+            request.size, request.color, request.alignment,
+            _font_resource_name("insertion", request.font_path, request.text))
         shape.commit()
         doc.subset_fonts(fallback=True)
         return doc.tobytes(garbage=4, deflate=True)
@@ -145,8 +151,9 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
         if not bounds.contains(rect):
             raise EditorError("GEOMETRY", "文字框必須位於頁面內。")
         if request.text:
+            resource_name=_font_resource_name("replacement",request.font_path,request.text)
             _new_text_shape(page, rect, request.text, request.font_path, font,
-                request.size, request.color, request.alignment, "replacement")
+                request.size, request.color, request.alignment, resource_name)
         page.add_redact_annot(old_rect, fill=False, cross_out=False)
         page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
             graphics=pymupdf.PDF_REDACT_LINE_ART_NONE, text=pymupdf.PDF_REDACT_TEXT_REMOVE)
@@ -154,7 +161,7 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
             return doc.tobytes(garbage=4, deflate=True)
         # 移除後重新建立形狀，避免使用已失效的頁面資源。
         shape = _new_text_shape(page, rect, request.text, request.font_path, font,
-            request.size, request.color, request.alignment, "replacement")
+            request.size, request.color, request.alignment, resource_name)
         shape.commit()
         doc.subset_fonts(fallback=True)
         return doc.tobytes(garbage=4, deflate=True)

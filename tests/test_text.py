@@ -144,6 +144,24 @@ def test_insert_text_adds_content_to_empty_table_cell(font_path):
     with pymupdf.open(stream=out) as result:
         assert "重新新增" in result[0].get_text()
 
+def test_insert_text_supports_multiple_chinese_insertions(font_path):
+    doc = pymupdf.open()
+    doc.new_page(width=300, height=200)
+    data = doc.tobytes()
+    doc.close()
+    first = editor_model.TextInsertion(hashlib.sha256(data).hexdigest(), 0,
+        "硬度", (40, 40, 140, 70), font_path, 12, (0, 0, 0), "left")
+    once = text_engine.insert_text(data, first)
+    second = editor_model.TextInsertion(hashlib.sha256(once).hexdigest(), 0,
+        "新增測試", (40, 100, 180, 130), font_path, 12, (0, 0, 0), "left")
+
+    twice = text_engine.insert_text(once, second)
+
+    with pymupdf.open(stream=twice) as result:
+        text = result[0].get_text()
+        assert "硬度" in text
+        assert "新增測試" in text
+
 def test_insert_chinese_after_deleting_existing_text(pdf_bytes, font_path, tmp_path):
     run = next(r for r in extract_runs(pdf_bytes, 0) if "品質" in r.text)
     with pymupdf.open(stream=pdf_bytes) as source:

@@ -248,3 +248,52 @@ def test_window_can_add_text_immediately_after_deletion(qtbot, source_path):
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
+
+def test_window_toolbar_add_text_completes_insertion(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.resize(1100, 760)
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+
+        window.actions["add_text"].trigger()
+        assert window.canvas._text_insertion
+        assert window.actions["add_text"].isChecked()
+        assert window.canvas.insertion_hint.isVisible()
+        x, y = transform_point(window.page_data["matrix"], 300, 330)
+        point = window.canvas.mapFromScene(QPointF(x, y))
+        qtbot.mouseClick(window.canvas.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        assert window.insertion_rect is not None
+        assert window.text_panel.isEnabled()
+        assert not window.actions["add_text"].isChecked()
+        assert not window.canvas.insertion_hint.isVisible()
+
+        window.text_panel.text.setPlainText("新增內容")
+        window.preview_from_panel()
+        qtbot.waitUntil(lambda: window.preview is not None, timeout=30000)
+        window.apply_preview()
+        assert "新增內容" in pymupdf.open(stream=window.session.pdf)[0].get_text()
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+def test_window_escape_cancels_visible_text_insertion_mode(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        window.actions["add_text"].trigger()
+        assert window.canvas.insertion_hint.isVisible()
+
+        qtbot.keyClick(window.canvas, Qt.Key.Key_Escape)
+
+        assert not window.canvas._text_insertion
+        assert not window.canvas.insertion_hint.isVisible()
+        assert not window.actions["add_text"].isChecked()
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
