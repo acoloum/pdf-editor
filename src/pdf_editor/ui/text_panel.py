@@ -94,6 +94,15 @@ class TextPanel(QWidget):
         x0,y0,x1,y1=run.rect
         self.set_rect((x0,y0,x1+10,y1+run.size*0.5))
 
+    def set_insertion(self, rect, size=11, centered=False):
+        self.setEnabled(True)
+        self.info.setText("輸入要新增的文字，再預覽並套用。")
+        self.text.clear()
+        self.size.setValue(size)
+        self.color=(0,0,0)
+        self.alignment.setCurrentIndex(2 if centered else 0)
+        self.set_rect(rect)
+
     def set_rect(self, rect):
         x0,y0,x1,y1=rect
         for spin,value in zip(self.box,(x0,y0,x1-x0,y1-y0)):

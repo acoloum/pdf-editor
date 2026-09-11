@@ -27,6 +27,17 @@ class TextReplacement:
     alignment: str = "left"
 
 @dataclass(frozen=True)
+class TextInsertion:
+    document_hash: str
+    page: int
+    text: str
+    rect: Rect
+    font_path: str
+    size: float
+    color: Color
+    alignment: str = "left"
+
+@dataclass(frozen=True)
 class DocumentAccess:
     can_edit: bool
     can_reorganize: bool

@@ -9,10 +9,10 @@ from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,Q
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import write_pdf,publish_batch
 from pdf_editor.engine.render import render_page,thumbnail
-from pdf_editor.engine.text import replace_text, find_table_cell
+from pdf_editor.engine.text import replace_text, insert_text, find_table_cell
 from pdf_editor.engine.overlay import flatten_overlays
 from pdf_editor.engine.fonts import default_font,embedded_font
-from pdf_editor.model import TextReplacement,Overlay
+from pdf_editor.model import TextReplacement,TextInsertion,Overlay
 from pdf_editor.errors import EditorError
 from pdf_editor.workers import Jobs
 from pdf_editor.assets import AssetStore
@@ -50,6 +50,7 @@ class MainWindow(QMainWindow):
         self.scale=1.25
         self.preview=None
         self.run=None
+        self.insertion_rect=None
         self.layer_id=None
         self.token=0
         self.busy=False
@@ -67,6 +68,7 @@ class MainWindow(QMainWindow):
             ("save","另存新檔",self.save,"Ctrl+Shift+S"),
             ("undo","復原",lambda:self.history_step(False),"Ctrl+Z"),
             ("redo","重做",lambda:self.history_step(True),"Ctrl+Y"),
+            ("add_text","新增文字",self.start_text_insertion,"Ctrl+T"),
             ("stamp","蓋章",self.add_stamp,None),
             ("signature","手寫簽名",self.add_signature,None),
             ("collection","常用圖章",self.add_collection,None),
@@ -106,6 +108,7 @@ class MainWindow(QMainWindow):
         self.canvas.run_selected.connect(self.select_run)
         self.canvas.run_moved.connect(self.move_run)
         self.canvas.run_delete_requested.connect(self.delete_run)
+        self.canvas.text_insertion_requested.connect(self.begin_text_insertion)
         self.canvas.layer_selected.connect(self.select_layer)
         self.canvas.layer_moved.connect(self.move_layer)
         splitter.addWidget(self.canvas)
@@ -135,7 +138,7 @@ class MainWindow(QMainWindow):
     def refresh_actions(self):
         active=self.session is not None
         edit=active and self.session.access.can_edit and not self.busy
-        for name in ("save","stamp","signature","collection"):
+        for name in ("save","add_text","stamp","signature","collection"):
             self.actions[name].setEnabled(edit)
         self.actions["undo"].setEnabled(edit and self.session.can_undo)
         self.actions["redo"].setEnabled(edit and self.session.can_redo)
@@ -145,7 +148,8 @@ class MainWindow(QMainWindow):
         self.text_panel.apply_button.setEnabled(edit and self.preview is not None)
         self.canvas.setEnabled(not self.busy)
         self.overlay_panel.setEnabled(edit)
-        self.text_panel.setEnabled(edit and self.run is not None and self.run.editable)
+        self.text_panel.setEnabled(edit and ((self.run is not None and self.run.editable) or
+            self.insertion_rect is not None))
 
     def error(self,error):
         self.busy=False
@@ -194,6 +198,7 @@ class MainWindow(QMainWindow):
         self.token+=1
         self.preview=None
         self.run=None
+        self.insertion_rect=None
         self.page_data=None
         self.page=0
         self.text_panel.setEnabled(False)
@@ -232,6 +237,7 @@ class MainWindow(QMainWindow):
             return
         self.page=page
         self.run=None
+        self.insertion_rect=None
         self.text_panel.setEnabled(False)
         self.page_spin.blockSignals(True)
         self.page_spin.setValue(page+1)
@@ -268,6 +274,7 @@ class MainWindow(QMainWindow):
         if not self.session or not self.session.access.can_edit or self.preview:
             return
         self.run=run
+        self.insertion_rect=None
         self.panels.setCurrentWidget(self.text_panel)
         self.text_panel.set_run(run)
         self.text_panel.font_path=str(default_font())
@@ -282,9 +289,17 @@ class MainWindow(QMainWindow):
         self.refresh_actions()
 
     def preview_from_panel(self):
-        if not self.run or not self.session or self.busy:
+        if not self.session or self.busy:
             return
         p=self.text_panel
+        if self.insertion_rect is not None:
+            req=TextInsertion(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
+                p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),p.color,
+                p.alignment.currentData())
+            self.preview_replacement(req,insert_text)
+            return
+        if not self.run:
+            return
         req=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),
             self.page,self.run.id,p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),p.color,
             p.alignment.currentData())
@@ -296,13 +311,49 @@ class MainWindow(QMainWindow):
         self.run=run
         x0,y0,x1,y1=run.rect
         self.text_panel.set_rect((x0,y0,x1+10,y1+run.size*0.5))
-        self.preview_from_panel()
+        p=self.text_panel
+        request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
+            run.id,p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),p.color,
+            p.alignment.currentData())
+        self.apply_text_immediately(request,"正在移動文字…")
+
+    def start_text_insertion(self):
+        if not self.session or self.busy or self.preview:
+            return
+        self.run=None
+        self.insertion_rect=None
+        self.canvas.start_text_insertion()
+        self.text_panel.setEnabled(False)
+        self.statusBar().showMessage("請在頁面空白處或空白儲存格中點一下。")
+
+    def begin_text_insertion(self,position):
+        if not self.session or self.busy or self.preview:
+            return
+        x,y=position
+        cell=find_table_cell(self.session.pdf,self.page,(x,y,x,y))
+        if cell:
+            rect=cell
+        else:
+            width,height=self.page_data["bounds"][2:]
+            x=max(0,min(x,width-160))
+            y=max(0,min(y,height-40))
+            rect=(x,y,min(width,x+160),min(height,y+40))
+        self.run=None
+        self.insertion_rect=rect
+        self.panels.setCurrentWidget(self.text_panel)
+        self.text_panel.font_path=str(default_font())
+        self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（預覽確認）")
+        self.text_panel.set_insertion(rect,centered=cell is not None)
+        self.refresh_actions()
 
     def delete_run(self,run):
         if not self.session or not run.editable or self.busy or self.preview:
             return
         self.run=run
         p=self.text_panel
+        cell=find_table_cell(self.session.pdf,self.page,run.rect)
+        x0,y0,x1,y1=run.rect
+        insertion_rect=cell or (x0,y0,x1+40,y1+run.size)
         request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),
             self.page,run.id,"",run.rect,p.font_path,run.size,run.color,"left")
         revision=self.session.revision
@@ -317,12 +368,37 @@ class MainWindow(QMainWindow):
             self.session.apply_pdf(pdf)
             self.preview=None
             self.run=None
-            self.text_panel.setEnabled(False)
+            self.insertion_rect=insertion_rect
+            self.text_panel.font_path=str(default_font())
+            self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（預覽確認）")
+            self.text_panel.set_insertion(insertion_rect,run.size,cell is not None)
             self.refresh_actions()
             self.request_render()
         self.jobs.submit(replace_text,(self.session.pdf,request),done,self.error)
 
-    def preview_replacement(self,request):
+    def apply_text_immediately(self,request,status):
+        if self.busy:
+            return
+        revision=self.session.revision
+        token=self.token
+        self.busy=True
+        self.refresh_actions()
+        self.statusBar().showMessage(status)
+        def done(pdf):
+            self.busy=False
+            if self.closed or token!=self.token or revision!=self.session.revision:
+                return
+            self.session.apply_pdf(pdf)
+            self.preview=None
+            self.run=None
+            self.insertion_rect=None
+            self.text_panel.setEnabled(False)
+            self.refresh_actions()
+            self.request_render()
+            self.queue_thumbnail(0,self.token,self.session.revision)
+        self.jobs.submit(replace_text,(self.session.pdf,request),done,self.error)
+
+    def preview_replacement(self,request,operation=replace_text):
         if self.busy:
             return
         revision=self.session.revision
@@ -337,7 +413,7 @@ class MainWindow(QMainWindow):
             self.preview=(revision,pdf)
             self.refresh_actions()
             self.request_render()
-        self.jobs.submit(replace_text,(self.session.pdf,request),done,self.error)
+        self.jobs.submit(operation,(self.session.pdf,request),done,self.error)
 
     def cancel_preview(self):
         self.preview=None
@@ -348,6 +424,8 @@ class MainWindow(QMainWindow):
         if self.preview and self.preview[0]==self.session.revision:
             self.session.apply_pdf(self.preview[1])
             self.preview=None
+            self.insertion_rect=None
+            self.run=None
             self.text_panel.setEnabled(False)
             self.refresh_actions()
             self.request_render()
@@ -357,6 +435,8 @@ class MainWindow(QMainWindow):
         if not self.session or self.busy:
             return
         self.preview=None
+        self.insertion_rect=None
+        self.run=None
         self.session.redo() if redo else self.session.undo()
         self.text_panel.setEnabled(False)
         self.refresh_actions()

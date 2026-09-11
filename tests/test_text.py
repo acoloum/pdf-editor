@@ -4,6 +4,7 @@ import pytest
 import pymupdf
 from pdf_editor.engine import text as text_engine
 from pdf_editor.engine.text import extract_runs, replace_text
+from pdf_editor import model as editor_model
 from pdf_editor.model import TextReplacement
 from pdf_editor.errors import EditorError
 
@@ -100,3 +101,80 @@ def test_find_table_cell_returns_cell_containing_text(font_path):
     assert callable(getattr(text_engine, "find_table_cell", None))
     cell = text_engine.find_table_cell(data, 0, run.rect)
     assert cell == pytest.approx((52, 52, 148, 98))
+
+def fragmented_table_pdf():
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    page.draw_rect((50, 50, 250, 100), width=1)
+    page.draw_line((150, 50), (150, 100), width=1)
+    page.insert_htmlbox((70, 62, 145, 92), "<b>ABC</b><i>DEF</i>")
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+def test_extract_runs_combines_font_spans_on_same_line():
+    runs = extract_runs(fragmented_table_pdf(), 0)
+    assert len(runs) == 1
+    assert runs[0].text == "ABCDEF"
+    assert runs[0].rect[0] < 80
+    assert runs[0].rect[2] > 100
+
+def test_replace_fragmented_table_text_uses_whole_cell(font_path):
+    data = fragmented_table_pdf()
+    run = extract_runs(data, 0)[0]
+    cell = text_engine.find_table_cell(data, 0, run.rect)
+    request = TextReplacement(hashlib.sha256(data).hexdigest(), 0, run.id,
+        "REPLACED", cell, font_path, 12, (0, 0, 0), "center")
+    out = replace_text(data, request)
+    with pymupdf.open(stream=out) as doc:
+        assert "REPLACED" in doc[0].get_text()
+        assert "ABC" not in doc[0].get_text()
+
+def test_insert_text_adds_content_to_empty_table_cell(font_path):
+    assert hasattr(editor_model, "TextInsertion")
+    assert callable(getattr(text_engine, "insert_text", None))
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    page.draw_rect((50, 50, 250, 100), width=1)
+    data = doc.tobytes()
+    doc.close()
+    request = editor_model.TextInsertion(hashlib.sha256(data).hexdigest(), 0,
+        "重新新增", (52, 52, 248, 98), font_path, 12, (0, 0, 0), "center")
+    out = text_engine.insert_text(data, request)
+    with pymupdf.open(stream=out) as result:
+        assert "重新新增" in result[0].get_text()
+
+def test_insert_chinese_after_deleting_existing_text(pdf_bytes, font_path, tmp_path):
+    run = next(r for r in extract_runs(pdf_bytes, 0) if "品質" in r.text)
+    with pymupdf.open(stream=pdf_bytes) as source:
+        xref = next(item[0] for item in source[0].get_fonts(full=True)
+            if "Noto" in item[3])
+        embedded = source.extract_font(xref)[3]
+    embedded_path = tmp_path / "embedded.otf"
+    embedded_path.write_bytes(embedded)
+    deleted = replace_text(pdf_bytes, TextReplacement(hashlib.sha256(pdf_bytes).hexdigest(),
+        0, run.id, "", run.rect, str(embedded_path), run.size, run.color))
+    request = editor_model.TextInsertion(hashlib.sha256(deleted).hexdigest(), 0,
+        "重新新增", (40, 40, 220, 110), font_path, 16, (0, 0, 0), "center")
+    out = text_engine.insert_text(deleted, request)
+    with pymupdf.open(stream=out) as result:
+        assert "重新新增" in result[0].get_text()
+
+def test_replace_text_centers_in_short_table_row(font_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    page.draw_rect((50, 50, 150, 63), width=0.5)
+    page.insert_text((60, 60), "ABC", fontsize=8)
+    data = doc.tobytes()
+    doc.close()
+    run = extract_runs(data, 0)[0]
+    request = TextReplacement(hashlib.sha256(data).hexdigest(), 0, run.id,
+        "硬度", (51.3, 51.3, 148.7, 61.7), font_path, 8, (0, 0, 0), "center")
+
+    out = replace_text(data, request)
+
+    with pymupdf.open(stream=out) as result:
+        replacement = next(r for r in extract_runs(out, 0) if r.text == "硬度")
+        assert result[0].rect.contains(replacement.rect)
+        assert (replacement.rect[0] + replacement.rect[2]) / 2 == pytest.approx(100, abs=3)
+        assert (replacement.rect[1] + replacement.rect[3]) / 2 == pytest.approx(56.5, abs=2)

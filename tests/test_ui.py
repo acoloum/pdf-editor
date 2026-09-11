@@ -169,6 +169,22 @@ def test_canvas_delete_key_emits_selected_run(qtbot, pdf_bytes):
     assert spy.count() == 1
     assert spy.at(0)[0].id == run.id
 
+def test_canvas_text_insertion_mode_emits_page_position(qtbot, pdf_bytes):
+    canvas = Canvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(700, 600)
+    canvas.show()
+    canvas.display(render_page(pdf_bytes, 0, 1.0))
+    qtbot.waitExposed(canvas)
+    assert hasattr(canvas, "text_insertion_requested")
+    assert hasattr(canvas, "start_text_insertion")
+    spy = QSignalSpy(canvas.text_insertion_requested)
+    canvas.start_text_insertion()
+    point = canvas.mapFromScene(QPointF(300, 330))
+    qtbot.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=point)
+    assert spy.count() == 1
+    assert spy.at(0)[0] == pytest.approx((300, 330), abs=2)
+
 def test_text_panel_has_alignment_choices(qtbot):
     panel = TextPanel()
     qtbot.addWidget(panel)
@@ -193,7 +209,7 @@ def test_window_delete_selected_text_is_undoable(qtbot, source_path):
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
 
-def test_window_dragged_text_creates_preview(qtbot, source_path):
+def test_window_dragged_text_is_applied_immediately(qtbot, source_path):
     window = MainWindow()
     qtbot.addWidget(window)
     try:
@@ -204,9 +220,31 @@ def test_window_dragged_text_creates_preview(qtbot, source_path):
         moved = replace(run, rect=(run.rect[0] + 20, run.rect[1] + 15,
             run.rect[2] + 20, run.rect[3] + 15))
         window.move_run(moved)
+        qtbot.waitUntil(lambda: not window.busy, timeout=30000)
+        assert window.session.dirty
+        assert window.preview is None
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+def test_window_can_add_text_immediately_after_deletion(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        run = next(r for r in window.page_data["runs"] if "品質" in r.text)
+        window.select_run(run)
+        window.delete_run(run)
+        qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
+        assert window.insertion_rect is not None
+        assert window.text_panel.isEnabled()
+        window.text_panel.text.setPlainText("重新新增")
+        window.text_panel.alignment.setCurrentIndex(2)
+        window.preview_from_panel()
         qtbot.waitUntil(lambda: window.preview is not None, timeout=30000)
-        assert window.preview[0] == window.session.revision
-        window.cancel_preview()
+        window.apply_preview()
+        assert "重新新增" in pymupdf.open(stream=window.session.pdf)[0].get_text()
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()

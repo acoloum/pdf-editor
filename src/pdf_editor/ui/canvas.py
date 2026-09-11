@@ -34,6 +34,7 @@ class Canvas(QGraphicsView):
     run_selected=Signal(object)
     run_moved=Signal(object)
     run_delete_requested=Signal(object)
+    text_insertion_requested=Signal(object)
     layer_selected=Signal(str)
     layer_moved=Signal(object)
 
@@ -50,6 +51,7 @@ class Canvas(QGraphicsView):
         self._drag_run=None
         self._drag_start_scene=QPointF()
         self._drag_original_rect=None
+        self._text_insertion=False
         self.setMinimumWidth(400)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -95,6 +97,15 @@ class Canvas(QGraphicsView):
             self.scene().removeItem(self.highlight)
             self.highlight=None
 
+    def start_text_insertion(self):
+        self.clear_text_selection()
+        self._text_insertion=True
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def cancel_text_insertion(self):
+        self._text_insertion=False
+        self.unsetCursor()
+
     def _show_highlight(self, rect):
         if self.highlight:
             self.scene().removeItem(self.highlight)
@@ -110,6 +121,12 @@ class Canvas(QGraphicsView):
         if isinstance(item,LayerItem):
             self.clear_text_selection()
         if not isinstance(item,LayerItem):
+            if self._text_insertion:
+                x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
+                self.cancel_text_insertion()
+                self.text_insertion_requested.emit((x,y))
+                event.accept()
+                return
             run=self._run_at(scene_pos)
             if run:
                 self.selected_run=run

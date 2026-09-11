@@ -18,6 +18,17 @@ def checked_font(path, text):
         raise EditorError("FONT_MISSING_GLYPH", "字型缺少部分字元，請更換字型。")
     return font
 
+def _roundtrips_text(path, text):
+    """確認嵌入字型重新寫入後仍能保留相同的 Unicode 文字。"""
+    try:
+        with pymupdf.open() as doc:
+            page = doc.new_page()
+            page.insert_font(fontname="probe", fontfile=str(path))
+            page.insert_text((40, 60), text, fontname="probe", fontsize=12)
+            return page.get_text().strip() == text.strip()
+    except Exception:
+        return False
+
 def embedded_font(pdf, page, run, folder):
     import hashlib
     def normalized(name):
@@ -32,7 +43,8 @@ def embedded_font(pdf, page, run, folder):
                 path.write_bytes(content)
                 try:
                     checked_font(path, run.text)
-                    return path
+                    if _roundtrips_text(path, run.text):
+                        return path
                 except EditorError:
                     pass
     return None
