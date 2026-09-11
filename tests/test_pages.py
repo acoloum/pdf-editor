@@ -81,3 +81,35 @@ def test_delete_page_rejects_last_remaining_page(pdf_bytes):
         pages.delete_page(pdf_bytes, 0)
 
     assert error.value.code == "LAST_PAGE"
+
+
+def test_move_pages_moves_contiguous_selection_and_preserves_order():
+    moved = pages.move_pages(_three_page_pdf(), (1, 2), -1)
+
+    assert _page_texts(moved) == ["PAGE 2", "PAGE 3", "PAGE 1"]
+
+
+def test_move_pages_moves_non_contiguous_selection_down():
+    moved = pages.move_pages(_three_page_pdf(), (0, 2), 1)
+
+    assert _page_texts(moved) == ["PAGE 2", "PAGE 1", "PAGE 3"]
+
+
+def test_rotate_pages_rotates_every_selected_page():
+    rotated = pages.rotate_pages(_three_page_pdf(), (0, 2), 90)
+
+    with pymupdf.open(stream=rotated, filetype="pdf") as doc:
+        assert [page.rotation for page in doc] == [90, 0, 90]
+
+
+def test_delete_pages_removes_every_selected_page():
+    deleted = pages.delete_pages(_three_page_pdf(), (0, 2))
+
+    assert _page_texts(deleted) == ["PAGE 2"]
+
+
+def test_delete_pages_rejects_removing_every_page():
+    with pytest.raises(EditorError) as error:
+        pages.delete_pages(_three_page_pdf(), (0, 1, 2))
+
+    assert error.value.code == "LAST_PAGE"
