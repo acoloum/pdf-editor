@@ -2,7 +2,7 @@ import hashlib
 from dataclasses import replace
 import pytest
 import pymupdf
-from PySide6.QtCore import Qt, QPoint, QPointF, QModelIndex, QItemSelectionModel
+from PySide6.QtCore import Qt, QPoint, QPointF, QItemSelectionModel
 from PySide6.QtWidgets import QAbstractItemView
 from PySide6.QtTest import QSignalSpy
 from pdf_editor.ui.main_window import MainWindow
@@ -495,9 +495,10 @@ def test_window_page_menu_exposes_management_actions(qtbot):
 
     assert window.page_menu_button.text() == "頁面操作"
     assert [window.actions[name].text() for name in (
-        "page_up", "page_down", "rotate_left", "rotate_right", "delete_page"
+        "page_up", "page_down", "rotate_left", "rotate_right", "duplicate_page",
+        "delete_page"
     )] == ["選取頁面上移", "選取頁面下移", "選取頁面向左旋轉",
-        "選取頁面向右旋轉", "刪除選取頁面"]
+        "選取頁面向右旋轉", "複製選取頁面", "刪除選取頁面"]
 
 
 def test_thumbnail_list_supports_extended_selection(qtbot,multi_page_path):
@@ -510,7 +511,7 @@ def test_thumbnail_list_supports_extended_selection(qtbot,multi_page_path):
         assert window.thumbs.selectionMode()==QAbstractItemView.SelectionMode.ExtendedSelection
         _select_thumbnail_pages(window,(0,2),2)
         assert window.selected_page_indices()==(0,2)
-        assert not window.thumbs.dragEnabled()
+        assert window.thumbs.dragEnabled()
     finally:
         window.session.saved_fingerprint=window.session.history.current[2]
         window.close()
@@ -567,6 +568,92 @@ def test_window_deletes_selected_pages_as_batch(qtbot,multi_page_path):
         assert _document_page_texts(window.session.pdf)==["PAGE 2"]
         assert window.selected_page_indices()==(0,)
         assert not window.actions["delete_page"].isEnabled()
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_moves_selected_thumbnails_as_dragged_group(qtbot,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(0,2),2)
+
+        window.move_selected_pages_to((0,2),3)
+
+        qtbot.waitUntil(lambda:not window.busy and window.session.dirty,timeout=30000)
+        assert _document_page_texts(window.session.pdf)==["PAGE 2","PAGE 1","PAGE 3"]
+        assert window.selected_page_indices()==(1,2)
+        assert window.page==2
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_thumbnail_drop_event_emits_selected_group_and_destination(qtbot,multi_page_path):
+    class DropEvent:
+        def __init__(self,source,position):
+            self._source=source
+            self._position=position
+            self.accepted=False
+
+        def source(self):
+            return self._source
+
+        def position(self):
+            return self._position
+
+        def setDropAction(self,action):
+            self.action=action
+
+        def accept(self):
+            self.accepted=True
+
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.show()
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(0,2),2)
+        window.thumbs.pages_dropped.disconnect(window.move_selected_pages_to)
+        emitted=[]
+        window.thumbs.pages_dropped.connect(lambda pages,destination:
+            emitted.append((pages,destination)))
+        rect=window.thumbs.visualItemRect(window.thumbs.item(1))
+        event=DropEvent(window.thumbs,QPointF(rect.center()))
+
+        window.thumbs.dropEvent(event)
+
+        assert event.accepted
+        assert event.action==Qt.DropAction.MoveAction
+        assert emitted==[((0,2),2)]
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_duplicates_selected_pages_and_can_undo(qtbot,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(0,2),2)
+
+        window.duplicate_selected_pages()
+
+        qtbot.waitUntil(lambda:not window.busy and window.page_count==5,timeout=30000)
+        assert _document_page_texts(window.session.pdf)==[
+            "PAGE 1","PAGE 2","PAGE 3","PAGE 1","PAGE 3"]
+        assert window.selected_page_indices()==(3,4)
+        assert window.page==4
+
+        window.history_step(False)
+        qtbot.waitUntil(lambda:window.page_count==3,timeout=30000)
+        assert _document_page_texts(window.session.pdf)==["PAGE 1","PAGE 2","PAGE 3"]
     finally:
         window.session.saved_fingerprint=window.session.history.current[2]
         window.close()
@@ -665,9 +752,7 @@ def test_thumbnail_list_supports_internal_drag_reordering(qtbot, multi_page_path
 
         assert window.thumbs.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
         assert window.thumbs.currentRow() == 0
-        moved = window.thumbs.model().moveRow(QModelIndex(), 0, QModelIndex(), 3)
-
-        assert moved
+        window.thumbs.pages_dropped.emit((0,),3)
         qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
         assert _document_page_texts(window.session.pdf) == ["PAGE 2", "PAGE 3", "PAGE 1"]
         assert window.page == 2

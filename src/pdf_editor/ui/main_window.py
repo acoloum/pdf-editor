@@ -3,7 +3,7 @@ from dataclasses import replace
 import hashlib
 import uuid
 import pymupdf
-from PySide6.QtCore import Qt,QStandardPaths,QSize
+from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal
 from PySide6.QtGui import QAction,QKeySequence,QIcon,QPixmap
 from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton,QAbstractItemView
 from pdf_editor.document.session import DocumentSession
@@ -16,8 +16,8 @@ from pdf_editor.model import TextReplacement,TextInsertion,Overlay
 from pdf_editor.errors import EditorError
 from pdf_editor.workers import Jobs
 from pdf_editor.assets import AssetStore
-from pdf_editor.pages import (merge_pages,split_pages,move_page,move_pages,rotate_pages,
-    delete_pages,page_order_after_move)
+from pdf_editor.pages import (merge_pages,split_pages,move_pages,move_pages_to,rotate_pages,
+    delete_pages,duplicate_pages,page_order_after_move,page_order_after_drop)
 from pdf_editor.annotations import (mark_text,add_text_note,delete_annotation,
     set_highlight_color)
 from pdf_editor.ui.canvas import Canvas
@@ -42,15 +42,39 @@ def export_split(pdf,layers,groups,folder,source):
 
 def edit_page_document(pdf,layers,operation,pages,target=None):
     data=flatten_overlays(pdf,layers) if layers else pdf
-    if operation=="move_single":
-        return move_page(data,pages[0],target)
     if operation=="move":
         return move_pages(data,pages,target)
+    if operation=="move_to":
+        return move_pages_to(data,pages,target)
     if operation=="rotate":
         return rotate_pages(data,pages,target)
     if operation=="delete":
         return delete_pages(data,pages)
+    if operation=="duplicate":
+        return duplicate_pages(data,pages)
     raise EditorError("PAGE_OPERATION","頁面操作無效。")
+
+
+class ThumbnailList(QListWidget):
+    pages_dropped=Signal(tuple,int)
+
+    def dropEvent(self,event):
+        if event.source() is not self:
+            super().dropEvent(event)
+            return
+        pages=tuple(sorted(self.row(item) for item in self.selectedItems()))
+        if not pages:
+            event.ignore()
+            return
+        point=event.position().toPoint()
+        index=self.indexAt(point)
+        destination=self.count()
+        if index.isValid():
+            rect=self.visualRect(index)
+            destination=index.row()+int(point.y()>=rect.center().y())
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
+        self.pages_dropped.emit(pages,destination)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -104,6 +128,7 @@ class MainWindow(QMainWindow):
             ("page_down","選取頁面下移",lambda:self.move_current_page(1),"Alt+Down"),
             ("rotate_left","選取頁面向左旋轉",lambda:self.rotate_current_page(-90),"Ctrl+Shift+Left"),
             ("rotate_right","選取頁面向右旋轉",lambda:self.rotate_current_page(90),"Ctrl+Shift+Right"),
+            ("duplicate_page","複製選取頁面",self.duplicate_selected_pages,"Ctrl+D"),
             ("delete_page","刪除選取頁面",self.delete_current_page,"Ctrl+Delete")]:
             action=QAction(label,self)
             action.triggered.connect(handler)
@@ -150,7 +175,7 @@ class MainWindow(QMainWindow):
         zoom.currentTextChanged.connect(self.change_zoom)
         toolbar.addWidget(zoom)
         splitter=QSplitter()
-        self.thumbs=QListWidget()
+        self.thumbs=ThumbnailList()
         self.thumbs.setIconSize(QSize(110,140))
         self.thumbs.setViewMode(QListView.ViewMode.IconMode)
         self.thumbs.setFlow(QListView.Flow.TopToBottom)
@@ -164,7 +189,7 @@ class MainWindow(QMainWindow):
         self.thumbs.setMaximumWidth(220)
         self.thumbs.currentRowChanged.connect(self.goto_page)
         self.thumbs.itemSelectionChanged.connect(self.thumbnail_selection_changed)
-        self.thumbs.model().rowsMoved.connect(self.thumbnail_rows_moved)
+        self.thumbs.pages_dropped.connect(self.move_selected_pages_to)
         splitter.addWidget(self.thumbs)
         self.canvas=Canvas()
         self.canvas.run_selected.connect(self.select_run)
@@ -223,6 +248,7 @@ class MainWindow(QMainWindow):
         self.actions["page_down"].setEnabled(manage and can_down)
         self.actions["rotate_left"].setEnabled(manage and bool(selected))
         self.actions["rotate_right"].setEnabled(manage and bool(selected))
+        self.actions["duplicate_page"].setEnabled(manage and bool(selected))
         self.actions["delete_page"].setEnabled(manage and bool(selected) and len(selected)<self.page_count)
         self.page_menu_button.setEnabled(manage)
         markup=edit and self.run is not None and self.run.editable
@@ -420,10 +446,10 @@ class MainWindow(QMainWindow):
 
     def thumbnail_selection_changed(self):
         selected=self.selected_page_indices()
-        self.thumbs.setDragEnabled(len(selected)<=1)
+        self.thumbs.setDragEnabled(bool(selected))
         self.refresh_actions()
         if len(selected)>1 and not self.busy:
-            self.statusBar().showMessage(f"已選取 {len(selected)} 頁，可使用頁面操作批次處理。")
+            self.statusBar().showMessage(f"已選取 {len(selected)} 頁，可整組拖曳或使用頁面操作。")
 
     def move_current_page(self,offset):
         pages=self.selected_page_indices()
@@ -437,17 +463,15 @@ class MainWindow(QMainWindow):
         self.submit_page_operation("move",pages,offset,
             f"正在{direction} {len(pages)} 頁…",current,moved)
 
-    def move_page_to(self,source,target):
-        if not 0<=source<self.page_count or not 0<=target<self.page_count or source==target:
+    def move_selected_pages_to(self,pages,destination):
+        if not pages:
             return
-        self.page=source
-        self.submit_page_operation("move_single",(source,),target,"正在移動頁面…",target,(target,))
-
-    def thumbnail_rows_moved(self,parent,start,end,destination_parent,destination):
-        if start!=end or self.busy:
+        order,moved=page_order_after_drop(self.page_count,pages,destination)
+        if order==tuple(range(self.page_count)):
             return
-        target=destination if destination<start else destination-1
-        self.move_page_to(start,target)
+        current=order.index(self.page)
+        self.submit_page_operation("move_to",pages,destination,
+            f"正在拖曳移動 {len(pages)} 頁…",current,moved)
 
     def rotate_current_page(self,degrees):
         if degrees not in (-90,90):
@@ -468,6 +492,16 @@ class MainWindow(QMainWindow):
             selected=min(sum(page<self.page for page in remaining),len(remaining)-1)
         self.submit_page_operation("delete",pages,None,
             f"正在刪除 {len(pages)} 頁…",selected,(selected,))
+
+    def duplicate_selected_pages(self):
+        pages=self.selected_page_indices()
+        if not pages:
+            return
+        first=pages[-1]+1
+        copies=tuple(range(first,first+len(pages)))
+        current=first+pages.index(self.page) if self.page in pages else first
+        self.submit_page_operation("duplicate",pages,None,
+            f"正在複製 {len(pages)} 頁…",current,copies)
 
     def change_zoom(self,text):
         self.scale=float(text.rstrip("%"))/100
