@@ -82,6 +82,22 @@ def page_order_after_move(page_count,pages,offset):
     return tuple(order),moved
 
 
+def page_order_after_drop(page_count,pages,destination):
+    selected=tuple(sorted(pages))
+    if (not selected or len(selected)!=len(set(selected)) or
+            any(not isinstance(page,int) or not 0<=page<page_count for page in selected)):
+        raise EditorError("RANGE","選取頁碼無效。")
+    if not isinstance(destination,int) or not 0<=destination<=page_count:
+        raise EditorError("RANGE","拖曳放置位置無效。")
+    selected_ids=set(selected)
+    remaining=[page for page in range(page_count) if page not in selected_ids]
+    insertion=destination-sum(page<destination for page in selected)
+    insertion=max(0,min(insertion,len(remaining)))
+    order=remaining[:insertion]+list(selected)+remaining[insertion:]
+    moved=tuple(index for index,page in enumerate(order) if page in selected_ids)
+    return tuple(order),moved
+
+
 def move_page(pdf, page, target):
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         _validate_page(doc, page)
@@ -97,6 +113,14 @@ def move_pages(pdf,pages,offset):
     with pymupdf.open(stream=pdf,filetype="pdf") as doc:
         selected=_validate_pages(doc,pages)
         order,_=page_order_after_move(doc.page_count,selected,offset)
+        doc.select(order)
+        return doc.tobytes(garbage=4,deflate=True)
+
+
+def move_pages_to(pdf,pages,destination):
+    with pymupdf.open(stream=pdf,filetype="pdf") as doc:
+        selected=_validate_pages(doc,pages)
+        order,_=page_order_after_drop(doc.page_count,selected,destination)
         doc.select(order)
         return doc.tobytes(garbage=4,deflate=True)
 
@@ -137,4 +161,16 @@ def delete_pages(pdf,pages):
             raise EditorError("LAST_PAGE","文件至少必須保留一頁。")
         for page in reversed(selected):
             doc.delete_page(page)
+        return doc.tobytes(garbage=4,deflate=True)
+
+
+def duplicate_pages(pdf,pages):
+    with (pymupdf.open(stream=pdf,filetype="pdf") as doc,
+            pymupdf.open(stream=pdf,filetype="pdf") as source):
+        selected=_validate_pages(doc,pages)
+        insertion=selected[-1]+1
+        for page in selected:
+            doc.insert_pdf(source,from_page=page,to_page=page,start_at=insertion,
+                links=False,widgets=False)
+            insertion+=1
         return doc.tobytes(garbage=4,deflate=True)

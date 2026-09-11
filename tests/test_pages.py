@@ -113,3 +113,37 @@ def test_delete_pages_rejects_removing_every_page():
         pages.delete_pages(_three_page_pdf(), (0, 1, 2))
 
     assert error.value.code == "LAST_PAGE"
+
+
+def test_page_order_after_drop_moves_non_contiguous_pages_as_group():
+    order,moved=pages.page_order_after_drop(3,(0,2),3)
+
+    assert order==(1,0,2)
+    assert moved==(1,2)
+
+
+def test_move_pages_to_moves_contiguous_pages_to_start():
+    moved=pages.move_pages_to(_three_page_pdf(),(1,2),0)
+
+    assert _page_texts(moved)==["PAGE 2","PAGE 3","PAGE 1"]
+
+
+def test_page_order_after_drop_is_unchanged_inside_selected_group():
+    order,moved=pages.page_order_after_drop(3,(1,2),2)
+
+    assert order==(0,1,2)
+    assert moved==(1,2)
+
+
+def test_duplicate_pages_inserts_copies_after_last_selected_page():
+    duplicated=pages.duplicate_pages(_three_page_pdf(),(0,2))
+
+    assert _page_texts(duplicated)==[
+        "PAGE 1","PAGE 2","PAGE 3","PAGE 1","PAGE 3"]
+
+
+def test_duplicate_pages_rejects_invalid_selection():
+    with pytest.raises(EditorError) as error:
+        pages.duplicate_pages(_three_page_pdf(),(0,3))
+
+    assert error.value.code=="RANGE"
