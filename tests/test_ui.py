@@ -12,6 +12,7 @@ from pdf_editor.ui.signature_dialog import SignatureDialog
 from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.annotations import mark_text
+from pdf_editor.model import Overlay
 from test_text import request_for
 
 def test_reader_preview_apply_undo(qtbot, source_path, font_path):
@@ -152,6 +153,37 @@ def test_canvas_dragging_text_emits_moved_run(qtbot, pdf_bytes):
     qtbot.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=end)
     assert spy.count() == 1
     assert spy.at(0)[0].rect[0] > run.rect[0]
+
+
+def test_canvas_layer_corner_drag_resizes_with_original_ratio(qtbot,pdf_bytes,tmp_path):
+    from PIL import Image
+
+    image_path=tmp_path/"印章.png"
+    Image.new("RGBA",(160,80),(210,35,45,210)).save(image_path)
+    layer=Overlay("stamp",0,str(image_path),(100,100,180,140),0)
+    canvas=Canvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(700,600)
+    canvas.show()
+    canvas.display(render_page(pdf_bytes,0,1.0),(layer,),layer.id)
+    qtbot.waitExposed(canvas)
+    item=next(item for item in canvas.scene().items() if hasattr(item,"layer"))
+    assert item.isSelected()
+    spy=QSignalSpy(canvas.layer_moved)
+    start=canvas.mapFromScene(item.sceneBoundingRect().bottomRight()-QPointF(2,2))
+    end=start+QPoint(40,20)
+
+    qtbot.mousePress(canvas.viewport(),Qt.MouseButton.LeftButton,pos=start)
+    qtbot.mouseMove(canvas.viewport(),end)
+    qtbot.mouseRelease(canvas.viewport(),Qt.MouseButton.LeftButton,pos=end)
+
+    assert spy.count()==1
+    resized=spy.at(0)[0]
+    width=resized.rect[2]-resized.rect[0]
+    height=resized.rect[3]-resized.rect[1]
+    assert width>80
+    assert height>40
+    assert width/height==pytest.approx(2.0)
 
 def test_canvas_delete_key_emits_selected_run(qtbot, pdf_bytes):
     canvas = Canvas()

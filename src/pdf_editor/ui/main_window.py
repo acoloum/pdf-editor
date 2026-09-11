@@ -439,7 +439,7 @@ class MainWindow(QMainWindow):
                 return
             self.page_data=result
             try:
-                self.canvas.display(result,layers)
+                self.canvas.display(result,layers,self.layer_id)
                 if self.annotation is not None:
                     selected=next((item for item in result.get("annotations",())
                         if item.xref==self.annotation.xref),None)

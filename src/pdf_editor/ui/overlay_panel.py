@@ -10,7 +10,8 @@ class OverlayPanel(QWidget):
         title=QLabel("圖章／簽名")
         title.setObjectName("heading")
         layout.addWidget(title)
-        layout.addWidget(QLabel("可直接拖曳，也可輸入位置與大小。"))
+        layout.addWidget(QLabel("拖曳圖章本體可移動；拖曳四角控制點可等比例縮放。\n"
+            "下方欄位可用於精確微調。"))
         form=QFormLayout()
         self.fields=[]
         for text in ["左側 X","頂端 Y","寬度","高度","旋轉角度"]:
@@ -31,4 +32,3 @@ class OverlayPanel(QWidget):
         r=layer.rect
         for s,v in zip(self.fields,(r[0],r[1],r[2]-r[0],r[3]-r[1],layer.angle)):
             s.setValue(v)
-

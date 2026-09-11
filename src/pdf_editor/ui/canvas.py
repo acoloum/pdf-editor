@@ -1,6 +1,6 @@
 from dataclasses import replace
-from PySide6.QtCore import Qt, Signal, QPointF, QTimer
-from PySide6.QtGui import QPixmap, QPen, QColor, QTransform, QPainter, QKeyEvent
+from PySide6.QtCore import Qt, Signal, QPointF, QTimer, QRectF
+from PySide6.QtGui import QPixmap, QPen, QColor, QTransform, QPainter, QKeyEvent, QBrush
 from PySide6.QtWidgets import QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,QGraphicsItem,QLabel,QLineEdit
 from pdf_editor.engine.geometry import transformed_rect, transform_point, inverse_transform
 from pdf_editor.engine.overlay import transformed_image
@@ -12,14 +12,115 @@ class LayerItem(QGraphicsPixmapItem):
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
                       QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.start=QPointF()
+        self.source_pixmap=QPixmap(pix)
+        self.resize_corner=None
+        self.resize_start=None
+        self.resize_scale=1.0
+        self.setAcceptHoverEvents(True)
+
+    def _corner_at(self,point):
+        rect=self.boundingRect()
+        corners={"top_left":rect.topLeft(),"top_right":rect.topRight(),
+            "bottom_left":rect.bottomLeft(),"bottom_right":rect.bottomRight()}
+        for name,corner in corners.items():
+            if abs(point.x()-corner.x())<=12 and abs(point.y()-corner.y())<=12:
+                return name
+        return None
+
+    def _resized_rect(self,point):
+        start=self.resize_start
+        fixed={"top_left":start.bottomRight(),"top_right":start.bottomLeft(),
+            "bottom_left":start.topRight(),"bottom_right":start.topLeft()}[self.resize_corner]
+        raw_width=max(1,abs(point.x()-fixed.x()))
+        raw_height=max(1,abs(point.y()-fixed.y()))
+        ratio=start.width()/start.height()
+        if raw_width/raw_height>=ratio:
+            width,height=raw_width,raw_width/ratio
+        else:
+            width,height=raw_height*ratio,raw_height
+        if min(width,height)<24:
+            scale=24/min(width,height)
+            width,height=width*scale,height*scale
+        if self.resize_corner=="top_left":
+            return QRectF(fixed.x()-width,fixed.y()-height,width,height)
+        if self.resize_corner=="top_right":
+            return QRectF(fixed.x(),fixed.y()-height,width,height)
+        if self.resize_corner=="bottom_left":
+            return QRectF(fixed.x()-width,fixed.y(),width,height)
+        return QRectF(fixed.x(),fixed.y(),width,height)
+
+    def paint(self,painter,option,widget=None):
+        super().paint(painter,option,widget)
+        if not self.isSelected():
+            return
+        painter.save()
+        pen=QPen(QColor("#24765b"),2)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(self.boundingRect())
+        painter.setBrush(QBrush(QColor("white")))
+        for corner in (self.boundingRect().topLeft(),self.boundingRect().topRight(),
+                self.boundingRect().bottomLeft(),self.boundingRect().bottomRight()):
+            painter.drawRect(QRectF(corner.x()-5,corner.y()-5,10,10))
+        painter.restore()
+
+    def hoverMoveEvent(self,event):
+        corner=self._corner_at(event.pos()) if self.isSelected() else None
+        if corner in ("top_left","bottom_right"):
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif corner:
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        super().hoverMoveEvent(event)
+
+    def hoverLeaveEvent(self,event):
+        self.unsetCursor()
+        super().hoverLeaveEvent(event)
 
     def mousePressEvent(self,event):
         self.start=self.pos()
         self.canvas.clear_text_selection()
         self.canvas.layer_selected.emit(self.layer.id)
+        self.setSelected(True)
+        corner=self._corner_at(event.pos())
+        if corner:
+            self.resize_corner=corner
+            self.resize_start=self.sceneBoundingRect()
+            self.resize_scale=1.0
+            event.accept()
+            return
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self,event):
+        if not self.resize_corner:
+            super().mouseMoveEvent(event)
+            return
+        rect=self._resized_rect(event.scenePos())
+        self.resize_scale=rect.width()/self.resize_start.width()
+        scaled=self.source_pixmap.scaled(max(1,round(rect.width())),max(1,round(rect.height())),
+            Qt.AspectRatioMode.IgnoreAspectRatio,Qt.TransformationMode.SmoothTransformation)
+        self.setPixmap(scaled)
+        self.setPos(rect.topLeft())
+        event.accept()
+
     def mouseReleaseEvent(self,event):
+        if self.resize_corner:
+            rect=self.sceneBoundingRect()
+            center=rect.center()
+            cx,cy=transform_point(inverse_transform(self.canvas.matrix),center.x(),center.y())
+            original=self.layer.rect
+            width=(original[2]-original[0])*self.resize_scale
+            height=(original[3]-original[1])*self.resize_scale
+            resized=replace(self.layer,rect=(cx-width/2,cy-height/2,cx+width/2,cy+height/2))
+            changed=abs(self.resize_scale-1)>0.001
+            self.resize_corner=None
+            self.resize_start=None
+            if changed:
+                self.canvas.layer_moved.emit(resized)
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
         delta=self.pos()-self.start
         inv=inverse_transform(self.canvas.matrix)
@@ -110,7 +211,7 @@ class Canvas(QGraphicsView):
         self.setMinimumWidth(400)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-    def display(self,data,layers=()):
+    def display(self,data,layers=(),selected_layer_id=None):
         self.scene().clear()
         self.highlight=None
         self.annotation_highlight=None
@@ -140,6 +241,7 @@ class Canvas(QGraphicsView):
             item.setPos(screen[0],screen[1])
             item.setZValue(5)
             self.scene().addItem(item)
+            item.setSelected(layer.id==selected_layer_id)
         self._position_inline_editor()
 
     def _run_at(self, scene_pos):
