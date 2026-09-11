@@ -2,7 +2,7 @@ import hashlib
 from dataclasses import replace
 import pytest
 import pymupdf
-from PySide6.QtCore import Qt, QPoint, QPointF, QModelIndex
+from PySide6.QtCore import Qt, QPoint, QPointF, QModelIndex, QItemSelectionModel
 from PySide6.QtWidgets import QAbstractItemView
 from PySide6.QtTest import QSignalSpy
 from pdf_editor.ui.main_window import MainWindow
@@ -478,6 +478,17 @@ def _document_page_texts(pdf):
         return [page.get_text().strip() for page in doc]
 
 
+def _select_thumbnail_pages(window,pages,current=None):
+    window.thumbs.clearSelection()
+    for page in pages:
+        window.thumbs.item(page).setSelected(True)
+    if current is not None:
+        window.thumbs.setCurrentItem(window.thumbs.item(current),
+            QItemSelectionModel.SelectionFlag.NoUpdate)
+        window.page=current
+    window.thumbnail_selection_changed()
+
+
 def test_window_page_menu_exposes_management_actions(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
@@ -485,7 +496,80 @@ def test_window_page_menu_exposes_management_actions(qtbot):
     assert window.page_menu_button.text() == "頁面操作"
     assert [window.actions[name].text() for name in (
         "page_up", "page_down", "rotate_left", "rotate_right", "delete_page"
-    )] == ["上移一頁", "下移一頁", "逆時針旋轉", "順時針旋轉", "刪除此頁"]
+    )] == ["選取頁面上移", "選取頁面下移", "選取頁面向左旋轉",
+        "選取頁面向右旋轉", "刪除選取頁面"]
+
+
+def test_thumbnail_list_supports_extended_selection(qtbot,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+
+        assert window.thumbs.selectionMode()==QAbstractItemView.SelectionMode.ExtendedSelection
+        _select_thumbnail_pages(window,(0,2),2)
+        assert window.selected_page_indices()==(0,2)
+        assert not window.thumbs.dragEnabled()
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_moves_selected_pages_as_batch(qtbot,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(1,2),2)
+
+        window.move_current_page(-1)
+
+        qtbot.waitUntil(lambda:not window.busy and window.session.dirty,timeout=30000)
+        assert _document_page_texts(window.session.pdf)==["PAGE 2","PAGE 3","PAGE 1"]
+        assert window.selected_page_indices()==(0,1)
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_rotates_selected_pages_as_batch(qtbot,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(0,2),2)
+
+        window.rotate_current_page(90)
+
+        qtbot.waitUntil(lambda:not window.busy and window.session.dirty,timeout=30000)
+        with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
+            assert [page.rotation for page in doc]==[90,0,90]
+        assert window.selected_page_indices()==(0,2)
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_deletes_selected_pages_as_batch(qtbot,multi_page_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        _select_thumbnail_pages(window,(0,2),2)
+
+        window.delete_current_page()
+
+        qtbot.waitUntil(lambda:not window.busy and window.page_count==1,timeout=30000)
+        assert _document_page_texts(window.session.pdf)==["PAGE 2"]
+        assert window.selected_page_indices()==(0,)
+        assert not window.actions["delete_page"].isEnabled()
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
 
 
 def test_window_moves_current_page_and_refreshes_navigation(qtbot, multi_page_path):

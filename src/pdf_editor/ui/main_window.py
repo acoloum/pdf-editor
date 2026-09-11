@@ -16,7 +16,8 @@ from pdf_editor.model import TextReplacement,TextInsertion,Overlay
 from pdf_editor.errors import EditorError
 from pdf_editor.workers import Jobs
 from pdf_editor.assets import AssetStore
-from pdf_editor.pages import merge_pages,split_pages,move_page,rotate_page,delete_page
+from pdf_editor.pages import (merge_pages,split_pages,move_page,move_pages,rotate_pages,
+    delete_pages,page_order_after_move)
 from pdf_editor.annotations import (mark_text,add_text_note,delete_annotation,
     set_highlight_color)
 from pdf_editor.ui.canvas import Canvas
@@ -39,14 +40,16 @@ def export_split(pdf,layers,groups,folder,source):
     targets=tuple(Path(folder)/f"拆分_{i+1:03}.pdf" for i in range(len(groups)))
     return tuple(str(p) for p in publish_batch(documents,targets,(Path(source),)))
 
-def edit_page_document(pdf,layers,operation,page,target=None):
+def edit_page_document(pdf,layers,operation,pages,target=None):
     data=flatten_overlays(pdf,layers) if layers else pdf
+    if operation=="move_single":
+        return move_page(data,pages[0],target)
     if operation=="move":
-        return move_page(data,page,target)
+        return move_pages(data,pages,target)
     if operation=="rotate":
-        return rotate_page(data,page,target)
+        return rotate_pages(data,pages,target)
     if operation=="delete":
-        return delete_page(data,page)
+        return delete_pages(data,pages)
     raise EditorError("PAGE_OPERATION","頁面操作無效。")
 
 class MainWindow(QMainWindow):
@@ -97,11 +100,11 @@ class MainWindow(QMainWindow):
             self.actions[name]=action
         page_menu=QMenu(self)
         for name,label,handler,key in [
-            ("page_up","上移一頁",lambda:self.move_current_page(-1),"Alt+Up"),
-            ("page_down","下移一頁",lambda:self.move_current_page(1),"Alt+Down"),
-            ("rotate_left","逆時針旋轉",lambda:self.rotate_current_page(-90),"Ctrl+Shift+Left"),
-            ("rotate_right","順時針旋轉",lambda:self.rotate_current_page(90),"Ctrl+Shift+Right"),
-            ("delete_page","刪除此頁",self.delete_current_page,"Ctrl+Delete")]:
+            ("page_up","選取頁面上移",lambda:self.move_current_page(-1),"Alt+Up"),
+            ("page_down","選取頁面下移",lambda:self.move_current_page(1),"Alt+Down"),
+            ("rotate_left","選取頁面向左旋轉",lambda:self.rotate_current_page(-90),"Ctrl+Shift+Left"),
+            ("rotate_right","選取頁面向右旋轉",lambda:self.rotate_current_page(90),"Ctrl+Shift+Right"),
+            ("delete_page","刪除選取頁面",self.delete_current_page,"Ctrl+Delete")]:
             action=QAction(label,self)
             action.triggered.connect(handler)
             action.setShortcut(QKeySequence(key))
@@ -153,12 +156,14 @@ class MainWindow(QMainWindow):
         self.thumbs.setFlow(QListView.Flow.TopToBottom)
         self.thumbs.setWrapping(False)
         self.thumbs.setWordWrap(True)
+        self.thumbs.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.thumbs.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.thumbs.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.thumbs.setGridSize(QSize(145,165))
         self.thumbs.setMinimumWidth(160)
         self.thumbs.setMaximumWidth(220)
         self.thumbs.currentRowChanged.connect(self.goto_page)
+        self.thumbs.itemSelectionChanged.connect(self.thumbnail_selection_changed)
         self.thumbs.model().rowsMoved.connect(self.thumbnail_rows_moved)
         splitter.addWidget(self.thumbs)
         self.canvas=Canvas()
@@ -211,11 +216,14 @@ class MainWindow(QMainWindow):
         self.actions["open"].setEnabled(not self.busy)
         self.actions["merge"].setEnabled(not self.busy)
         manage=active and self.session.access.can_reorganize and not self.busy
-        self.actions["page_up"].setEnabled(manage and self.page>0)
-        self.actions["page_down"].setEnabled(manage and self.page<self.page_count-1)
-        self.actions["rotate_left"].setEnabled(manage)
-        self.actions["rotate_right"].setEnabled(manage)
-        self.actions["delete_page"].setEnabled(manage and self.page_count>1)
+        selected=set(self.selected_page_indices()) if active else set()
+        can_up=any(page>0 and page-1 not in selected for page in selected)
+        can_down=any(page<self.page_count-1 and page+1 not in selected for page in selected)
+        self.actions["page_up"].setEnabled(manage and can_up)
+        self.actions["page_down"].setEnabled(manage and can_down)
+        self.actions["rotate_left"].setEnabled(manage and bool(selected))
+        self.actions["rotate_right"].setEnabled(manage and bool(selected))
+        self.actions["delete_page"].setEnabled(manage and bool(selected) and len(selected)<self.page_count)
         self.page_menu_button.setEnabled(manage)
         markup=edit and self.run is not None and self.run.editable
         self.actions["highlight"].setEnabled(markup)
@@ -329,6 +337,10 @@ class MainWindow(QMainWindow):
         if not self.session or not 0<=page<self.page_count or page==self.page:
             return
         self.page=page
+        if self.thumbs.currentRow()!=page:
+            self.thumbs.blockSignals(True)
+            self.thumbs.setCurrentRow(page)
+            self.thumbs.blockSignals(False)
         self.canvas.cancel_inline_editor()
         self.canvas.cancel_note_insertion()
         self.actions["text_note"].setChecked(False)
@@ -346,7 +358,7 @@ class MainWindow(QMainWindow):
         self.refresh_actions()
         self.request_render()
 
-    def sync_page_navigation(self,selected=None):
+    def sync_page_navigation(self,selected=None,selected_pages=None):
         with pymupdf.open(stream=self.session.pdf,filetype="pdf") as doc:
             self.page_count=doc.page_count
         self.page=max(0,min(self.page if selected is None else selected,self.page_count-1))
@@ -359,13 +371,19 @@ class MainWindow(QMainWindow):
         for index in range(self.page_count):
             self.thumbs.addItem(QListWidgetItem(f"第 {index+1} 頁"))
         self.thumbs.setCurrentRow(self.page)
+        if selected_pages:
+            self.thumbs.clearSelection()
+            for page in selected_pages:
+                if 0<=page<self.page_count:
+                    self.thumbs.item(page).setSelected(True)
         self.thumbs.blockSignals(False)
+        self.thumbnail_selection_changed()
         self.page_data=None
         self.refresh_actions()
         self.request_render()
         self.queue_thumbnail(0,self.token,self.session.revision)
 
-    def submit_page_operation(self,operation,target,status,selected):
+    def submit_page_operation(self,operation,pages,target,status,selected,selected_pages=None):
         if not self.session or self.busy or not self.session.access.can_reorganize:
             return
         self.canvas.cancel_inline_editor()
@@ -390,19 +408,40 @@ class MainWindow(QMainWindow):
                 return
             self.session.apply_state(pdf,())
             self.text_panel.setEnabled(False)
-            self.sync_page_navigation(selected)
+            self.sync_page_navigation(selected,selected_pages)
         self.jobs.submit(edit_page_document,
-            (self.session.pdf,self.session.overlays,operation,self.page,target),done,self.error)
+            (self.session.pdf,self.session.overlays,operation,pages,target),done,self.error)
+
+    def selected_page_indices(self):
+        selected=tuple(sorted(self.thumbs.row(item) for item in self.thumbs.selectedItems()))
+        if selected:
+            return selected
+        return (self.page,) if self.session and 0<=self.page<self.page_count else ()
+
+    def thumbnail_selection_changed(self):
+        selected=self.selected_page_indices()
+        self.thumbs.setDragEnabled(len(selected)<=1)
+        self.refresh_actions()
+        if len(selected)>1 and not self.busy:
+            self.statusBar().showMessage(f"已選取 {len(selected)} 頁，可使用頁面操作批次處理。")
 
     def move_current_page(self,offset):
-        target=self.page+offset
-        self.move_page_to(self.page,target)
+        pages=self.selected_page_indices()
+        if not pages:
+            return
+        order,moved=page_order_after_move(self.page_count,pages,offset)
+        if order==tuple(range(self.page_count)):
+            return
+        current=order.index(self.page)
+        direction="上移" if offset<0 else "下移"
+        self.submit_page_operation("move",pages,offset,
+            f"正在{direction} {len(pages)} 頁…",current,moved)
 
     def move_page_to(self,source,target):
         if not 0<=source<self.page_count or not 0<=target<self.page_count or source==target:
             return
         self.page=source
-        self.submit_page_operation("move",target,"正在移動頁面…",target)
+        self.submit_page_operation("move_single",(source,),target,"正在移動頁面…",target,(target,))
 
     def thumbnail_rows_moved(self,parent,start,end,destination_parent,destination):
         if start!=end or self.busy:
@@ -414,13 +453,21 @@ class MainWindow(QMainWindow):
         if degrees not in (-90,90):
             return
         direction="逆時針" if degrees<0 else "順時針"
-        self.submit_page_operation("rotate",degrees,f"正在{direction}旋轉頁面…",self.page)
+        pages=self.selected_page_indices()
+        self.submit_page_operation("rotate",pages,degrees,
+            f"正在將 {len(pages)} 頁{direction}旋轉…",self.page,pages)
 
     def delete_current_page(self):
-        if self.page_count<=1:
+        pages=self.selected_page_indices()
+        if not pages or len(pages)>=self.page_count:
             return
-        selected=min(self.page,self.page_count-2)
-        self.submit_page_operation("delete",None,"正在刪除頁面…",selected)
+        remaining=[page for page in range(self.page_count) if page not in set(pages)]
+        if self.page in remaining:
+            selected=remaining.index(self.page)
+        else:
+            selected=min(sum(page<self.page for page in remaining),len(remaining)-1)
+        self.submit_page_operation("delete",pages,None,
+            f"正在刪除 {len(pages)} 頁…",selected,(selected,))
 
     def change_zoom(self,text):
         self.scale=float(text.rstrip("%"))/100
