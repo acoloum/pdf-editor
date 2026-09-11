@@ -73,6 +73,8 @@ class Canvas(QGraphicsView):
     text_insertion_cancelled=Signal()
     inline_text_committed=Signal(object)
     inline_text_cancelled=Signal()
+    note_insertion_requested=Signal(object)
+    note_insertion_cancelled=Signal()
     layer_selected=Signal(str)
     layer_moved=Signal(object)
 
@@ -90,6 +92,7 @@ class Canvas(QGraphicsView):
         self._drag_start_scene=QPointF()
         self._drag_original_rect=None
         self._text_insertion=False
+        self._note_insertion=False
         self.inline_editor=None
         self.inline_run=None
         self.inline_rect=None
@@ -146,7 +149,9 @@ class Canvas(QGraphicsView):
 
     def start_text_insertion(self):
         self.clear_text_selection()
+        self.cancel_note_insertion()
         self._text_insertion=True
+        self.insertion_hint.setText("新增文字模式：請在頁面中點選位置（Esc 取消）")
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setFocus()
         self._place_insertion_hint()
@@ -159,6 +164,24 @@ class Canvas(QGraphicsView):
         self.insertion_hint.hide()
         if notify:
             self.text_insertion_cancelled.emit()
+
+    def start_note_insertion(self):
+        self.clear_text_selection()
+        self.cancel_text_insertion()
+        self._note_insertion=True
+        self.insertion_hint.setText("文字註解模式：請在頁面中點選位置（Esc 取消）")
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setFocus()
+        self._place_insertion_hint()
+        self.insertion_hint.show()
+        self.insertion_hint.raise_()
+
+    def cancel_note_insertion(self,notify=False):
+        self._note_insertion=False
+        self.unsetCursor()
+        self.insertion_hint.hide()
+        if notify:
+            self.note_insertion_cancelled.emit()
 
     def _place_insertion_hint(self):
         self.insertion_hint.adjustSize()
@@ -255,6 +278,12 @@ class Canvas(QGraphicsView):
         if isinstance(item,LayerItem):
             self.clear_text_selection()
         if not isinstance(item,LayerItem):
+            if self._note_insertion:
+                x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
+                self.cancel_note_insertion()
+                self.note_insertion_requested.emit((x,y))
+                event.accept()
+                return
             if self._text_insertion:
                 x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
                 self.cancel_text_insertion()
@@ -309,6 +338,10 @@ class Canvas(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
 
     def keyPressEvent(self,event: QKeyEvent):
+        if event.key()==Qt.Key.Key_Escape and self._note_insertion:
+            self.cancel_note_insertion(True)
+            event.accept()
+            return
         if event.key()==Qt.Key.Key_Escape and self._text_insertion:
             self.cancel_text_insertion(True)
             event.accept()

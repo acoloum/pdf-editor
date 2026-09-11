@@ -17,6 +17,7 @@ from pdf_editor.errors import EditorError
 from pdf_editor.workers import Jobs
 from pdf_editor.assets import AssetStore
 from pdf_editor.pages import merge_pages,split_pages,move_page,rotate_page,delete_page
+from pdf_editor.annotations import mark_text,add_text_note
 from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.ui.overlay_panel import OverlayPanel
@@ -109,6 +110,22 @@ class MainWindow(QMainWindow):
         self.page_menu_button.setMenu(page_menu)
         self.page_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         toolbar.addWidget(self.page_menu_button)
+        markup_menu=QMenu(self)
+        for name,label,handler in [
+            ("highlight","螢光標記",lambda:self.apply_selected_markup("highlight")),
+            ("underline","加底線",lambda:self.apply_selected_markup("underline")),
+            ("text_note","文字註解",self.start_text_note)]:
+            action=QAction(label,self)
+            action.triggered.connect(handler)
+            if name=="text_note":
+                action.setCheckable(True)
+            markup_menu.addAction(action)
+            self.actions[name]=action
+        self.markup_menu_button=QToolButton()
+        self.markup_menu_button.setText("標記註解")
+        self.markup_menu_button.setMenu(markup_menu)
+        self.markup_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        toolbar.addWidget(self.markup_menu_button)
         toolbar.addSeparator()
         self.page_spin=QSpinBox()
         self.page_spin.setPrefix("第 ")
@@ -144,6 +161,8 @@ class MainWindow(QMainWindow):
         self.canvas.text_insertion_cancelled.connect(self.cancel_text_insertion)
         self.canvas.inline_text_committed.connect(self.commit_inline_text)
         self.canvas.inline_text_cancelled.connect(self.cancel_inline_text)
+        self.canvas.note_insertion_requested.connect(self.begin_text_note)
+        self.canvas.note_insertion_cancelled.connect(self.cancel_text_note)
         self.canvas.layer_selected.connect(self.select_layer)
         self.canvas.layer_moved.connect(self.move_layer)
         splitter.addWidget(self.canvas)
@@ -152,6 +171,7 @@ class MainWindow(QMainWindow):
         self.text_panel.preview_requested.connect(self.preview_from_panel)
         self.text_panel.apply_requested.connect(self.apply_preview)
         self.text_panel.cancel_requested.connect(self.cancel_preview)
+        self.text_panel.format_requested.connect(self.apply_text_format)
         self.overlay_panel=OverlayPanel()
         self.overlay_panel.update_requested.connect(self.update_layer)
         self.overlay_panel.delete_requested.connect(self.delete_layer)
@@ -187,6 +207,11 @@ class MainWindow(QMainWindow):
         self.actions["rotate_right"].setEnabled(manage)
         self.actions["delete_page"].setEnabled(manage and self.page_count>1)
         self.page_menu_button.setEnabled(manage)
+        markup=edit and self.run is not None and self.run.editable
+        self.actions["highlight"].setEnabled(markup)
+        self.actions["underline"].setEnabled(markup)
+        self.actions["text_note"].setEnabled(edit)
+        self.markup_menu_button.setEnabled(edit)
         self.thumbs.setEnabled(active and not self.busy)
         self.text_panel.apply_button.setEnabled(edit and self.preview is not None)
         self.canvas.setEnabled(not self.busy)
@@ -238,6 +263,8 @@ class MainWindow(QMainWindow):
         if self.session:
             self.session.close()
         self.canvas.cancel_inline_editor()
+        self.canvas.cancel_note_insertion()
+        self.actions["text_note"].setChecked(False)
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.session=session
@@ -284,6 +311,8 @@ class MainWindow(QMainWindow):
             return
         self.page=page
         self.canvas.cancel_inline_editor()
+        self.canvas.cancel_note_insertion()
+        self.actions["text_note"].setChecked(False)
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.run=None
@@ -318,6 +347,8 @@ class MainWindow(QMainWindow):
         if not self.session or self.busy or not self.session.access.can_reorganize:
             return
         self.canvas.cancel_inline_editor()
+        self.canvas.cancel_note_insertion()
+        self.actions["text_note"].setChecked(False)
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.preview=None
@@ -411,7 +442,7 @@ class MainWindow(QMainWindow):
         cell=find_table_cell(self.session.pdf,self.page,run.rect)
         if cell:
             self.text_panel.set_rect(cell)
-            self.text_panel.alignment.setCurrentIndex(2)
+            self.text_panel.set_alignment(2)
         self.text_panel.info.setText("請直接在頁面文字框輸入；Enter 或點到別處套用，Esc 取消。")
         self.canvas.begin_inline_text(self.text_panel.rect(),run.text,run,run.size)
         self.refresh_actions()
@@ -423,6 +454,10 @@ class MainWindow(QMainWindow):
         p=self.text_panel
         p.text.setPlainText(text)
         target_rect=tuple(rect or p.rect())
+        if run is not None and text==run.text and not p.modified:
+            self.refresh_actions()
+            self.statusBar().showMessage("文字維持不變，可繼續使用標記或格式工具。")
+            return
         font_path=p.font_path
         if text:
             try:
@@ -450,6 +485,14 @@ class MainWindow(QMainWindow):
         request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
             run.id,text,target_rect,font_path,p.size.value(),p.color,p.alignment.currentData())
         self.apply_text_immediately(request,"正在更新文字…")
+
+    def apply_text_format(self):
+        if not self.session or self.busy or self.preview or not self.run:
+            return
+        if self.canvas.inline_editor is not None:
+            self.canvas.inline_editor.commit()
+            return
+        self.commit_inline_text((self.run,self.text_panel.text.toPlainText(),self.text_panel.rect()))
 
     def cancel_inline_text(self):
         self.run=None
@@ -503,6 +546,8 @@ class MainWindow(QMainWindow):
             self.actions["add_text"].setChecked(False)
             return
         self.canvas.cancel_inline_editor()
+        self.canvas.cancel_note_insertion()
+        self.actions["text_note"].setChecked(False)
         self.run=None
         self.insertion_rect=None
         self.canvas.start_text_insertion()
@@ -513,6 +558,65 @@ class MainWindow(QMainWindow):
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.statusBar().showMessage("已取消新增文字。")
+
+    def start_text_note(self,checked=True):
+        if not checked:
+            self.cancel_text_note()
+            return
+        if not self.session or self.busy or not self.session.access.can_edit:
+            self.actions["text_note"].setChecked(False)
+            return
+        self.canvas.cancel_inline_editor()
+        self.canvas.cancel_text_insertion()
+        self.actions["add_text"].setChecked(False)
+        self.run=None
+        self.insertion_rect=None
+        self.text_panel.setEnabled(False)
+        self.canvas.start_note_insertion()
+        self.refresh_actions()
+        self.statusBar().showMessage("請在頁面上點選文字註解的位置。")
+
+    def cancel_text_note(self):
+        self.canvas.cancel_note_insertion()
+        self.actions["text_note"].setChecked(False)
+        self.statusBar().showMessage("已取消文字註解。")
+
+    def begin_text_note(self,position):
+        self.actions["text_note"].setChecked(False)
+        text,ok=QInputDialog.getMultiLineText(self,"新增文字註解","註解內容：")
+        if not ok or not text.strip():
+            self.statusBar().showMessage("已取消文字註解。")
+            return
+        self.submit_annotation(add_text_note,(self.page,position,text),"正在新增文字註解…")
+
+    def apply_selected_markup(self,kind):
+        if not self.run or self.busy:
+            return
+        run=self.run
+        self.canvas.cancel_inline_editor()
+        label="螢光標記" if kind=="highlight" else "底線"
+        self.submit_annotation(mark_text,(self.page,run.rect,kind),f"正在加入{label}…")
+
+    def submit_annotation(self,operation,args,status):
+        if not self.session or self.busy:
+            return
+        revision=self.session.revision
+        token=self.token
+        self.busy=True
+        self.refresh_actions()
+        self.statusBar().showMessage(status)
+        def done(pdf):
+            self.busy=False
+            if self.closed or token!=self.token or revision!=self.session.revision:
+                return
+            self.session.apply_pdf(pdf)
+            self.run=None
+            self.canvas.clear_text_selection()
+            self.text_panel.setEnabled(False)
+            self.refresh_actions()
+            self.request_render()
+            self.queue_thumbnail(0,self.token,self.session.revision)
+        self.jobs.submit(operation,(self.session.pdf,*args),done,self.error)
 
     def begin_text_insertion(self,position):
         if not self.session or self.busy or self.preview:
@@ -540,6 +644,8 @@ class MainWindow(QMainWindow):
         if not self.session or not run.editable or self.busy or self.preview:
             return
         self.canvas.cancel_inline_editor()
+        self.canvas.cancel_note_insertion()
+        self.actions["text_note"].setChecked(False)
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.run=run
@@ -633,6 +739,8 @@ class MainWindow(QMainWindow):
             return
         self.preview=None
         self.canvas.cancel_inline_editor()
+        self.canvas.cancel_note_insertion()
+        self.actions["text_note"].setChecked(False)
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.insertion_rect=None
@@ -769,6 +877,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self,event):
         self.canvas.cancel_inline_editor()
+        self.canvas.cancel_note_insertion()
         if not self.confirm_leave():
             event.ignore()
             return

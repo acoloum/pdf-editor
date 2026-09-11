@@ -193,6 +193,19 @@ def test_text_panel_has_alignment_choices(qtbot):
     assert [panel.alignment.itemData(i) for i in range(panel.alignment.count())] == [
         "left", "hcenter", "center"]
 
+
+def test_text_panel_tracks_user_format_changes(qtbot):
+    from types import SimpleNamespace
+    panel=TextPanel()
+    qtbot.addWidget(panel)
+    run=SimpleNamespace(editable=True,reason=None,font_name="Test",text="ABC",size=12,
+        color=(0,0,0),rect=(10,10,60,30))
+
+    panel.set_run(run)
+    assert not panel.modified
+    panel.size.setValue(13)
+    assert panel.modified
+
 def test_window_delete_selected_text_is_undoable(qtbot, source_path):
     window = MainWindow()
     qtbot.addWidget(window)
@@ -544,4 +557,94 @@ def test_thumbnail_list_supports_internal_drag_reordering(qtbot, multi_page_path
         assert window.thumbs.currentRow() == 2
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_unchanged_inline_selection_stays_available_for_markup(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        run=next(item for item in window.page_data["runs"] if "品質" in item.text)
+        revision=window.session.revision
+        window.select_run(run)
+        qtbot.waitUntil(lambda:window.canvas.inline_editor.hasFocus(),timeout=30000)
+
+        window.canvas.inline_editor.clearFocus()
+        qtbot.wait(50)
+
+        assert not window.busy
+        assert window.session.revision==revision
+        assert window.run==run
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_markup_menu_exposes_highlight_underline_and_note(qtbot):
+    window=MainWindow()
+    qtbot.addWidget(window)
+
+    assert window.markup_menu_button.text()=="標記註解"
+    assert [window.actions[name].text() for name in (
+        "highlight","underline","text_note"
+    )]==["螢光標記","加底線","文字註解"]
+
+
+@pytest.mark.parametrize("kind,expected",[("highlight","Highlight"),("underline","Underline")])
+def test_window_applies_native_markup_to_selected_text(qtbot,source_path,kind,expected):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        run=next(item for item in window.page_data["runs"] if "品質" in item.text)
+        window.select_run(run)
+        window.show()
+        qtbot.waitUntil(lambda:window.canvas.inline_editor.hasFocus(),timeout=30000)
+        window.canvas.inline_editor.clearFocus()
+        qtbot.waitUntil(lambda:not window.busy,timeout=30000)
+
+        window.apply_selected_markup(kind)
+
+        qtbot.waitUntil(lambda:not window.busy and window.session.dirty,timeout=30000)
+        with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
+            page=doc[0]
+            assert [item.type[1] for item in (page.annots() or [])]==[expected]
+        window.history_step(False)
+        with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
+            page=doc[0]
+            assert list(page.annots() or [])==[]
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_adds_text_note_at_clicked_position(qtbot,source_path,monkeypatch):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr("pdf_editor.ui.main_window.QInputDialog.getMultiLineText",
+        lambda *args:("請重新確認尺寸",True))
+    try:
+        window.resize(1100,760)
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+
+        window.actions["text_note"].trigger()
+        assert window.canvas._note_insertion
+        x,y=transform_point(window.page_data["matrix"],250,300)
+        point=window.canvas.mapFromScene(QPointF(x,y))
+        qtbot.mouseClick(window.canvas.viewport(),Qt.MouseButton.LeftButton,pos=point)
+
+        qtbot.waitUntil(lambda:not window.busy and window.session.dirty,timeout=30000)
+        with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
+            page=doc[0]
+            notes=list(page.annots() or [])
+            assert notes[0].type[1]=="Text"
+            assert notes[0].info["content"]=="請重新確認尺寸"
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
         window.close()

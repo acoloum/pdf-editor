@@ -7,9 +7,12 @@ class TextPanel(QWidget):
     preview_requested=Signal()
     apply_requested=Signal()
     cancel_requested=Signal()
+    format_requested=Signal()
 
     def __init__(self):
         super().__init__()
+        self._loading=False
+        self.modified=False
         layout=QVBoxLayout(self)
         heading=QLabel("文字編輯")
         heading.setObjectName("heading")
@@ -36,6 +39,10 @@ class TextPanel(QWidget):
             spin.setDecimals(2)
             form.addRow(name,spin)
             self.box.append(spin)
+        self.size.valueChanged.connect(self.mark_modified)
+        self.alignment.currentIndexChanged.connect(self.mark_modified)
+        for spin in self.box:
+            spin.valueChanged.connect(self.mark_modified)
         layout.addLayout(form)
         self.font_path=str(default_font())
         self.font_label=QLabel("替代字型：Noto Sans CJK TC")
@@ -78,17 +85,27 @@ class TextPanel(QWidget):
         if path:
             self.font_path=path
             self.font_label.setText("選用字型："+path.split("/")[-1])
+            self.mark_modified()
 
     def use_default_font(self):
         self.font_path=str(default_font())
         self.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
+        self.mark_modified()
 
     def choose_color(self):
         c=QColorDialog.getColor(QColor.fromRgbF(*self.color),self)
         if c.isValid():
             self.color=(c.redF(),c.greenF(),c.blueF())
+            self.mark_modified()
+
+    def mark_modified(self,*args):
+        if self._loading:
+            return
+        self.modified=True
+        self.format_requested.emit()
 
     def set_run(self,run):
+        self._loading=True
         self.setEnabled(run.editable)
         self.info.setText("請直接在頁面文字框輸入。" if run.editable else run.reason)
         self.text.setPlainText(run.text)
@@ -97,8 +114,11 @@ class TextPanel(QWidget):
         self.alignment.setCurrentIndex(0)
         x0,y0,x1,y1=run.rect
         self.set_rect((x0,y0,x1+10,y1+run.size*0.5))
+        self._loading=False
+        self.modified=False
 
     def set_insertion(self, rect, size=11, centered=False):
+        self._loading=True
         self.setEnabled(True)
         self.info.setText("請直接在頁面文字框輸入。")
         self.text.clear()
@@ -106,11 +126,22 @@ class TextPanel(QWidget):
         self.color=(0,0,0)
         self.alignment.setCurrentIndex(2 if centered else 0)
         self.set_rect(rect)
+        self._loading=False
+        self.modified=False
 
     def set_rect(self, rect):
         x0,y0,x1,y1=rect
+        previous=self._loading
+        self._loading=True
         for spin,value in zip(self.box,(x0,y0,x1-x0,y1-y0)):
             spin.setValue(value)
+        self._loading=previous
+
+    def set_alignment(self,index):
+        previous=self._loading
+        self._loading=True
+        self.alignment.setCurrentIndex(index)
+        self._loading=previous
 
     def rect(self):
         x,y,w,h=(s.value() for s in self.box)
