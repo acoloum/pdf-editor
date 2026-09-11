@@ -5,6 +5,39 @@ from pdf_editor.model import TextRun, TextReplacement
 from pdf_editor.errors import EditorError
 from pdf_editor.engine.fonts import checked_font
 
+ALIGNMENTS = {"left": pymupdf.TEXT_ALIGN_LEFT, "hcenter": pymupdf.TEXT_ALIGN_CENTER,
+    "center": pymupdf.TEXT_ALIGN_CENTER}
+
+def find_table_cell(pdf: bytes, page: int, rect) -> tuple[float, float, float, float] | None:
+    """找出包含文字中心點的表格儲存格，找不到時回傳 None。"""
+    with pymupdf.open(stream=pdf, filetype="pdf") as doc:
+        box = pymupdf.Rect(rect)
+        point = pymupdf.Point((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
+        try:
+            tables = doc[page].find_tables().tables
+        except (AttributeError, RuntimeError):
+            return None
+        candidates = []
+        for table in tables:
+            for cell in table.cells:
+                if cell is None:
+                    continue
+                candidate = pymupdf.Rect(cell)
+                if candidate.contains(point):
+                    candidates.append(candidate)
+        if not candidates:
+            return None
+        cell = min(candidates, key=lambda item: item.width * item.height)
+        inset = min(2.0, cell.width / 10, cell.height / 10)
+        return (cell.x0 + inset, cell.y0 + inset, cell.x1 - inset, cell.y1 - inset)
+
+def _vertical_centered_rect(rect, text, size):
+    box = pymupdf.Rect(rect)
+    lines = max(1, text.count("\n") + 1)
+    content_height = min(box.height, lines * size * 2.0)
+    top = box.y0 + max(0, (box.height - content_height) / 2)
+    return pymupdf.Rect(box.x0, top, box.x1, top + content_height)
+
 def extract_runs(pdf: bytes, page: int) -> list[TextRun]:
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         result = []
@@ -29,6 +62,8 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
         raise EditorError("SIZE", "字級必須介於 1 與 300。")
     if len(request.text) > 10000:
         raise EditorError("TEXT_OVERFLOW", "文字過長，請縮短內容。")
+    if request.alignment not in ALIGNMENTS:
+        raise EditorError("ALIGNMENT", "文字對齊方式無效。")
     if not all(math.isfinite(v) for v in request.rect + request.color):
         raise EditorError("GEOMETRY", "位置或色彩數值無效。")
     runs = extract_runs(pdf, request.page)
@@ -51,10 +86,12 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
         bounds = pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
         if not bounds.contains(rect):
             raise EditorError("GEOMETRY", "文字框必須位於頁面內。")
+        placement = _vertical_centered_rect(request.rect, request.text, request.size) \
+            if request.alignment == "center" else rect
         page.insert_font(fontname="replacement", fontfile=request.font_path)
         shape = page.new_shape()
-        remaining = shape.insert_textbox(rect, request.text, fontname="replacement",
-            fontsize=request.size, color=request.color)
+        remaining = shape.insert_textbox(placement, request.text, fontname="replacement",
+            fontsize=request.size, color=request.color, align=ALIGNMENTS[request.alignment])
         if remaining < 0:
             raise EditorError("TEXT_OVERFLOW", "文字超出範圍，請擴大文字框或減小字級。")
         page.add_redact_annot(old_rect, fill=False, cross_out=False)
@@ -63,8 +100,8 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
         # 移除後重新建立形狀，避免使用已失效的頁面資源。
         page.insert_font(fontname="replacement", fontfile=request.font_path)
         shape = page.new_shape()
-        shape.insert_textbox(rect, request.text, fontname="replacement",
-            fontsize=request.size, color=request.color)
+        shape.insert_textbox(placement, request.text, fontname="replacement",
+            fontsize=request.size, color=request.color, align=ALIGNMENTS[request.alignment])
         shape.commit()
         doc.subset_fonts(fallback=True)
         return doc.tobytes(garbage=4, deflate=True)

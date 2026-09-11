@@ -1,6 +1,6 @@
 from dataclasses import replace
 from PySide6.QtCore import Qt, Signal, QPointF
-from PySide6.QtGui import QPixmap, QPen, QColor, QTransform, QPainter
+from PySide6.QtGui import QPixmap, QPen, QColor, QTransform, QPainter, QKeyEvent
 from PySide6.QtWidgets import QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,QGraphicsItem
 from pdf_editor.engine.geometry import transformed_rect, transform_point, inverse_transform
 from pdf_editor.engine.overlay import transformed_image
@@ -15,6 +15,7 @@ class LayerItem(QGraphicsPixmapItem):
 
     def mousePressEvent(self,event):
         self.start=self.pos()
+        self.canvas.clear_text_selection()
         self.canvas.layer_selected.emit(self.layer.id)
         super().mousePressEvent(event)
 
@@ -31,6 +32,8 @@ class LayerItem(QGraphicsPixmapItem):
 
 class Canvas(QGraphicsView):
     run_selected=Signal(object)
+    run_moved=Signal(object)
+    run_delete_requested=Signal(object)
     layer_selected=Signal(str)
     layer_moved=Signal(object)
 
@@ -43,11 +46,18 @@ class Canvas(QGraphicsView):
         self.matrix=(1,0,0,1,0,0)
         self.runs=[]
         self.highlight=None
+        self.selected_run=None
+        self._drag_run=None
+        self._drag_start_scene=QPointF()
+        self._drag_original_rect=None
         self.setMinimumWidth(400)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def display(self,data,layers=()):
         self.scene().clear()
         self.highlight=None
+        self.selected_run=None
+        self._drag_run=None
         self.matrix=data["matrix"]
         self.runs=data["runs"]
         pix=QPixmap()
@@ -71,20 +81,85 @@ class Canvas(QGraphicsView):
             item.setZValue(5)
             self.scene().addItem(item)
 
+    def _run_at(self, scene_pos):
+        x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
+        for run in reversed(self.runs):
+            x0,y0,x1,y1=run.rect
+            if x0<=x<=x1 and y0<=y<=y1:
+                return run
+        return None
+
+    def clear_text_selection(self):
+        self.selected_run=None
+        if self.highlight:
+            self.scene().removeItem(self.highlight)
+            self.highlight=None
+
+    def _show_highlight(self, rect):
+        if self.highlight:
+            self.scene().removeItem(self.highlight)
+        r=transformed_rect(self.matrix,rect)
+        self.highlight=self.scene().addRect(r[0],r[1],r[2]-r[0],r[3]-r[1],
+            QPen(QColor("#246b55"),2))
+        self.highlight.setZValue(2)
+
     def mousePressEvent(self,event):
-        scene_pos=self.mapToScene(event.pos())
+        scene_pos=self.mapToScene(event.position().toPoint())
         item=self.scene().itemAt(scene_pos,QTransform())
+        self.setFocus()
+        if isinstance(item,LayerItem):
+            self.clear_text_selection()
         if not isinstance(item,LayerItem):
-            x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
-            for run in self.runs:
-                x0,y0,x1,y1=run.rect
-                if x0<=x<=x1 and y0<=y<=y1:
-                    if self.highlight:
-                        self.scene().removeItem(self.highlight)
-                    r=transformed_rect(self.matrix,run.rect)
-                    self.highlight=self.scene().addRect(r[0],r[1],r[2]-r[0],r[3]-r[1],
-                        QPen(QColor("#246b55"),2))
-                    self.highlight.setZValue(2)
-                    self.run_selected.emit(run)
-                    break
+            run=self._run_at(scene_pos)
+            if run:
+                self.selected_run=run
+                self._drag_run=run
+                self._drag_start_scene=scene_pos
+                self._drag_original_rect=run.rect
+                self._show_highlight(run.rect)
+                self.run_selected.emit(run)
+                event.accept()
+                return
+            self.clear_text_selection()
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self,event):
+        if self._drag_run:
+            scene_pos=self.mapToScene(event.position().toPoint())
+            delta=scene_pos-self._drag_start_scene
+            inv=inverse_transform(self.matrix)
+            x,y=transform_point(inv,delta.x(),delta.y())
+            ox,oy=transform_point(inv,0,0)
+            dx,dy=x-ox,y-oy
+            r=self._drag_original_rect
+            self._show_highlight((r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self,event):
+        if self._drag_run:
+            scene_pos=self.mapToScene(event.position().toPoint())
+            delta=scene_pos-self._drag_start_scene
+            inv=inverse_transform(self.matrix)
+            x,y=transform_point(inv,delta.x(),delta.y())
+            ox,oy=transform_point(inv,0,0)
+            dx,dy=x-ox,y-oy
+            r=self._drag_original_rect
+            moved=replace(self._drag_run,rect=(r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy))
+            self._drag_run=None
+            if abs(dx)+abs(dy)>0.01:
+                self.selected_run=moved
+                self.run_moved.emit(moved)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+
+    def keyPressEvent(self,event: QKeyEvent):
+        if event.key()==Qt.Key.Key_Delete and self.selected_run is not None:
+            self.run_delete_requested.emit(self.selected_run)
+            event.accept()
+            return
+        super().keyPressEvent(event)

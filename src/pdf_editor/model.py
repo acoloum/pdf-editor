@@ -24,6 +24,7 @@ class TextReplacement:
     font_path: str
     size: float
     color: Color
+    alignment: str = "left"
 
 @dataclass(frozen=True)
 class DocumentAccess:
@@ -38,4 +39,3 @@ class Overlay:
     asset_path: str
     rect: Rect
     angle: float = 0
-

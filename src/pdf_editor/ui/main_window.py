@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,Q
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import write_pdf,publish_batch
 from pdf_editor.engine.render import render_page,thumbnail
-from pdf_editor.engine.text import replace_text
+from pdf_editor.engine.text import replace_text, find_table_cell
 from pdf_editor.engine.overlay import flatten_overlays
 from pdf_editor.engine.fonts import default_font,embedded_font
 from pdf_editor.model import TextReplacement,Overlay
@@ -104,6 +104,8 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.thumbs)
         self.canvas=Canvas()
         self.canvas.run_selected.connect(self.select_run)
+        self.canvas.run_moved.connect(self.move_run)
+        self.canvas.run_delete_requested.connect(self.delete_run)
         self.canvas.layer_selected.connect(self.select_layer)
         self.canvas.layer_moved.connect(self.move_layer)
         splitter.addWidget(self.canvas)
@@ -274,6 +276,9 @@ class MainWindow(QMainWindow):
         if original:
             self.text_panel.font_path=str(original)
             self.text_panel.font_label.setText("原字型："+run.font_name+"；缺字時請使用內建中文字型。")
+        cell=find_table_cell(self.session.pdf,self.page,run.rect)
+        if cell:
+            self.text_panel.set_rect(cell)
         self.refresh_actions()
 
     def preview_from_panel(self):
@@ -281,8 +286,41 @@ class MainWindow(QMainWindow):
             return
         p=self.text_panel
         req=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),
-            self.page,self.run.id,p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),p.color)
+            self.page,self.run.id,p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),p.color,
+            p.alignment.currentData())
         self.preview_replacement(req)
+
+    def move_run(self,run):
+        if not self.session or not run.editable or self.busy or self.preview:
+            return
+        self.run=run
+        x0,y0,x1,y1=run.rect
+        self.text_panel.set_rect((x0,y0,x1+10,y1+run.size*0.5))
+        self.preview_from_panel()
+
+    def delete_run(self,run):
+        if not self.session or not run.editable or self.busy or self.preview:
+            return
+        self.run=run
+        p=self.text_panel
+        request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),
+            self.page,run.id,"",run.rect,p.font_path,run.size,run.color,"left")
+        revision=self.session.revision
+        token=self.token
+        self.busy=True
+        self.refresh_actions()
+        self.statusBar().showMessage("正在刪除文字…")
+        def done(pdf):
+            self.busy=False
+            if self.closed or token!=self.token or revision!=self.session.revision:
+                return
+            self.session.apply_pdf(pdf)
+            self.preview=None
+            self.run=None
+            self.text_panel.setEnabled(False)
+            self.refresh_actions()
+            self.request_render()
+        self.jobs.submit(replace_text,(self.session.pdf,request),done,self.error)
 
     def preview_replacement(self,request):
         if self.busy:

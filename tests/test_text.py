@@ -2,6 +2,7 @@ from dataclasses import replace
 import hashlib
 import pytest
 import pymupdf
+from pdf_editor.engine import text as text_engine
 from pdf_editor.engine.text import extract_runs, replace_text
 from pdf_editor.model import TextReplacement
 from pdf_editor.errors import EditorError
@@ -64,3 +65,38 @@ def test_second_edit_adds_new_chinese_glyphs(pdf_bytes, font_path):
     second = replace_text(first, req)
     with pymupdf.open(stream=second) as doc:
         assert '完成覆核' in doc[0].get_text()
+
+def test_replace_text_supports_horizontal_and_vertical_center(pdf_bytes, font_path):
+    assert "alignment" in TextReplacement.__dataclass_fields__
+    request = replace(request_for(pdf_bytes, font_path),
+        text="置中", rect=(100, 300, 400, 380), alignment="center")
+    out = replace_text(pdf_bytes, request)
+    run = next(r for r in extract_runs(out, 0) if r.text == "置中")
+    assert (run.rect[0] + run.rect[2]) / 2 == pytest.approx(250, abs=25)
+    assert (run.rect[1] + run.rect[3]) / 2 == pytest.approx(340, abs=25)
+
+def test_replace_text_rejects_unknown_alignment(pdf_bytes, font_path):
+    assert "alignment" in TextReplacement.__dataclass_fields__
+    request = replace(request_for(pdf_bytes, font_path), alignment="diagonal")
+    with pytest.raises(EditorError, match="對齊"):
+        replace_text(pdf_bytes, request)
+
+def test_replace_text_supports_horizontal_center(pdf_bytes, font_path):
+    request = replace(request_for(pdf_bytes, font_path),
+        text="水平", rect=(100, 300, 400, 380), alignment="hcenter")
+    out = replace_text(pdf_bytes, request)
+    run = next(r for r in extract_runs(out, 0) if r.text == "水平")
+    assert (run.rect[0] + run.rect[2]) / 2 == pytest.approx(250, abs=25)
+
+def test_find_table_cell_returns_cell_containing_text(font_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    page.draw_rect((50, 50, 250, 100), width=1)
+    page.draw_line((150, 50), (150, 100), width=1)
+    page.insert_text((70, 80), "ABC", fontsize=12)
+    data = doc.tobytes()
+    doc.close()
+    run = extract_runs(data, 0)[0]
+    assert callable(getattr(text_engine, "find_table_cell", None))
+    cell = text_engine.find_table_cell(data, 0, run.rect)
+    assert cell == pytest.approx((52, 52, 148, 98))

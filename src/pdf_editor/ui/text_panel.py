@@ -1,5 +1,5 @@
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QWidget,QVBoxLayout,QFormLayout,QLabel,QTextEdit,QDoubleSpinBox,QPushButton,QFileDialog,QColorDialog
+from PySide6.QtWidgets import QWidget,QVBoxLayout,QFormLayout,QLabel,QTextEdit,QDoubleSpinBox,QPushButton,QFileDialog,QColorDialog,QComboBox
 from PySide6.QtGui import QColor
 from pdf_editor.engine.fonts import default_font
 
@@ -24,6 +24,10 @@ class TextPanel(QWidget):
         self.size=QDoubleSpinBox()
         self.size.setRange(1,300)
         form.addRow("字級",self.size)
+        self.alignment=QComboBox()
+        for label,value in [("靠左","left"),("水平置中","hcenter"),("水平及垂直置中","center")]:
+            self.alignment.addItem(label,value)
+        form.addRow("文字對齊",self.alignment)
         self.box=[]
         for name in ["左側 X","頂端 Y","寬度","高度"]:
             spin=QDoubleSpinBox()
@@ -86,8 +90,13 @@ class TextPanel(QWidget):
         self.text.setPlainText(run.text)
         self.size.setValue(run.size)
         self.color=run.color
+        self.alignment.setCurrentIndex(0)
         x0,y0,x1,y1=run.rect
-        for spin,value in zip(self.box,(x0,y0,x1-x0+10,y1-y0+run.size*0.5)):
+        self.set_rect((x0,y0,x1+10,y1+run.size*0.5))
+
+    def set_rect(self, rect):
+        x0,y0,x1,y1=rect
+        for spin,value in zip(self.box,(x0,y0,x1-x0,y1-y0)):
             spin.setValue(value)
 
     def rect(self):
