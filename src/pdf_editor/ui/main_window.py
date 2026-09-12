@@ -497,16 +497,19 @@ class MainWindow(QMainWindow):
         dialog.page_requested.connect(self.request_comparison_page)
         dialog.finished.connect(
             lambda _result,current=dialog:self.clear_comparison(current))
+        dialog.destroyed.connect(
+            lambda _object=None,current=dialog:self.clear_comparison(current))
         dialog.show()
         self.request_comparison_page(0)
 
     def request_comparison_page(self,page):
         dialog=self.comparison_dialog
-        if (not self.session or dialog is None or self.comparison_pdf is None
-                or self.comparison_base_pdf is None
-                or self.comparison_revision!=self.session.revision
-                or self.comparison_token!=self.token
-                or not 0<=page<dialog.comparison_page_count):
+        if dialog is None:
+            return
+        if not self.comparison_context_is_current(dialog):
+            self.close_comparison()
+            return
+        if not 0<=page<dialog.comparison_page_count:
             return
         self.comparison_serial+=1
         serial=self.comparison_serial
@@ -515,10 +518,14 @@ class MainWindow(QMainWindow):
         dialog.set_busy(True)
 
         def current_request():
-            return (not self.closed and self.session is not None
-                and token==self.token and revision==self.session.revision
-                and dialog is self.comparison_dialog
-                and serial==self.comparison_serial)
+            if (dialog is not self.comparison_dialog
+                    or serial!=self.comparison_serial):
+                return False
+            if (not self.comparison_context_is_current(dialog)
+                    or token!=self.token or revision!=self.session.revision):
+                self.close_comparison()
+                return False
+            return True
 
         def done(result):
             if current_request():
@@ -526,11 +533,28 @@ class MainWindow(QMainWindow):
 
         def failed(error):
             if current_request():
-                dialog.set_busy(False)
-                self.error(error)
+                self.show_comparison_error(dialog,error)
 
         self.jobs.submit(compare_pages,(self.comparison_base_pdf,self.comparison_base_page,
             self.comparison_pdf,page),done,failed)
+
+    def show_comparison_error(self,dialog,error):
+        _code,message,completed=error
+        if completed:
+            message+="\n已完成：\n"+"\n".join(completed)
+        dialog.set_busy(False)
+        dialog.summary.setText("比較失敗："+message.split("\n")[0])
+        QMessageBox.warning(self,"無法比較頁面",message)
+        self.statusBar().showMessage(message.split("\n")[0])
+
+    def comparison_context_is_current(self,dialog):
+        return (not self.closed and self.session is not None
+            and dialog is self.comparison_dialog
+            and self.comparison_pdf is not None
+            and self.comparison_base_pdf is not None
+            and self.comparison_base_page is not None
+            and self.comparison_revision==self.session.revision
+            and self.comparison_token==self.token)
 
     def clear_comparison(self,dialog):
         if dialog is not self.comparison_dialog:

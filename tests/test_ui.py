@@ -1,10 +1,11 @@
 import hashlib
 import io
+from concurrent.futures import Future
 from dataclasses import replace
 import pytest
 import pymupdf
 from PIL import Image
-from PySide6.QtCore import Qt, QPoint, QPointF, QItemSelectionModel
+from PySide6.QtCore import Qt, QPoint, QPointF, QItemSelectionModel, QEvent, QCoreApplication
 from PySide6.QtWidgets import QAbstractItemView
 from PySide6.QtTest import QSignalSpy
 from pdf_editor.ui.main_window import MainWindow
@@ -1456,9 +1457,70 @@ def test_comparison_ignores_callback_after_session_revision_changes(
         window.session.set_overlays(())
         pending[0][2](_page_comparison_result(50.0))
 
-        assert dialog.summary.text() == "正在比較頁面…"
+        assert window.comparison_dialog is None
+        assert window.comparison_pdf is None
+        assert window.comparison_base_pdf is None
+        assert not dialog.isVisible()
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_comparison_closes_when_revision_changes_before_next_page_request(
+        qtbot, source_path, multi_page_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        pending = _defer_window_jobs(window)
+        window.open_comparison(multi_page_path.read_bytes())
+        dialog = window.comparison_dialog
+        pending[0][2](_page_comparison_result(100.0))
+        assert dialog.page_spin.isEnabled()
+
+        window.session.set_overlays(())
+        dialog.page_spin.setValue(2)
+
+        assert len(pending) == 1
+        assert window.comparison_dialog is None
+        assert window.comparison_pdf is None
+        assert window.comparison_base_pdf is None
+        assert not dialog.isVisible()
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_comparison_failure_keeps_concurrent_main_window_job_busy(
+        qtbot, source_path, pdf_bytes, monkeypatch):
+    warnings = []
+    future = Future()
+    monkeypatch.setattr("pdf_editor.ui.main_window.QMessageBox.warning",
+        lambda parent, title, message: warnings.append((title, message)))
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        qtbot.waitUntil(lambda: not window.jobs.pending, timeout=30000)
+        window.jobs.timer.stop()
+        monkeypatch.setattr(window.jobs.pool, "submit", lambda *args: future)
+        window.open_comparison(pdf_bytes)
+        dialog = window.comparison_dialog
+
+        window.busy = True
+        window.refresh_actions()
+        future.set_result((False, ("COMPARE", "比較工作失敗。", ())))
+        window.jobs.poll()
+
+        assert window.busy
+        assert not window.actions["ocr"].isEnabled()
+        assert dialog.page_spin.isEnabled()
+        assert dialog.summary.text() == "比較失敗：比較工作失敗。"
+        assert warnings == [("無法比較頁面", "比較工作失敗。")]
+    finally:
+        window.busy = False
         window.close()
 
 
@@ -1481,6 +1543,31 @@ def test_comparison_close_clears_bytes_and_ignores_callback(
         assert window.comparison_base_pdf is None
         assert dialog.summary.text() == "正在比較頁面…"
     finally:
+        window.close()
+
+
+def test_comparison_delete_later_clears_references_before_failure_callback(
+        qtbot, source_path, pdf_bytes):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    dialog = None
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        pending = _defer_window_jobs(window)
+        window.open_comparison(pdf_bytes)
+        dialog = window.comparison_dialog
+
+        dialog.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        pending[0][3](("COMPARE", "比較工作失敗。", ()))
+
+        assert window.comparison_dialog is None
+        assert window.comparison_pdf is None
+        assert window.comparison_base_pdf is None
+    finally:
+        if dialog is not None and window.comparison_dialog is dialog:
+            window.clear_comparison(dialog)
         window.close()
 
 
