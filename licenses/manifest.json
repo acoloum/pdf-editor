@@ -72,9 +72,46 @@
     ]
   },
   {
+    "name": "tesserocr",
+    "version": "2.10.0",
+    "license": "MIT",
+    "sources": [
+      "Source, https://github.com/sirfz/tesserocr"
+    ]
+  },
+  {
+    "name": "cysignals",
+    "version": "1.12.6",
+    "license": "LGPL-3.0-or-later",
+    "sources": [
+      "Source, https://github.com/sagemath/cysignals"
+    ]
+  },
+  {
     "name": "NotoSansCJKtc-Regular.otf",
     "license": "SIL OFL 1.1",
     "sha256": "dce08bd4fd91aa8aa76ed8fea4b694c2dfb8550f67871e326843212ddbeb88b4",
     "source": "https://github.com/notofonts/noto-cjk/tree/main/Sans/OTF/TraditionalChinese"
+  },
+  {
+    "name": "Tesseract OCR",
+    "version": "5.5.2",
+    "license": "Apache-2.0",
+    "source": "https://github.com/tesseract-ocr/tesseract"
+  },
+  {
+    "name": "Leptonica",
+    "license": "BSD-2-Clause",
+    "source": "http://www.leptonica.org/"
+  },
+  {
+    "name": "tessdata_fast",
+    "commit": "87416418657359cb625c412a48b6e1d6d41c29bd",
+    "license": "Apache-2.0",
+    "source": "https://github.com/tesseract-ocr/tessdata_fast",
+    "models": {
+      "chi_tra.traineddata": "529c5b5797d64b126065cd55f2bb4c7fd7b15790798091b1ff259941a829330b",
+      "eng.traineddata": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
+    }
   }
 ]

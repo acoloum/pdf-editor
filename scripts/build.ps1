@@ -5,6 +5,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location -LiteralPath $projectRoot
+& $PythonExecutable -m pip install -r packaging/requirements-ocr-win.txt
+if ($LASTEXITCODE -ne 0) { throw 'OCR 執行環境安裝失敗。' }
 & $PythonExecutable -m pytest -q
 if ($LASTEXITCODE -ne 0) { throw '測試未通過，停止建置。' }
 & $PythonExecutable -m PyInstaller --clean --noconfirm packaging/pdf_editor.spec
