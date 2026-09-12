@@ -36,6 +36,28 @@ def render_png(pdf):
         return doc[0].get_pixmap(alpha=False).tobytes("png")
 
 
+def find_ocr_span(pdf, text):
+    with pymupdf.open(stream=pdf, filetype="pdf") as doc:
+        page = doc[0]
+        span = next(span for block in page.get_text("dict")["blocks"]
+            for line in block.get("lines", []) for span in line["spans"] if span["text"] == text)
+        return pymupdf.Rect(span["bbox"]), page.rotation, page.derotation_matrix
+
+
+def expected_ocr_rect(pixel_rect, derotation_matrix, dpi=300):
+    left, top, width, height = pixel_rect
+    scale = dpi / 72
+    return pymupdf.Rect(left / scale, top / scale,
+        (left + width) / scale, (top + height) / scale) * derotation_matrix
+
+
+def assert_rect_within(expected, actual, tolerance=0.01):
+    assert expected.x0 - tolerance <= actual.x0
+    assert expected.y0 - tolerance <= actual.y0
+    assert actual.x1 <= expected.x1 + tolerance
+    assert actual.y1 <= expected.y1 + tolerance
+
+
 @pytest.fixture
 def scanned_pdf():
     return scan_pdf()
@@ -119,6 +141,32 @@ def test_ocr_pages_keeps_text_horizontal_on_a_rotated_page(scanned_pdf, tmp_path
         line = next(line for block in doc[0].get_text("dict")["blocks"]
             for line in block.get("lines", []) if "旋轉頁面" in line["spans"][0]["text"])
     assert line["dir"] == pytest.approx((0.0, -1.0))
+
+
+def test_ocr_pages_keeps_bottom_edge_text_within_its_tsv_box(scanned_pdf, tmp_path):
+    pixel_rect = (80, 1530, 300, 120)
+    result = ocr_pages(scanned_pdf, (0,), tmp_path,
+        recognizer=lambda *args: make_tsv(("底緣文字", 90, pixel_rect)))
+
+    span_rect, _, derotation = find_ocr_span(result.pdf, "底緣文字")
+    expected = expected_ocr_rect(pixel_rect, derotation)
+
+    assert_rect_within(expected, span_rect)
+
+
+def test_ocr_pages_keeps_rotated_bottom_edge_text_within_its_tsv_box(scanned_pdf, tmp_path):
+    with pymupdf.open(stream=scanned_pdf, filetype="pdf") as source:
+        source[0].set_rotation(90)
+        rotated_pdf = source.tobytes()
+    pixel_rect = (80, 1950, 500, 100)
+    result = ocr_pages(rotated_pdf, (0,), tmp_path,
+        recognizer=lambda *args: make_tsv(("旋轉底緣", 90, pixel_rect)))
+
+    span_rect, rotation, derotation = find_ocr_span(result.pdf, "旋轉底緣")
+    expected = expected_ocr_rect(pixel_rect, derotation)
+
+    assert rotation == 90
+    assert_rect_within(expected, span_rect)
 
 
 def test_recognize_image_returns_tesseract_tsv(monkeypatch, tmp_path):

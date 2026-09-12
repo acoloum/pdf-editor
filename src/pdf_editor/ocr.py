@@ -87,7 +87,8 @@ def _page_has_text(page: pymupdf.Page) -> bool:
     return len("".join(page.get_text().split())) >= 10
 
 
-def _pixel_point_to_page(page: pymupdf.Page, left: int, top: int, scale: float) -> pymupdf.Point:
+def _pixel_point_to_page(page: pymupdf.Page, left: float, top: float,
+        scale: float) -> pymupdf.Point:
     return pymupdf.Point(left / scale, top / scale) * page.derotation_matrix
 
 
@@ -96,12 +97,13 @@ def _insert_invisible_words(page: pymupdf.Page, words: tuple[OcrWord, ...], scal
     font = pymupdf.Font(fontfile=str(OCR_FONT))
     for word in words:
         left, top, width, height = word.pixel_rect
-        size = height / scale
+        size = height / scale / (font.ascender - font.descender)
         text_width = font.text_length(word.text, fontsize=size)
         available_width = width / scale
         if text_width > available_width:
             size *= available_width / text_width
-        baseline = _pixel_point_to_page(page, left, top + height, scale)
+        baseline = _pixel_point_to_page(page, left,
+            top + font.ascender * size * scale, scale)
         page.insert_text(baseline, word.text, fontname="ocrnoto", fontsize=size,
             render_mode=3, overlay=True, rotate=page.rotation)
 
