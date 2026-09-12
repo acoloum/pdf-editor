@@ -22,6 +22,16 @@ def make_pdf(width=200, height=120, color=(255, 255, 255), block=None):
     return data
 
 
+def zero_user_unit_pdf():
+    """建立會由 PyMuPDF 渲染為零尺寸 pixmap 的頁面。"""
+    document = pymupdf.open()
+    page = document.new_page(width=200, height=120)
+    document.xref_set_key(page.xref, "UserUnit", "0")
+    data = document.tobytes()
+    document.close()
+    return data
+
+
 @pytest.fixture
 def simple_pdf():
     return make_pdf()
@@ -84,6 +94,32 @@ def test_different_size_page_is_scaled_and_centered_on_base_canvas():
     assert comparison.size == base.size
     assert comparison.getpixel((0, comparison.height // 2)) == (255, 255, 255)
     assert comparison.getpixel((comparison.width // 2, comparison.height // 2)) == (0, 0, 0)
+
+
+@pytest.mark.parametrize(("width", "height", "pixel"), (
+    (1, 1000, (199, 120)),
+    (1000, 1, (200, 119)),
+))
+def test_extremely_thin_comparison_page_keeps_at_least_one_pixel(width, height, pixel, simple_pdf):
+    comparison_pdf = make_pdf(width=width, height=height, color=(0, 0, 0))
+
+    result = compare_pages(simple_pdf, 0, comparison_pdf, 0)
+    comparison = Image.open(io.BytesIO(result.comparison_png)).convert("RGB")
+
+    assert comparison.size == (400, 240)
+    assert comparison.getpixel(pixel) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("zero_is_base", (True, False))
+def test_zero_size_rendered_page_raises_invalid_pdf_at_each_input_position(simple_pdf, zero_is_base):
+    zero_size_pdf = zero_user_unit_pdf()
+    base_pdf, comparison_pdf = ((zero_size_pdf, simple_pdf) if zero_is_base
+                                else (simple_pdf, zero_size_pdf))
+
+    with pytest.raises(EditorError) as error:
+        compare_pages(base_pdf, 0, comparison_pdf, 0)
+
+    assert error.value.code == "INVALID_PDF"
 
 
 @pytest.mark.parametrize("kwargs", (

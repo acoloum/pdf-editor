@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import io
 
 import pymupdf
-from PIL import Image, ImageChops, ImageOps
+from PIL import Image, ImageChops
 
 from pdf_editor.engine.inspection import unlock_pdf
 from pdf_editor.errors import EditorError
@@ -44,12 +44,19 @@ def _render(pdf, page, dpi):
             raise EditorError("COMPARE_RANGE", "比較頁碼超出文件範圍。")
         pixmap = document[page].get_pixmap(
             matrix=pymupdf.Matrix(dpi / 72, dpi / 72), alpha=False)
+        if pixmap.width <= 0 or pixmap.height <= 0:
+            raise EditorError("INVALID_PDF", "PDF 頁面尺寸無效，無法進行比較。")
         return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
 
 
 def _align_to_base(base, comparison):
     """將比較圖等比例縮放並置中到基準圖尺寸的白色畫布。"""
-    contained = ImageOps.contain(comparison, base.size)
+    scale = min(base.width / comparison.width, base.height / comparison.height)
+    contained_size = (
+        min(base.width, max(1, round(comparison.width * scale))),
+        min(base.height, max(1, round(comparison.height * scale))),
+    )
+    contained = comparison.resize(contained_size, Image.Resampling.BICUBIC)
     canvas = Image.new("RGB", base.size, "white")
     offset = ((base.width - contained.width) // 2, (base.height - contained.height) // 2)
     canvas.paste(contained, offset)
