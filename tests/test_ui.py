@@ -1219,6 +1219,29 @@ def test_window_exposes_ocr_action_for_selected_editable_pages(qtbot, source_pat
         window.close()
 
 
+def test_window_ocr_requires_an_actual_thumbnail_selection(qtbot, source_path):
+    submitted = []
+
+    def capture_submission(function, arguments, success, failure):
+        submitted.append(function)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        window.jobs.submit = capture_submission
+        window.thumbs.clearSelection()
+        window.thumbnail_selection_changed()
+
+        assert not window.actions["ocr"].isEnabled()
+        window.run_ocr()
+        assert submitted == []
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
 def test_window_commits_ocr_as_one_undoable_change(qtbot, source_path, tmp_path, monkeypatch):
     calls = []
 
@@ -1245,6 +1268,42 @@ def test_window_commits_ocr_as_one_undoable_change(qtbot, source_path, tmp_path,
         assert window.statusBar().currentMessage() == "OCR 完成：辨識 1 頁，跳過 0 頁，共 1 個文字區段。"
         window.history_step(False)
         assert window.session.pdf == before
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_window_keeps_ocr_summary_after_delayed_page_render(
+        qtbot, source_path, tmp_path, monkeypatch):
+    pending = []
+
+    def defer_submission(function, arguments, success, failure):
+        pending.append((function, arguments, success, failure))
+
+    def run_next():
+        function, arguments, success, failure = pending.pop(0)
+        try:
+            success(function(*arguments))
+        except Exception as exc:
+            failure((getattr(exc, "code", "ERROR"), str(exc), ()))
+
+    def fake_ocr_pages(pdf, pages, tessdata):
+        return OcrResult(_pdf_with_ocr_marker(pdf), pages, (), 1)
+
+    monkeypatch.setattr("pdf_editor.ui.main_window.ocr_pages", fake_ocr_pages)
+    monkeypatch.setattr("pdf_editor.ui.main_window.validate_ocr_assets", lambda: tmp_path)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        window.jobs.submit = defer_submission
+
+        window.apply_ocr_to_pages((0,))
+        run_next()
+        run_next()
+
+        assert window.statusBar().currentMessage() == "OCR 完成：辨識 1 頁，跳過 0 頁，共 1 個文字區段。"
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()

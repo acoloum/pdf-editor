@@ -328,6 +328,7 @@ class MainWindow(QMainWindow):
         self.actions["merge"].setEnabled(not self.busy)
         manage=active and self.session.access.can_reorganize and not self.busy
         selected=set(self.selected_page_indices()) if active else set()
+        ocr_selected=self.selected_thumbnail_indices() if active else ()
         can_up=any(page>0 and page-1 not in selected for page in selected)
         can_down=any(page<self.page_count-1 and page+1 not in selected for page in selected)
         self.actions["page_up"].setEnabled(manage and can_up)
@@ -342,7 +343,7 @@ class MainWindow(QMainWindow):
         self.actions["crop_page"].setEnabled(edit and bool(selected))
         self.actions["direct_crop"].setEnabled(edit and bool(selected))
         self.actions["delete_page"].setEnabled(manage and bool(selected) and len(selected)<self.page_count)
-        self.actions["ocr"].setEnabled(edit and bool(selected))
+        self.actions["ocr"].setEnabled(edit and bool(ocr_selected))
         self.page_menu_button.setEnabled(manage or edit)
         markup=edit and self.run is not None and self.run.editable
         self.actions["highlight"].setEnabled(markup)
@@ -544,14 +545,20 @@ class MainWindow(QMainWindow):
         self.jobs.submit(edit_page_document,
             (self.session.pdf,self.session.overlays,operation,pages,target),done,self.error)
 
+    def selected_thumbnail_indices(self):
+        return tuple(sorted(self.thumbs.row(item) for item in self.thumbs.selectedItems()))
+
     def selected_page_indices(self):
-        selected=tuple(sorted(self.thumbs.row(item) for item in self.thumbs.selectedItems()))
+        selected=self.selected_thumbnail_indices()
         if selected:
             return selected
         return (self.page,) if self.session and 0<=self.page<self.page_count else ()
 
     def run_ocr(self):
-        self.apply_ocr_to_pages(self.selected_page_indices())
+        pages=self.selected_thumbnail_indices()
+        if not pages:
+            return
+        self.apply_ocr_to_pages(pages)
 
     def apply_ocr_to_pages(self,pages):
         pages=tuple(pages)
@@ -576,11 +583,10 @@ class MainWindow(QMainWindow):
                 self.session.apply_state(result.pdf,())
                 self.clear_search_results()
                 self.page_data=None
-                self.request_render()
-                self.queue_thumbnail(0,self.token,self.session.revision)
-                self.statusBar().showMessage(
-                    f"OCR 完成：辨識 {len(result.processed_pages)} 頁，跳過 "
+                summary=(f"OCR 完成：辨識 {len(result.processed_pages)} 頁，跳過 "
                     f"{len(result.skipped_pages)} 頁，共 {result.word_count} 個文字區段。")
+                self.request_render(summary)
+                self.queue_thumbnail(0,self.token,self.session.revision)
             else:
                 self.refresh_actions()
                 self.statusBar().showMessage(
@@ -942,7 +948,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"搜尋結果 {self.search_index+1} / {len(self.search_results)}，第 {match.page+1} 頁")
 
-    def request_render(self):
+    def request_render(self,completion_status=None):
         if not self.session:
             return
         self.render_serial+=1
@@ -968,9 +974,12 @@ class MainWindow(QMainWindow):
             except EditorError as exc:
                 self.error((exc.code,str(exc),()))
             self.refresh_actions()
-            status=self.session.access.reason or ("預覽中，尚未套用" if self.preview else
-                "有未儲存變更" if self.session.dirty else "可編輯")
-            self.statusBar().showMessage(f"第 {self.page+1} / {self.page_count} 頁  ·  {status}")
+            if completion_status is not None:
+                self.statusBar().showMessage(completion_status)
+            else:
+                status=self.session.access.reason or ("預覽中，尚未套用" if self.preview else
+                    "有未儲存變更" if self.session.dirty else "可編輯")
+                self.statusBar().showMessage(f"第 {self.page+1} / {self.page_count} 頁  ·  {status}")
         pixel_ratio=float(self.canvas.devicePixelRatioF())
         self.jobs.submit(render_page,(data,self.page,self.scale,pixel_ratio),done,self.error)
 
