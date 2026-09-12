@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 
 from pdf_editor.errors import EditorError
 from pdf_editor.ocr_assets import validate_ocr_assets
@@ -37,3 +38,12 @@ def test_validate_ocr_assets_returns_tessdata_directory(monkeypatch, tmp_path):
     monkeypatch.setattr("pdf_editor.ocr_assets.resource_root", lambda: tmp_path)
 
     assert validate_ocr_assets() == tessdata
+
+
+def test_pyinstaller_includes_tesserocr_bundled_cysignals():
+    """Windows wheel 使用的嵌套 cysignals 必須收入 frozen 應用。"""
+    root = Path(__file__).parents[1]
+    spec = (root / "packaging" / "pdf_editor.spec").read_text(encoding="utf-8")
+
+    assert '"tesserocr.cysignals"' in spec
+    assert '"tesserocr.cysignals.signals"' in spec

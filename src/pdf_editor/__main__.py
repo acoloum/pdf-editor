@@ -1,6 +1,65 @@
 import sys
 import multiprocessing
 
+
+def _acceptance_report(query, match_count, comparison_summary,
+        revision_before, revision_after, ocr_word_count=None):
+    """建立安裝版私有驗收紀錄，並拒絕未通過的結果。"""
+    if match_count <= 0:
+        raise AssertionError("OCR 文字無法搜尋。")
+    if revision_before != revision_after:
+        raise AssertionError("頁面比較改變了 revision。")
+    if not comparison_summary.startswith("相似度"):
+        raise AssertionError("頁面比較沒有完成。")
+    ocr_line = f"OCR 文字區段={ocr_word_count}\n" if ocr_word_count is not None else ""
+    return (
+        ocr_line +
+        f"搜尋文字={query}\n"
+        f"搜尋命中={match_count}\n"
+        f"比較結果={comparison_summary}\n"
+        f"revision={revision_before} -> {revision_after}\n"
+    )
+
+
+def _recognize_for_acceptance(scan_path, ocr_output):
+    """在主程序呼叫封裝 OCR，供 frozen 安裝版驗收。"""
+    from pdf_editor.ocr import ocr_pages
+    from pdf_editor.ocr_assets import validate_ocr_assets
+
+    result = ocr_pages(scan_path.read_bytes(), (0,), validate_ocr_assets())
+    if result.word_count <= 0:
+        raise AssertionError("OCR 沒有辨識到文字。")
+    ocr_output.write_bytes(result.pdf)
+    return result.word_count
+
+
+def _save_acceptance_preview(window, dialog, target):
+    """合併安裝版的搜尋主視窗與頁面比較視窗。"""
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    window_pixmap = window.grab()
+    dialog_pixmap = dialog.grab()
+    width = max(window_pixmap.width(), dialog_pixmap.width())
+    preview = QImage(width, window_pixmap.height() + dialog_pixmap.height(),
+                     QImage.Format.Format_RGB32)
+    preview.fill(QColor("#20242a"))
+    painter = QPainter(preview)
+    painter.drawPixmap((width - window_pixmap.width()) // 2, 0, window_pixmap)
+    painter.drawPixmap((width - dialog_pixmap.width()) // 2,
+                       window_pixmap.height(), dialog_pixmap)
+    painter.end()
+    if not preview.save(str(target), "PNG"):
+        raise AssertionError("無法儲存安裝版驗收預覽。")
+
+
+def _finish_acceptance(window, app, exit_code):
+    """關閉私有驗收視窗，不顯示未儲存詢問。"""
+    if window.session is not None and window.session.dirty:
+        window.session.saved_fingerprint = window.session.history.current[2]
+    window.close()
+    app.exit(exit_code)
+
+
 def main(argv=None):
     multiprocessing.freeze_support()
     args=list(sys.argv[1:] if argv is None else argv)
@@ -38,6 +97,66 @@ def main(argv=None):
                 return
             QTimer.singleShot(50,finish_smoke)
         QTimer.singleShot(50,finish_smoke)
+    elif args and args[0]=="--ocr-comparison-smoke-test":
+        if len(args)!=6:
+            window.close()
+            return 2
+        from pathlib import Path
+
+        scan_path=Path(args[1])
+        comparison_path=Path(args[2])
+        ocr_output=Path(args[3])
+        screenshot=Path(args[4])
+        report_output=Path(args[5])
+        try:
+            comparison_pdf=comparison_path.read_bytes()
+            word_count=_recognize_for_acceptance(scan_path,ocr_output)
+            window.open_document(ocr_output)
+        except Exception:
+            import traceback
+
+            report_output.write_text(traceback.format_exc(),encoding="utf-8")
+            window.close()
+            return 2
+        state={"phase":"open","ticks":2400,"revision_before":None,
+               "word_count":word_count}
+
+        def fail_acceptance():
+            _finish_acceptance(window,app,2)
+
+        def finish_acceptance():
+            try:
+                state["ticks"]-=1
+                if state["ticks"]<=0:
+                    fail_acceptance()
+                    return
+                if state["phase"]=="open" and window.page_data is not None:
+                    window.perform_search("材料")
+                    state["phase"]="search"
+                elif (state["phase"]=="search" and not window.busy
+                        and window.search_results):
+                    state["revision_before"]=window.session.revision
+                    window.open_comparison(comparison_pdf)
+                    state["phase"]="comparison"
+                elif state["phase"]=="comparison":
+                    dialog=window.comparison_dialog
+                    if (dialog is not None
+                            and dialog.difference_image.pixmap() is not None
+                            and dialog.summary.text().startswith("相似度")):
+                        report=_acceptance_report(
+                            "材料",len(window.search_results),dialog.summary.text(),
+                            state["revision_before"],window.session.revision,
+                            state["word_count"])
+                        _save_acceptance_preview(window,dialog,screenshot)
+                        report_output.write_text(report,encoding="utf-8")
+                        _finish_acceptance(window,app,0)
+                        return
+            except Exception:
+                fail_acceptance()
+                return
+            QTimer.singleShot(50,finish_acceptance)
+
+        QTimer.singleShot(50,finish_acceptance)
     elif args and args[0].lower().endswith(".pdf"):
         from pathlib import Path
         try:

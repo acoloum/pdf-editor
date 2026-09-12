@@ -12,6 +12,10 @@ from .errors import EditorError
 
 
 OCR_LANGUAGE = "chi_tra+eng"
+_TSV_COLUMNS = (
+    "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+    "left\ttop\twidth\theight\tconf\ttext"
+)
 @dataclass(frozen=True)
 class OcrWord:
     text: str
@@ -68,7 +72,12 @@ def recognize_image(image: Image.Image, tessdata: Path, language: str = OCR_LANG
         with tesserocr.PyTessBaseAPI(path=str(tessdata), lang=language) as api:
             api.SetImage(image)
             api.Recognize()
-            return api.GetTSVText(0)
+            tsv = api.GetTSVText(0)
+            # Windows 版 Tesseract 5.5.2 的 API 輸出可能只有資料列。
+            first_line = tsv.splitlines()[0] if tsv.splitlines() else ""
+            if first_line.split("\t", 1)[0].isdigit():
+                return _TSV_COLUMNS + "\n" + tsv
+            return tsv
     except Exception as exc:
         raise EditorError("OCR_ENGINE", "OCR 引擎無法啟動，請重新安裝墨頁 PDF。") from exc
 

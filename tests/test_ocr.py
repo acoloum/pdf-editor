@@ -214,3 +214,34 @@ def test_recognize_image_returns_tesseract_tsv(monkeypatch, tmp_path):
     image = Image.new("RGB", (50, 50), "white")
 
     assert recognize_image(image, tmp_path) == make_tsv(("辨識文字", 90, (10, 20, 30, 40)))
+
+
+def test_recognize_image_adds_columns_to_headerless_tesseract_tsv(monkeypatch, tmp_path):
+    """實際 Tesseract 5.5.2 只回傳資料列時，補上 TSV 欄位供解析器使用。"""
+    row = "5\t1\t1\t1\t1\t1\t10\t20\t30\t40\t90\t辨識文字\n"
+
+    class Api:
+        def __init__(self, path, lang):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def SetImage(self, image):
+            pass
+
+        def Recognize(self):
+            return None
+
+        def GetTSVText(self, page_number):
+            return row
+
+    monkeypatch.setitem(sys.modules, "tesserocr", types.SimpleNamespace(PyTessBaseAPI=Api))
+    image = Image.new("RGB", (50, 50), "white")
+
+    result = recognize_image(image, tmp_path)
+
+    assert parse_tsv(result) == (OcrWord("辨識文字", 90, (10, 20, 30, 40)),)
