@@ -7,13 +7,11 @@ from pathlib import Path
 import pymupdf
 from PIL import Image
 
+from .engine.fonts import default_font
 from .errors import EditorError
 
 
 OCR_LANGUAGE = "chi_tra+eng"
-OCR_FONT = Path(__file__).parents[2] / "resources" / "fonts" / "NotoSansCJKtc-Regular.otf"
-
-
 @dataclass(frozen=True)
 class OcrWord:
     text: str
@@ -93,8 +91,9 @@ def _pixel_point_to_page(page: pymupdf.Page, left: float, top: float,
 
 
 def _insert_invisible_words(page: pymupdf.Page, words: tuple[OcrWord, ...], scale: float) -> None:
-    page.insert_font(fontname="ocrnoto", fontfile=str(OCR_FONT))
-    font = pymupdf.Font(fontfile=str(OCR_FONT))
+    font_path = default_font()
+    page.insert_font(fontname="ocrnoto", fontfile=str(font_path))
+    font = pymupdf.Font(fontfile=str(font_path))
     for word in words:
         left, top, width, height = word.pixel_rect
         size = height / scale / (font.ascender - font.descender)

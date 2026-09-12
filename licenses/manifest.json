@@ -101,7 +101,9 @@
   },
   {
     "name": "Leptonica",
+    "version": "1.87.0",
     "license": "BSD-2-Clause",
+    "sha256": "4d3065116f182e29760af0c901d5dbb2e1e16c42765dfc24e69b26805e2acb1e",
     "source": "http://www.leptonica.org/"
   },
   {

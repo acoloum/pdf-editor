@@ -33,6 +33,12 @@ for name in ["PyMuPDF","PySide6-Essentials","shiboken6","Pillow","fonttools","ps
                 target.parent.mkdir(exist_ok=True)
                 shutil.copy2(path,target)
 shutil.copy2(Path(sys.base_prefix)/"LICENSE.txt",dest/"Python-LICENSE.txt")
+leptonica_license=dest/"leptonica-license.txt"
+leptonica_license_sha256="4d3065116f182e29760af0c901d5dbb2e1e16c42765dfc24e69b26805e2acb1e"
+if not leptonica_license.is_file():
+    raise FileNotFoundError("找不到 Leptonica 1.87.0 的授權文字。")
+if hashlib.sha256(leptonica_license.read_bytes()).hexdigest() != leptonica_license_sha256:
+    raise ValueError("Leptonica 1.87.0 的授權文字雜湊不符。")
 inno_license=root.parent/"inno-setup/License.txt"
 if inno_license.is_file():
     shutil.copy2(inno_license,dest/"Inno-Setup-6.4.3.txt")
@@ -57,7 +63,8 @@ manifest.append({"name":"NotoSansCJKtc-Regular.otf","license":"SIL OFL 1.1",
 manifest.extend([
     {"name":"Tesseract OCR","version":"5.5.2","license":"Apache-2.0",
      "source":"https://github.com/tesseract-ocr/tesseract"},
-    {"name":"Leptonica","license":"BSD-2-Clause",
+    {"name":"Leptonica","version":"1.87.0","license":"BSD-2-Clause",
+     "sha256":leptonica_license_sha256,
      "source":"http://www.leptonica.org/"},
     {"name":"tessdata_fast","commit":"87416418657359cb625c412a48b6e1d6d41c29bd",
      "license":"Apache-2.0","source":"https://github.com/tesseract-ocr/tessdata_fast",

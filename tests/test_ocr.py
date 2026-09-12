@@ -1,4 +1,5 @@
 import io
+import shutil
 import sys
 import types
 
@@ -6,6 +7,8 @@ import pymupdf
 import pytest
 from PIL import Image
 
+import pdf_editor.ocr as ocr
+from pdf_editor.engine import fonts
 from pdf_editor.errors import EditorError
 from pdf_editor.ocr import OcrWord, ocr_pages, parse_tsv, recognize_image
 
@@ -167,6 +170,23 @@ def test_ocr_pages_keeps_rotated_bottom_edge_text_within_its_tsv_box(scanned_pdf
 
     assert rotation == 90
     assert_rect_within(expected, span_rect)
+
+
+def test_ocr_pages_writes_text_with_the_frozen_resource_font(scanned_pdf, tmp_path, monkeypatch):
+    """凍結版資源位於 _internal 時，仍可寫入不可見文字。"""
+    frozen_root = tmp_path / "_internal"
+    frozen_font = frozen_root / "resources" / "fonts" / "NotoSansCJKtc-Regular.otf"
+    frozen_font.parent.mkdir(parents=True)
+    shutil.copy2(fonts.default_font(), frozen_font)
+    monkeypatch.setattr(fonts, "resource_root", lambda: frozen_root)
+    monkeypatch.setattr(ocr, "OCR_FONT",
+        frozen_root.parent / "resources" / "fonts" / "NotoSansCJKtc-Regular.otf", raising=False)
+
+    result = ocr.ocr_pages(scanned_pdf, (0,), tmp_path,
+        recognizer=lambda *args: make_tsv(("凍結資源文字", 90, (80, 100, 280, 60))))
+
+    with pymupdf.open(stream=result.pdf, filetype="pdf") as doc:
+        assert "凍結資源文字" in doc[0].get_text()
 
 
 def test_recognize_image_returns_tesseract_tsv(monkeypatch, tmp_path):
