@@ -1,7 +1,9 @@
 import hashlib
+import io
 from dataclasses import replace
 import pytest
 import pymupdf
+from PIL import Image
 from PySide6.QtCore import Qt, QPoint, QPointF, QItemSelectionModel
 from PySide6.QtWidgets import QAbstractItemView
 from PySide6.QtTest import QSignalSpy
@@ -14,6 +16,7 @@ from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.annotations import mark_text
 from pdf_editor.model import Overlay
 from pdf_editor.ocr import OcrResult
+from pdf_editor.comparison import PageComparison, compare_pages
 from test_text import request_for
 
 def test_reader_preview_apply_undo(qtbot, source_path, font_path):
@@ -1334,4 +1337,233 @@ def test_window_keeps_history_unchanged_when_ocr_skips_all_pages(
         assert window.statusBar().currentMessage() == "OCR 完成：全部 1 頁已有文字，未建立變更。"
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def _page_comparison_result(similarity=100.0):
+    stream = io.BytesIO()
+    Image.new("RGB", (2, 2), "white").save(stream, format="PNG")
+    png = stream.getvalue()
+    changed = 0 if similarity == 100.0 else 1
+    return PageComparison(png, png, png, similarity, changed, 4, 0, 0)
+
+
+def _defer_window_jobs(window):
+    pending = []
+
+    def submit(function, arguments, success, failure):
+        pending.append((function, arguments, success, failure))
+
+    window.jobs.submit = submit
+    return pending
+
+
+def _encrypted_pdf(pdf_bytes):
+    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as document:
+        return document.tobytes(
+            encryption=pymupdf.PDF_ENCRYPT_AES_256,
+            owner_pw="owner",
+            user_pw="user",
+            permissions=pymupdf.PDF_PERM_PRINT,
+        )
+
+
+def test_window_exposes_page_comparison_only_for_open_idle_document(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        assert window.actions["compare"].text() == "頁面比較"
+        assert not window.actions["compare"].isEnabled()
+
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        assert window.actions["compare"].isEnabled()
+
+        window.busy = True
+        window.refresh_actions()
+        assert not window.actions["compare"].isEnabled()
+    finally:
+        window.busy = False
+        window.close()
+
+
+def test_comparison_flattens_overlays_without_changing_session_state(
+        qtbot, source_path, pdf_bytes, tmp_path, monkeypatch):
+    image_path = tmp_path / "比較圖章.png"
+    Image.new("RGBA", (80, 40), (220, 20, 20, 255)).save(image_path)
+    monkeypatch.setattr("pdf_editor.ui.main_window.Jobs.submit", _submit_synchronously)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        window.session.set_overlays((
+            Overlay("comparison-overlay", 0, str(image_path), (300, 300, 380, 340), 0),
+        ))
+        revision = window.session.revision
+        pdf = window.session.pdf
+        history_items = tuple(window.session.history.items)
+        history_index = window.session.history.index
+
+        window.open_comparison(pdf_bytes)
+
+        assert window.comparison_dialog is not None
+        assert not window.comparison_dialog.summary.text().startswith("相似度 100.0%")
+        assert window.session.revision == revision
+        assert window.session.pdf == pdf
+        assert tuple(window.session.history.items) == history_items
+        assert window.session.history.index == history_index
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_comparison_submits_fixed_defaults_and_ignores_older_serial(
+        qtbot, source_path, pdf_bytes):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        pending = _defer_window_jobs(window)
+
+        window.open_comparison(pdf_bytes)
+        dialog = window.comparison_dialog
+        window.request_comparison_page(0)
+
+        assert len(pending) == 2
+        assert pending[0][0] is compare_pages
+        assert len(pending[0][1]) == 4
+        pending[0][2](_page_comparison_result(25.0))
+        assert dialog.summary.text() == "正在比較頁面…"
+
+        pending[1][2](_page_comparison_result(75.0))
+        assert dialog.summary.text() == "相似度 75.0%｜差異 1 / 4 像素"
+    finally:
+        window.close()
+
+
+def test_comparison_ignores_callback_after_session_revision_changes(
+        qtbot, source_path, pdf_bytes):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        pending = _defer_window_jobs(window)
+        window.open_comparison(pdf_bytes)
+        dialog = window.comparison_dialog
+
+        window.session.set_overlays(())
+        pending[0][2](_page_comparison_result(50.0))
+
+        assert dialog.summary.text() == "正在比較頁面…"
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_comparison_close_clears_bytes_and_ignores_callback(
+        qtbot, source_path, pdf_bytes):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        pending = _defer_window_jobs(window)
+        window.open_comparison(pdf_bytes)
+        dialog = window.comparison_dialog
+
+        dialog.close()
+        qtbot.waitUntil(lambda: window.comparison_dialog is None)
+        pending[0][2](_page_comparison_result(50.0))
+
+        assert window.comparison_pdf is None
+        assert window.comparison_base_pdf is None
+        assert dialog.summary.text() == "正在比較頁面…"
+    finally:
+        window.close()
+
+
+def test_switching_document_closes_comparison_and_ignores_callback(
+        qtbot, source_path, multi_page_path, pdf_bytes):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        pending = _defer_window_jobs(window)
+        window.open_comparison(pdf_bytes)
+        dialog = window.comparison_dialog
+
+        window.open_document(multi_page_path)
+        pending[0][2](_page_comparison_result(50.0))
+
+        assert window.comparison_dialog is None
+        assert window.comparison_pdf is None
+        assert dialog.summary.text() == "正在比較頁面…"
+    finally:
+        window.close()
+
+
+def test_choose_comparison_pdf_cancels_encrypted_password_prompt(
+        qtbot, source_path, pdf_bytes, tmp_path, monkeypatch):
+    comparison_path = tmp_path / "加密比較.pdf"
+    comparison_path.write_bytes(_encrypted_pdf(pdf_bytes))
+    monkeypatch.setattr("pdf_editor.ui.main_window.QFileDialog.getOpenFileName",
+        lambda *args: (str(comparison_path), "PDF (*.pdf)"))
+    monkeypatch.setattr("pdf_editor.ui.main_window.QInputDialog.getText",
+        lambda *args: ("", False))
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+
+        window.choose_comparison_pdf()
+
+        assert window.comparison_dialog is None
+        assert window.comparison_pdf is None
+    finally:
+        window.close()
+
+
+def test_choose_comparison_pdf_reports_wrong_password(
+        qtbot, source_path, pdf_bytes, tmp_path, monkeypatch):
+    comparison_path = tmp_path / "加密比較.pdf"
+    comparison_path.write_bytes(_encrypted_pdf(pdf_bytes))
+    errors = []
+    monkeypatch.setattr("pdf_editor.ui.main_window.QFileDialog.getOpenFileName",
+        lambda *args: (str(comparison_path), "PDF (*.pdf)"))
+    monkeypatch.setattr("pdf_editor.ui.main_window.QInputDialog.getText",
+        lambda *args: ("wrong", True))
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.error = errors.append
+    try:
+        window.open_document(source_path)
+
+        window.choose_comparison_pdf()
+
+        assert errors and errors[0][0] == "PASSWORD"
+        assert window.comparison_dialog is None
+    finally:
+        window.close()
+
+
+def test_choose_comparison_pdf_reports_file_read_error(
+        qtbot, source_path, tmp_path, monkeypatch):
+    missing_path = tmp_path / "不存在.pdf"
+    errors = []
+    monkeypatch.setattr("pdf_editor.ui.main_window.QFileDialog.getOpenFileName",
+        lambda *args: (str(missing_path), "PDF (*.pdf)"))
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.error = errors.append
+    try:
+        window.open_document(source_path)
+
+        window.choose_comparison_pdf()
+
+        assert errors and errors[0][0] == "OPEN"
+        assert window.comparison_dialog is None
+    finally:
         window.close()

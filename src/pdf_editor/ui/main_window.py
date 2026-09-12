@@ -20,6 +20,7 @@ from pdf_editor.assets import AssetStore
 from pdf_editor.templates import HeaderFooterTemplateStore
 from pdf_editor.search import find_text
 from pdf_editor.ocr import ocr_pages
+from pdf_editor.comparison import compare_pages
 from pdf_editor.ocr_assets import validate_ocr_assets
 from pdf_editor.page_images import export_pages_as_png
 from pdf_editor.pages import (merge_pages,split_pages,move_pages,move_pages_to,rotate_pages,
@@ -33,6 +34,7 @@ from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.ui.overlay_panel import OverlayPanel
 from pdf_editor.ui.signature_dialog import SignatureDialog
+from pdf_editor.ui.comparison_dialog import ComparisonDialog
 from pdf_editor.ui.page_dialogs import (MergeDialog,SplitDialog,CropPagesDialog,
     PageDecorationDialog,HeaderFooterTemplatesDialog)
 from pdf_editor.ui.style import STYLE
@@ -139,6 +141,13 @@ class MainWindow(QMainWindow):
         self.token=0
         self.busy=False
         self.render_serial=0
+        self.comparison_serial=0
+        self.comparison_dialog=None
+        self.comparison_pdf=None
+        self.comparison_base_pdf=None
+        self.comparison_base_page=None
+        self.comparison_revision=None
+        self.comparison_token=None
         self.closed=False
         self.jobs=Jobs(self)
         self.asset_root=Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))/"assets"
@@ -159,6 +168,7 @@ class MainWindow(QMainWindow):
             ("signature","手寫簽名",self.add_signature,None),
             ("collection","常用圖章",self.add_collection,None),
             ("ocr","OCR 文字辨識",self.run_ocr,None),
+            ("compare","頁面比較",self.choose_comparison_pdf,None),
             ("merge","合併",self.merge,None),
             ("split","拆分",self.split,None),
             ("page_marks","頁碼／浮水印",self.show_page_decoration_dialog,None),
@@ -344,6 +354,7 @@ class MainWindow(QMainWindow):
         self.actions["direct_crop"].setEnabled(edit and bool(selected))
         self.actions["delete_page"].setEnabled(manage and bool(selected) and len(selected)<self.page_count)
         self.actions["ocr"].setEnabled(edit and bool(ocr_selected))
+        self.actions["compare"].setEnabled(active and not self.busy)
         self.page_menu_button.setEnabled(manage or edit)
         markup=edit and self.run is not None and self.run.editable
         self.actions["highlight"].setEnabled(markup)
@@ -409,6 +420,7 @@ class MainWindow(QMainWindow):
             if not ok:
                 return
             session=DocumentSession.open(Path(path),password)
+        self.close_comparison()
         if self.session:
             self.session.close()
         self.canvas.cancel_inline_editor()
@@ -445,6 +457,98 @@ class MainWindow(QMainWindow):
         self.refresh_actions()
         self.request_render()
         self.queue_thumbnail(0,self.token,session.revision)
+
+    def choose_comparison_pdf(self):
+        if not self.session or self.busy:
+            return
+        name,_=QFileDialog.getOpenFileName(self,"選擇比較 PDF","","PDF (*.pdf)")
+        if not name:
+            return
+        try:
+            raw=Path(name).read_bytes()
+            try:
+                comparison_pdf,_=unlock_pdf(raw)
+            except EditorError as exc:
+                if exc.code!="PASSWORD":
+                    raise
+                password,ok=QInputDialog.getText(self,"PDF 密碼",Path(name).name,
+                    QLineEdit.EchoMode.Password)
+                if not ok:
+                    return
+                comparison_pdf,_=unlock_pdf(raw,password)
+            self.open_comparison(comparison_pdf)
+        except Exception as exc:
+            self.error((getattr(exc,"code","OPEN"),str(exc),()))
+
+    def open_comparison(self,comparison_pdf):
+        if not self.session or self.busy:
+            return
+        base_pdf=flatten_overlays(self.session.pdf,self.session.overlays)
+        with pymupdf.open(stream=comparison_pdf,filetype="pdf") as document:
+            page_count=document.page_count
+        self.close_comparison()
+        dialog=ComparisonDialog(page_count,self.page,self)
+        self.comparison_dialog=dialog
+        self.comparison_pdf=comparison_pdf
+        self.comparison_base_pdf=base_pdf
+        self.comparison_base_page=self.page
+        self.comparison_revision=self.session.revision
+        self.comparison_token=self.token
+        dialog.page_requested.connect(self.request_comparison_page)
+        dialog.finished.connect(
+            lambda _result,current=dialog:self.clear_comparison(current))
+        dialog.show()
+        self.request_comparison_page(0)
+
+    def request_comparison_page(self,page):
+        dialog=self.comparison_dialog
+        if (not self.session or dialog is None or self.comparison_pdf is None
+                or self.comparison_base_pdf is None
+                or self.comparison_revision!=self.session.revision
+                or self.comparison_token!=self.token
+                or not 0<=page<dialog.comparison_page_count):
+            return
+        self.comparison_serial+=1
+        serial=self.comparison_serial
+        token=self.token
+        revision=self.session.revision
+        dialog.set_busy(True)
+
+        def current_request():
+            return (not self.closed and self.session is not None
+                and token==self.token and revision==self.session.revision
+                and dialog is self.comparison_dialog
+                and serial==self.comparison_serial)
+
+        def done(result):
+            if current_request():
+                dialog.set_result(result)
+
+        def failed(error):
+            if current_request():
+                dialog.set_busy(False)
+                self.error(error)
+
+        self.jobs.submit(compare_pages,(self.comparison_base_pdf,self.comparison_base_page,
+            self.comparison_pdf,page),done,failed)
+
+    def clear_comparison(self,dialog):
+        if dialog is not self.comparison_dialog:
+            return
+        self.comparison_serial+=1
+        self.comparison_dialog=None
+        self.comparison_pdf=None
+        self.comparison_base_pdf=None
+        self.comparison_base_page=None
+        self.comparison_revision=None
+        self.comparison_token=None
+
+    def close_comparison(self):
+        dialog=self.comparison_dialog
+        if dialog is None:
+            return
+        self.clear_comparison(dialog)
+        dialog.close()
 
     def queue_thumbnail(self,index,token,revision):
         if self.closed or not self.session or token!=self.token or revision!=self.session.revision or index>=self.page_count:
@@ -1513,6 +1617,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self.closed=True
+        self.close_comparison()
         self.jobs.close()
         if self.session:
             self.session.close()
