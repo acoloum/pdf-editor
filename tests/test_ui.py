@@ -13,6 +13,7 @@ from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.annotations import mark_text
 from pdf_editor.model import Overlay
+from pdf_editor.ocr import OcrResult
 from test_text import request_for
 
 def test_reader_preview_apply_undo(qtbot, source_path, font_path):
@@ -1187,4 +1188,91 @@ def test_window_changes_selected_highlight_color_immediately(qtbot,source_path):
             assert color==pytest.approx((1.0,0.84,0.18),abs=0.01)
     finally:
         window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def _submit_synchronously(self, function, arguments, success, failure):
+    """讓 UI 測試在不建立背景程序的情況下驗證完成回呼。"""
+    try:
+        success(function(*arguments))
+    except Exception as exc:
+        failure((getattr(exc, "code", "ERROR"), str(exc), ()))
+
+
+def _pdf_with_ocr_marker(pdf):
+    with pymupdf.open(stream=pdf, filetype="pdf") as document:
+        document[0].insert_text((40, 340), "OCR MARKER", fontsize=12)
+        return document.tobytes(garbage=4, deflate=True)
+
+
+def test_window_exposes_ocr_action_for_selected_editable_pages(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+
+        assert window.actions["ocr"].text() == "OCR 文字辨識"
+        assert window.actions["ocr"].isEnabled()
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_window_commits_ocr_as_one_undoable_change(qtbot, source_path, tmp_path, monkeypatch):
+    calls = []
+
+    def fake_ocr_pages(pdf, pages, tessdata):
+        calls.append((pages, tessdata))
+        return OcrResult(_pdf_with_ocr_marker(pdf), pages, (), 1)
+
+    monkeypatch.setattr("pdf_editor.ui.main_window.Jobs.submit", _submit_synchronously)
+    monkeypatch.setattr("pdf_editor.ui.main_window.ocr_pages", fake_ocr_pages,
+        raising=False)
+    monkeypatch.setattr("pdf_editor.ui.main_window.validate_ocr_assets", lambda: tmp_path,
+        raising=False)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        before = window.session.pdf
+
+        window.apply_ocr_to_pages((0,))
+
+        assert calls == [((0,), tmp_path)]
+        assert window.session.pdf != before
+        assert "OCR MARKER" in pymupdf.open(stream=window.session.pdf)[0].get_text()
+        assert window.statusBar().currentMessage() == "OCR 完成：辨識 1 頁，跳過 0 頁，共 1 個文字區段。"
+        window.history_step(False)
+        assert window.session.pdf == before
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_window_keeps_history_unchanged_when_ocr_skips_all_pages(
+        qtbot, source_path, tmp_path, monkeypatch):
+    def fake_ocr_pages(pdf, pages, tessdata):
+        return OcrResult(pdf, (), pages, 0)
+
+    monkeypatch.setattr("pdf_editor.ui.main_window.Jobs.submit", _submit_synchronously)
+    monkeypatch.setattr("pdf_editor.ui.main_window.ocr_pages", fake_ocr_pages,
+        raising=False)
+    monkeypatch.setattr("pdf_editor.ui.main_window.validate_ocr_assets", lambda: tmp_path,
+        raising=False)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        before = window.session.pdf
+        history_index = window.session.history.index
+
+        window.apply_ocr_to_pages((0,))
+
+        assert window.session.pdf == before
+        assert window.session.history.index == history_index
+        assert not window.session.can_undo
+        assert window.statusBar().currentMessage() == "OCR 完成：全部 1 頁已有文字，未建立變更。"
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
         window.close()

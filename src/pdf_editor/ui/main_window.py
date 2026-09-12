@@ -19,6 +19,8 @@ from pdf_editor.workers import Jobs
 from pdf_editor.assets import AssetStore
 from pdf_editor.templates import HeaderFooterTemplateStore
 from pdf_editor.search import find_text
+from pdf_editor.ocr import ocr_pages
+from pdf_editor.ocr_assets import validate_ocr_assets
 from pdf_editor.page_images import export_pages_as_png
 from pdf_editor.pages import (merge_pages,split_pages,move_pages,move_pages_to,rotate_pages,
     delete_pages,duplicate_pages,page_order_after_move,page_order_after_drop,insert_pages,
@@ -156,6 +158,7 @@ class MainWindow(QMainWindow):
             ("stamp","蓋章",self.add_stamp,None),
             ("signature","手寫簽名",self.add_signature,None),
             ("collection","常用圖章",self.add_collection,None),
+            ("ocr","OCR 文字辨識",self.run_ocr,None),
             ("merge","合併",self.merge,None),
             ("split","拆分",self.split,None),
             ("page_marks","頁碼／浮水印",self.show_page_decoration_dialog,None),
@@ -339,6 +342,7 @@ class MainWindow(QMainWindow):
         self.actions["crop_page"].setEnabled(edit and bool(selected))
         self.actions["direct_crop"].setEnabled(edit and bool(selected))
         self.actions["delete_page"].setEnabled(manage and bool(selected) and len(selected)<self.page_count)
+        self.actions["ocr"].setEnabled(edit and bool(selected))
         self.page_menu_button.setEnabled(manage or edit)
         markup=edit and self.run is not None and self.run.editable
         self.actions["highlight"].setEnabled(markup)
@@ -545,6 +549,43 @@ class MainWindow(QMainWindow):
         if selected:
             return selected
         return (self.page,) if self.session and 0<=self.page<self.page_count else ()
+
+    def run_ocr(self):
+        self.apply_ocr_to_pages(self.selected_page_indices())
+
+    def apply_ocr_to_pages(self,pages):
+        pages=tuple(pages)
+        if (not self.session or self.busy or not self.session.access.can_edit or not pages):
+            return
+        try:
+            pdf=flatten_overlays(self.session.pdf,self.session.overlays) if self.session.overlays else self.session.pdf
+            tessdata=validate_ocr_assets()
+        except EditorError as exc:
+            self.error((exc.code,str(exc),()))
+            return
+        revision=self.session.revision
+        token=self.token
+        self.busy=True
+        self.refresh_actions()
+        self.statusBar().showMessage(f"正在辨識 {len(pages)} 頁…")
+        def done(result):
+            self.busy=False
+            if self.closed or token!=self.token or revision!=self.session.revision:
+                return
+            if result.processed_pages:
+                self.session.apply_state(result.pdf,())
+                self.clear_search_results()
+                self.page_data=None
+                self.request_render()
+                self.queue_thumbnail(0,self.token,self.session.revision)
+                self.statusBar().showMessage(
+                    f"OCR 完成：辨識 {len(result.processed_pages)} 頁，跳過 "
+                    f"{len(result.skipped_pages)} 頁，共 {result.word_count} 個文字區段。")
+            else:
+                self.refresh_actions()
+                self.statusBar().showMessage(
+                    f"OCR 完成：全部 {len(result.skipped_pages)} 頁已有文字，未建立變更。")
+        self.jobs.submit(ocr_pages,(pdf,pages,tessdata),done,self.error)
 
     def thumbnail_selection_changed(self):
         selected=self.selected_page_indices()
