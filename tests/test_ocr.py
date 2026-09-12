@@ -23,3 +23,12 @@ def test_parse_tsv_rejects_missing_required_columns():
         parse_tsv(tsv)
 
     assert error.value.code == "OCR_OUTPUT"
+
+
+def test_parse_tsv_rejects_row_with_missing_text_value():
+    tsv = "left\ttop\twidth\theight\tconf\ttext\n40\t60\t120\t80\t92.4\n"
+
+    with pytest.raises(EditorError) as error:
+        parse_tsv(tsv)
+
+    assert error.value.code == "OCR_OUTPUT"

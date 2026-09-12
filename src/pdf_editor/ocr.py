@@ -40,7 +40,10 @@ def parse_tsv(tsv: str, minimum_confidence: float = 35.0) -> tuple[OcrWord, ...]
             confidence = float(row["conf"])
             if not math.isfinite(confidence) or width <= 0 or height <= 0:
                 raise ValueError
-            text = row["text"].strip()
+            text_value = row["text"]
+            if text_value is None:
+                raise ValueError
+            text = text_value.strip()
             if not text:
                 continue
             if confidence >= minimum_confidence:
