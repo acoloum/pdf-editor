@@ -36,7 +36,7 @@ def parse_tsv(tsv: str, minimum_confidence: float = 35.0) -> tuple[OcrWord, ...]
     words: list[OcrWord] = []
 
     try:
-        reader = csv.DictReader(io.StringIO(tsv), delimiter="\t")
+        reader = csv.DictReader(io.StringIO(tsv), delimiter="\t", quoting=csv.QUOTE_NONE)
         if not reader.fieldnames or not required.issubset(reader.fieldnames):
             raise ValueError
 

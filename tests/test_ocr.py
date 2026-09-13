@@ -83,6 +83,36 @@ def test_parse_tsv_drops_word_below_minimum_confidence():
     assert parse_tsv(tsv) == ()
 
 
+def test_parse_tsv_preserves_quote_prefixed_word_and_following_row():
+    tsv = make_tsv(
+        ('"材料', 92, (40, 60, 120, 80)),
+        ("報告", 91, (180, 60, 100, 80)),
+    )
+
+    assert parse_tsv(tsv) == (
+        OcrWord('"材料', 92, (40, 60, 120, 80)),
+        OcrWord("報告", 91, (180, 60, 100, 80)),
+    )
+
+
+def test_parse_tsv_preserves_paired_quotes_as_ocr_text():
+    tsv = make_tsv(('"材料"', 92, (40, 60, 120, 80)))
+
+    assert parse_tsv(tsv) == (OcrWord('"材料"', 92, (40, 60, 120, 80)),)
+
+
+def test_parse_tsv_preserves_standalone_unclosed_quote_and_following_row():
+    tsv = make_tsv(
+        ('"', 92, (40, 60, 30, 80)),
+        ("報告", 91, (100, 60, 100, 80)),
+    )
+
+    assert parse_tsv(tsv) == (
+        OcrWord('"', 92, (40, 60, 30, 80)),
+        OcrWord("報告", 91, (100, 60, 100, 80)),
+    )
+
+
 def test_parse_tsv_rejects_missing_required_columns():
     tsv = "left\ttop\twidth\theight\tconf\n40\t60\t120\t80\t92.4\n"
 
@@ -113,6 +143,25 @@ def test_ocr_pages_adds_searchable_invisible_text_without_changing_page_pixels(s
     assert render_png(result.pdf) == before
     assert result.processed_pages == (0,)
     assert result.word_count == 1
+
+
+def test_ocr_pages_keeps_search_position_after_quote_prefixed_word(scanned_pdf, tmp_path):
+    report_rect = (300, 120, 180, 80)
+
+    def recognizer(image, tessdata, language):
+        return make_tsv(
+            ('"材料', 90, (100, 120, 160, 80)),
+            ("報告", 90, report_rect),
+        )
+
+    result = ocr_pages(scanned_pdf, (0,), tmp_path, recognizer=recognizer)
+
+    with pymupdf.open(stream=result.pdf, filetype="pdf") as document:
+        page = document[0]
+        assert '"材料' in page.get_text()
+        matches = page.search_for("報告")
+        assert len(matches) == 1
+        assert_rect_within(expected_ocr_rect(report_rect, page.derotation_matrix), matches[0])
 
 
 def test_ocr_pages_skips_page_that_already_has_text(pdf_bytes, tmp_path):
