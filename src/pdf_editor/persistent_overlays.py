@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import pymupdf
@@ -54,6 +55,7 @@ def embed_workspace(base_pdf: bytes, overlays: tuple[Overlay, ...]) -> bytes:
 
 def load_workspace(pdf: bytes, asset_root: Path) -> PersistentOverlayBundle | None:
     """驗證並還原工作層；沒有工作層的 PDF 維持一般開啟流程。"""
+    created_assets: set[Path] = set()
     try:
         with pymupdf.open(stream=pdf, filetype="pdf") as document:
             names = set(document.embfile_names())
@@ -63,14 +65,25 @@ def load_workspace(pdf: bytes, asset_root: Path) -> PersistentOverlayBundle | No
             base_pdf = document.embfile_get(BASE_NAME)
             manifest = _validate_manifest(manifest_bytes, base_pdf)
             asset_store = AssetStore(asset_root)
+            existing_assets = set(asset_store.root.iterdir())
             overlays = tuple(
-                _restore_overlay(item, names, document, asset_store)
+                _restore_overlay(
+                    item,
+                    names,
+                    document,
+                    asset_store,
+                    manifest["page_count"],
+                    existing_assets,
+                    created_assets,
+                )
                 for item in manifest["overlays"]
             )
             return PersistentOverlayBundle(base_pdf, overlays)
     except EditorError:
+        _remove_created_assets(created_assets)
         raise
     except Exception as exc:
+        _remove_created_assets(created_assets)
         raise EditorError("WORKSPACE", _WORKSPACE_ERROR) from exc
 
 
@@ -119,7 +132,15 @@ def _validate_manifest(manifest_bytes: bytes, base_pdf: bytes) -> dict:
         raise EditorError("WORKSPACE", _WORKSPACE_ERROR) from exc
 
 
-def _restore_overlay(item: object, names: set[str], document, asset_store: AssetStore) -> Overlay:
+def _restore_overlay(
+    item: object,
+    names: set[str],
+    document,
+    asset_store: AssetStore,
+    page_count: int,
+    existing_assets: set[Path],
+    created_assets: set[Path],
+) -> Overlay:
     try:
         if not isinstance(item, dict) or set(item) != {
             "id", "page", "rect", "angle", "asset_name", "asset_sha256"
@@ -135,11 +156,18 @@ def _restore_overlay(item: object, names: set[str], document, asset_store: Asset
             not isinstance(identifier, str)
             or not isinstance(page, int)
             or isinstance(page, bool)
+            or not 0 <= page < page_count
             or not isinstance(rect, list)
             or len(rect) != 4
-            or not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in rect)
+            or not all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                for value in rect
+            )
             or not isinstance(angle, (int, float))
             or isinstance(angle, bool)
+            or not math.isfinite(angle)
             or not isinstance(asset_name, str)
             or not asset_name.startswith(ASSET_PREFIX)
             or not isinstance(asset_sha256, str)
@@ -150,6 +178,8 @@ def _restore_overlay(item: object, names: set[str], document, asset_store: Asset
         if _sha256(content) != asset_sha256:
             raise ValueError()
         path = asset_store.import_png_bytes(content)
+        if path not in existing_assets:
+            created_assets.add(path)
         return Overlay(identifier, page, str(path), tuple(rect), angle)
     except Exception as exc:
         raise EditorError("WORKSPACE", _WORKSPACE_ERROR) from exc
@@ -164,3 +194,11 @@ def _pdf_page_count(pdf: bytes) -> int:
 
 def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _remove_created_assets(paths: set[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass

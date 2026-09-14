@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pymupdf
 import pytest
@@ -25,6 +26,23 @@ def test_embedded_workspace_restores_base_and_overlay_assets(tmp_path, pdf_bytes
     assert restored.base_pdf == pdf_bytes
     assert restored.overlays[0].id == "章-1"
     assert Path(restored.overlays[0].asset_path).read_bytes() == stamp.read_bytes()
+
+
+def test_embedded_workspace_keeps_stamp_visible_to_standard_pdf_reader(tmp_path, pdf_bytes):
+    stamp = tmp_path / "可見章.png"
+    Image.new("RGBA", (20, 10), (0, 60, 255, 255)).save(stamp)
+    workspace = embed_workspace(
+        pdf_bytes, (Overlay("章-1", 0, str(stamp), (100, 110, 140, 130)),)
+    )
+
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        pixmap = document[0].get_pixmap(alpha=False)
+        offset = 120 * pixmap.stride + 120 * pixmap.n
+        pixel = pixmap.samples[offset : offset + 3]
+
+    assert pixel[0] < 10
+    assert 50 <= pixel[1] <= 70
+    assert pixel[2] > 245
 
 
 def _embed_with_replaced_asset(tmp_path, pdf_bytes, replacement):
@@ -82,3 +100,63 @@ def test_workspace_with_invalid_manifest_is_rejected(tmp_path, pdf_bytes, manife
 
     with pytest.raises(EditorError, match="工作層無法驗證"):
         load_workspace(invalid, tmp_path / "assets")
+
+
+def _embed_with_replaced_manifest(workspace, replacement):
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        files = {
+            name: replacement if name == MANIFEST_NAME else document.embfile_get(name)
+            for name in document.embfile_names()
+        }
+        with pymupdf.open() as tampered:
+            tampered.insert_pdf(document)
+            for name, content in files.items():
+                tampered.embfile_add(name, content, filename=Path(name).name)
+            return tampered.tobytes(garbage=4, deflate=True)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("page", 1), ("rect", [100, float("nan"), 140, 130]), ("angle", float("nan"))],
+)
+def test_workspace_with_invalid_overlay_geometry_is_rejected(tmp_path, pdf_bytes, field, value):
+    stamp = tmp_path / "章.png"
+    Image.new("RGBA", (20, 10), (0, 60, 255, 180)).save(stamp)
+    workspace = embed_workspace(
+        pdf_bytes, (Overlay("章-1", 0, str(stamp), (100, 110, 140, 130)),)
+    )
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        manifest = json.loads(document.embfile_get(MANIFEST_NAME).decode("utf-8"))
+    manifest["overlays"][0][field] = value
+    invalid = _embed_with_replaced_manifest(
+        workspace, json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+    )
+
+    with pytest.raises(EditorError, match="工作層無法驗證"):
+        load_workspace(invalid, tmp_path / "assets")
+
+
+def test_workspace_failure_removes_assets_created_by_this_load(tmp_path, pdf_bytes):
+    first = tmp_path / "第一章.png"
+    second = tmp_path / "第二章.png"
+    Image.new("RGBA", (20, 10), (0, 60, 255, 180)).save(first)
+    Image.new("RGBA", (20, 10), (255, 60, 0, 180)).save(second)
+    workspace = embed_workspace(
+        pdf_bytes,
+        (
+            Overlay("章-1", 0, str(first), (100, 110, 140, 130)),
+            Overlay("章-2", 0, str(second), (150, 110, 190, 130)),
+        ),
+    )
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        manifest = json.loads(document.embfile_get(MANIFEST_NAME).decode("utf-8"))
+    manifest["overlays"][1]["page"] = 1
+    invalid = _embed_with_replaced_manifest(
+        workspace, json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+    )
+    asset_root = tmp_path / "assets"
+
+    with pytest.raises(EditorError, match="工作層無法驗證"):
+        load_workspace(invalid, asset_root)
+
+    assert not list(asset_root.iterdir())
