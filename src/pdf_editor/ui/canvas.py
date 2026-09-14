@@ -506,11 +506,14 @@ class Canvas(QGraphicsView):
         x=max(12,(self.viewport().width()-self.insertion_hint.width())//2)
         self.insertion_hint.move(x,12)
 
-    def begin_inline_text(self,rect,text,run=None,size=11):
+    def begin_inline_text(self,rect,text,run=None,size=11,alignment="left"):
         self.cancel_inline_editor()
         self.inline_run=run
         self.inline_rect=tuple(rect)
         editor=InlineTextEditor(text,self.viewport())
+        horizontal=(Qt.AlignmentFlag.AlignHCenter if alignment in ("hcenter","center")
+            else Qt.AlignmentFlag.AlignLeft)
+        editor.setAlignment(horizontal | Qt.AlignmentFlag.AlignVCenter)
         editor.setPlaceholderText("直接輸入文字")
         editor.setStyleSheet(
             "background:rgba(255,255,255,235);color:#17231f;border:2px solid #24765b;"
@@ -539,8 +542,13 @@ class Canvas(QGraphicsView):
         x0,y0,x1,y1=transformed_rect(self.matrix,self.inline_rect)
         top_left=self.mapFromScene(QPointF(x0,y0))
         bottom_right=self.mapFromScene(QPointF(x1,y1))
-        width=max(100,bottom_right.x()-top_left.x()+12)
-        height=max(30,bottom_right.y()-top_left.y()+8)
+        if self.inline_run is None:
+            width=max(100,bottom_right.x()-top_left.x()+12)
+            height=max(30,bottom_right.y()-top_left.y()+8)
+        else:
+            # 編輯既有文字時貼齊原文字框，避免窄表格儲存格在套用後產生視覺跳位。
+            width=max(1,bottom_right.x()-top_left.x())
+            height=max(1,bottom_right.y()-top_left.y())
         width=min(width,max(100,self.viewport().width()-12))
         left=max(6,min(top_left.x(),self.viewport().width()-width-6))
         top=max(6,min(top_left.y(),self.viewport().height()-height-6))

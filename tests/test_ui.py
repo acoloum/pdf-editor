@@ -114,6 +114,34 @@ def test_canvas_displays_high_resolution_page_at_logical_size(qtbot, pdf_bytes):
     assert canvas.renderHints() & QPainter.RenderHint.SmoothPixmapTransform
 
 
+def test_existing_text_editor_keeps_narrow_cell_center(qtbot, pdf_bytes):
+    canvas = Canvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(700, 600)
+    canvas.show()
+    canvas.display(render_page(pdf_bytes, 0, 1.0))
+    qtbot.waitExposed(canvas)
+    cell = (100, 100, 150, 114)
+
+    canvas.begin_inline_text(cell, "真直度", run=object(), size=8)
+
+    expected = canvas.mapFromScene(QPointF(125, 107))
+    actual = canvas.inline_editor.geometry().center()
+    assert actual.x() == pytest.approx(expected.x(), abs=1)
+    assert actual.y() == pytest.approx(expected.y(), abs=1)
+
+
+def test_inline_text_editor_shows_horizontal_center_while_typing(qtbot, pdf_bytes):
+    canvas = Canvas()
+    qtbot.addWidget(canvas)
+    canvas.display(render_page(pdf_bytes, 0, 1.0))
+
+    canvas.begin_inline_text((100, 100, 150, 114), "真直度", run=object(), size=8,
+        alignment="hcenter")
+
+    assert canvas.inline_editor.alignment() & Qt.AlignmentFlag.AlignHCenter
+
+
 def test_window_renders_at_native_device_pixel_ratio(qtbot, source_path):
     window = MainWindow()
     qtbot.addWidget(window)

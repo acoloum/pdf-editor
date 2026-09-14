@@ -1136,7 +1136,8 @@ class MainWindow(QMainWindow):
             self.text_panel.set_rect(cell)
             self.text_panel.set_alignment(2)
         self.text_panel.info.setText("請直接在頁面文字框輸入；Enter 或點到別處套用，Esc 取消。")
-        self.canvas.begin_inline_text(self.text_panel.rect(),run.text,run,run.size)
+        self.canvas.begin_inline_text(self.text_panel.rect(),run.text,run,run.size,
+            self.text_panel.alignment.currentData())
         self.refresh_actions()
 
     def commit_inline_text(self,payload):
@@ -1392,7 +1393,8 @@ class MainWindow(QMainWindow):
         self.text_panel.font_path=str(default_font())
         self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
         self.text_panel.set_insertion(rect,centered=cell is not None)
-        self.canvas.begin_inline_text(rect,"",None,self.text_panel.size.value())
+        self.canvas.begin_inline_text(rect,"",None,self.text_panel.size.value(),
+            self.text_panel.alignment.currentData())
         self.refresh_actions()
 
     def delete_run(self,run):
@@ -1428,7 +1430,8 @@ class MainWindow(QMainWindow):
             self.text_panel.set_insertion(insertion_rect,run.size,cell is not None)
             self.refresh_actions()
             self.request_render()
-            self.canvas.begin_inline_text(insertion_rect,"",None,run.size)
+            self.canvas.begin_inline_text(insertion_rect,"",None,run.size,
+                self.text_panel.alignment.currentData())
         self.jobs.submit(replace_text,(self.session.pdf,request),done,self.error)
 
     def apply_text_immediately(self,request,status,operation=replace_text):
