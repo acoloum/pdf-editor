@@ -1935,14 +1935,13 @@ def test_window_save_reopens_stamp_as_editable_overlay(
         window.session.set_overlays((layer,))
         monkeypatch.setattr(main_window.QFileDialog, "getSaveFileName",
             lambda *args: (str(target), "PDF (*.pdf)"))
-        window.jobs.submit = (
-            lambda function, arguments, success, failure:
-                _submit_synchronously(window.jobs, function, arguments, success, failure)
-        )
 
         window.save()
 
-        qtbot.waitUntil(lambda: not window.busy and target.exists(), timeout=30000)
+        qtbot.waitUntil(
+            lambda: not window.busy and not window.jobs.pending and target.exists(),
+            timeout=30000,
+        )
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
         with DocumentSession.open(target) as reopened:

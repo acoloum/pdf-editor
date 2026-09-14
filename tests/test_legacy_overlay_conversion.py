@@ -102,6 +102,15 @@ def _pdf_with_vector_covering_stamp():
         return document.tobytes(garbage=4, deflate=True)
 
 
+def _rotated_pdf_with_vector_covering_stamp(rotation):
+    with pymupdf.open() as document:
+        page = document.new_page(width=300, height=220)
+        page.insert_image((80, 70, 160, 110), stream=_png((80, 40), (0, 40, 255, 255)))
+        page.draw_rect((110, 65, 170, 115), color=None, fill=(0, 1, 0))
+        page.set_rotation(rotation)
+        return document.tobytes(garbage=4, deflate=True)
+
+
 def _render_samples(pdf):
     with pymupdf.open(stream=pdf, filetype="pdf") as document:
         pixmap = document[0].get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
@@ -174,3 +183,10 @@ def test_rotated_asymmetric_image_is_not_offered_for_conversion():
 
 def test_image_covered_by_later_vector_is_not_offered_for_conversion():
     assert find_convertible_images(_pdf_with_vector_covering_stamp()) == ()
+
+
+@pytest.mark.parametrize("rotation", [90, 180, 270])
+def test_rotated_page_image_covered_by_vector_is_not_offered_for_conversion(rotation):
+    assert find_convertible_images(
+        _rotated_pdf_with_vector_covering_stamp(rotation)
+    ) == ()

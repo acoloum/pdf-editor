@@ -7,11 +7,12 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 
 import pymupdf
 
 from pdf_editor.assets import AssetStore
-from pdf_editor.engine.overlay import flatten_overlays
+from pdf_editor.engine.overlay import flatten_overlays, transformed_png
 from pdf_editor.errors import EditorError
 from pdf_editor.model import Overlay
 
@@ -21,6 +22,7 @@ MANIFEST_NAME = "moye-pdf/workspace.json"
 BASE_NAME = "moye-pdf/base.pdf"
 ASSET_PREFIX = "moye-pdf/assets/"
 _WORKSPACE_ERROR = "圖章工作層無法驗證，已改以靜態 PDF 開啟。"
+_PDF_REFERENCE = re.compile(rb"(?<!\d)(\d+)\s+(\d+)\s+R")
 
 
 @dataclass(frozen=True)
@@ -96,11 +98,13 @@ def _validated_overlay_data(item: object, names: set[str], document, page_bounds
         if not (
             0 <= x0 < x1 <= page_width
             and 0 <= y0 < y1 <= page_height
-            and _rotated_rect_is_inside_page(rect, angle, page_width, page_height)
         ):
             raise ValueError()
         content = document.embfile_get(asset_name)
         if _sha256(content) != asset_sha256:
+            raise ValueError()
+        _transformed, rendered_rect = transformed_png(content, tuple(rect), angle)
+        if not pymupdf.Rect(0, 0, page_width, page_height).contains(rendered_rect):
             raise ValueError()
         return identifier, page, tuple(rect), angle, asset_name, content
     except Exception as exc:
@@ -170,9 +174,11 @@ def load_workspace(pdf: bytes, asset_root: Path) -> PersistentOverlayBundle | No
             if _visible_fingerprint(reconstructed) != manifest["visible_sha256"]:
                 raise EditorError("WORKSPACE", _WORKSPACE_ERROR)
             return PersistentOverlayBundle(base_pdf, overlays)
-    except EditorError:
+    except EditorError as exc:
         _remove_created_assets(created_assets)
-        raise
+        if exc.code == "WORKSPACE":
+            raise
+        raise EditorError("WORKSPACE", _WORKSPACE_ERROR) from exc
     except Exception as exc:
         _remove_created_assets(created_assets)
         raise EditorError("WORKSPACE", _WORKSPACE_ERROR) from exc
@@ -263,27 +269,8 @@ def _pdf_page_bounds(pdf: bytes):
         return tuple((page.cropbox.width, page.cropbox.height) for page in document)
 
 
-def _rotated_rect_is_inside_page(rect, angle, page_width, page_height) -> bool:
-    """確認旋轉後的圖章外框仍完整位於頁面可渲染範圍。"""
-    x0, y0, x1, y1 = rect
-    radians = math.radians(angle % 360)
-    rotated_width = abs((x1 - x0) * math.cos(radians)) + abs(
-        (y1 - y0) * math.sin(radians)
-    )
-    rotated_height = abs((x1 - x0) * math.sin(radians)) + abs(
-        (y1 - y0) * math.cos(radians)
-    )
-    center_x, center_y = (x0 + x1) / 2, (y0 + y1) / 2
-    return (
-        center_x - rotated_width / 2 >= -1e-6
-        and center_y - rotated_height / 2 >= -1e-6
-        and center_x + rotated_width / 2 <= page_width + 1e-6
-        and center_y + rotated_height / 2 <= page_height + 1e-6
-    )
-
-
 def _visible_fingerprint(pdf_or_document) -> str:
-    """以頁面幾何與渲染像素辨識可見快照，不受附件位元差異影響。"""
+    """以頁面幾何、內容資源及渲染像素辨識可見快照。"""
     owns_document = isinstance(pdf_or_document, (bytes, bytearray))
     document = (
         pymupdf.open(stream=pdf_or_document, filetype="pdf")
@@ -292,6 +279,7 @@ def _visible_fingerprint(pdf_or_document) -> str:
     try:
         digest = hashlib.sha256()
         digest.update(str(document.page_count).encode("ascii"))
+        semantic_cache = {}
         for page in document:
             geometry = (
                 tuple(page.mediabox), tuple(page.cropbox), page.rotation,
@@ -300,10 +288,57 @@ def _visible_fingerprint(pdf_or_document) -> str:
             pixmap = page.get_pixmap(matrix=pymupdf.Matrix(1, 1), alpha=True)
             digest.update(f"{pixmap.width}:{pixmap.height}:{pixmap.n}".encode("ascii"))
             digest.update(pixmap.samples)
+            digest.update(_page_semantic_fingerprint(document, page, semantic_cache))
         return digest.hexdigest()
     finally:
         if owns_document:
             document.close()
+
+
+def _page_semantic_fingerprint(document, page, cache) -> bytes:
+    """雜湊頁面內容串流與資源圖；不遍歷 Catalog，因此排除內部附件。"""
+    digest = hashlib.sha256()
+    contents = tuple(page.get_contents())
+    digest.update(str(len(contents)).encode("ascii"))
+    for xref in contents:
+        digest.update(_xref_semantic_fingerprint(document, xref, cache, set()))
+    resource_type, resource_value = document.xref_get_key(page.xref, "Resources")
+    digest.update(resource_type.encode("ascii", errors="replace"))
+    digest.update(
+        _canonical_pdf_value(document, resource_value, cache, set())
+    )
+    return digest.digest()
+
+
+def _xref_semantic_fingerprint(document, xref: int, cache, active) -> bytes:
+    if xref in cache:
+        return cache[xref]
+    if xref in active:
+        return hashlib.sha256(b"PDF-CYCLE").digest()
+    if not 0 < xref < document.xref_length():
+        return hashlib.sha256(b"PDF-MISSING").digest()
+    active = {*active, xref}
+    digest = hashlib.sha256()
+    value = document.xref_object(xref, compressed=False)
+    digest.update(_canonical_pdf_value(document, value, cache, active))
+    if document.xref_is_stream(xref):
+        digest.update(document.xref_stream(xref))
+    result = digest.digest()
+    cache[xref] = result
+    return result
+
+
+def _canonical_pdf_value(document, value, cache, active) -> bytes:
+    raw = value.encode("latin-1", errors="replace") if isinstance(value, str) else value
+
+    def replace_reference(match):
+        referenced_xref = int(match.group(1))
+        referenced = _xref_semantic_fingerprint(
+            document, referenced_xref, cache, active
+        )
+        return b"<semantic:" + referenced.hex().encode("ascii") + b">"
+
+    return _PDF_REFERENCE.sub(replace_reference, raw)
 
 
 def _sha256(content: bytes) -> str:

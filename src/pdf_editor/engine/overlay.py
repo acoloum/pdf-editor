@@ -1,24 +1,30 @@
 import io
 import math
+from pathlib import Path
 import pymupdf
 from PIL import Image
 from pdf_editor.errors import EditorError
 
 def transformed_image(layer):
-    with Image.open(layer.asset_path) as source:
+    return transformed_png(Path(layer.asset_path).read_bytes(), layer.rect, layer.angle)
+
+
+def transformed_png(content, rect, angle):
+    """依正式輸出規則轉換 PNG，並回傳實際會繪製的頁面矩形。"""
+    with Image.open(io.BytesIO(content)) as source:
         # 先依文件中的寬高重取樣，再旋轉；顯示與輸出共用此結果。
-        x0, y0, x1, y1 = layer.rect
+        x0, y0, x1, y1 = rect
         width, height = x1 - x0, y1 - y0
-        if width <= 0 or height <= 0 or not all(math.isfinite(v) for v in (*layer.rect, layer.angle)):
+        if width <= 0 or height <= 0 or not all(math.isfinite(v) for v in (*rect, angle)):
             raise EditorError("GEOMETRY", "圖章位置或大小無效。")
-        if math.isclose(layer.angle % 360, 0, abs_tol=1e-9):
+        if math.isclose(angle % 360, 0, abs_tol=1e-9):
             buffer = io.BytesIO()
             source.convert("RGBA").save(buffer, format="PNG")
-            return buffer.getvalue(), layer.rect
+            return buffer.getvalue(), rect
         scale = min(3.0, 3000 / max(width, height))
         image = source.convert("RGBA").resize((max(1, round(width * scale)),
             max(1, round(height * scale))), Image.Resampling.LANCZOS)
-        image = image.rotate(-layer.angle, expand=True, resample=Image.Resampling.BICUBIC)
+        image = image.rotate(-angle, expand=True, resample=Image.Resampling.BICUBIC)
         w, h = image.width / scale, image.height / scale
         cx, cy = (x0+x1)/2, (y0+y1)/2
         rect = (cx-w/2, cy-h/2, cx+w/2, cy+h/2)

@@ -156,15 +156,16 @@ def _insert_candidate(base_pdf: bytes, candidate: LegacyImageCandidate) -> bytes
 def _rendered_region_matches(
         original_pdf: bytes, replacement_pdf: bytes,
         candidate: LegacyImageCandidate) -> bool:
-    clip = pymupdf.Rect(candidate.rect)
     samples = []
     for pdf in (original_pdf, replacement_pdf):
         with pymupdf.open(stream=pdf, filetype="pdf") as document:
             pixmap = document[candidate.page].get_pixmap(
-                matrix=pymupdf.Matrix(2, 2), clip=clip, alpha=False
+                matrix=pymupdf.Matrix(2, 2), alpha=False
             )
             samples.append((pixmap.width, pixmap.height, pixmap.n, pixmap.samples))
     if samples[0][:3] != samples[1][:3]:
+        return False
+    if samples[0][0] <= 0 or samples[0][1] <= 0 or not samples[0][3]:
         return False
     first, second = samples[0][3], samples[1][3]
     return all(abs(a - b) <= 2 for a, b in zip(first, second))

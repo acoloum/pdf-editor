@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 
 import pytest
 import pymupdf
@@ -7,7 +8,7 @@ from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import save_as
 from pdf_editor.errors import EditorError
 from pdf_editor.model import Overlay
-from pdf_editor.persistent_overlays import embed_workspace
+from pdf_editor.persistent_overlays import MANIFEST_NAME, embed_workspace
 
 def test_save_undo_dirty(source_path, tmp_path, pdf_bytes):
     with DocumentSession.open(source_path) as session:
@@ -138,3 +139,35 @@ def test_externally_changed_workspace_keeps_outer_pdf_as_static(
                 assert "EXTERNAL PAGE" in document[1].get_text()
             else:
                 assert "EXTERNAL TEXT" in document[0].get_text()
+
+
+def test_workspace_with_pillow_expanded_rotation_falls_back_to_static(
+        source_path, tmp_path):
+    stamp = tmp_path / "stamp.png"
+    Image.new("RGBA", (20, 10), (0, 0, 255, 180)).save(stamp)
+    workspace = embed_workspace(
+        source_path.read_bytes(),
+        (Overlay("章", 0, str(stamp), (100, 100, 140, 120), 0),),
+    )
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        original_manifest = document.embfile_get(MANIFEST_NAME)
+        manifest = json.loads(original_manifest.decode("utf-8"))
+        manifest["overlays"][0]["rect"] = [458.78, 100, 498.78, 120]
+        manifest["overlays"][0]["angle"] = 45
+        manifest_xref = next(
+            xref for xref in range(1, document.xref_length())
+            if document.xref_is_stream(xref)
+            and document.xref_stream(xref) == original_manifest
+        )
+        document.update_stream(
+            manifest_xref,
+            json.dumps(manifest, ensure_ascii=False).encode("utf-8"),
+        )
+        invalid = document.tobytes(garbage=4, deflate=True)
+    path = tmp_path / "旋轉外框損壞.pdf"
+    path.write_bytes(invalid)
+
+    with DocumentSession.open(path) as session:
+        assert session.overlays == ()
+        assert session.open_notice is not None
+        assert "靜態 PDF" in session.open_notice

@@ -238,3 +238,39 @@ def test_workspace_with_changed_visible_snapshot_is_rejected(
 
     with pytest.raises(EditorError, match="工作層無法驗證"):
         load_workspace(changed, tmp_path / "assets")
+
+
+def test_workspace_detects_one_native_pixel_resource_translation(tmp_path):
+    stripes = Image.new("1", (200, 200))
+    shifted = Image.new("1", (200, 200))
+    for x in range(200):
+        for y in range(200):
+            stripes.putpixel((x, y), x % 2)
+            shifted.putpixel((x, y), (x - 1) % 2)
+    stripe_path = tmp_path / "交錯直條.png"
+    shifted_path = tmp_path / "平移一直條.png"
+    stripes.save(stripe_path)
+    shifted.save(shifted_path)
+    with pymupdf.open() as base:
+        page = base.new_page(width=300, height=300)
+        page.insert_image(
+            (100, 100, 150, 150), filename=stripe_path, keep_proportion=False
+        )
+        base_pdf = base.tobytes(garbage=4, deflate=True)
+    stamp = tmp_path / "章.png"
+    Image.new("RGBA", (10, 10), (0, 60, 255, 255)).save(stamp)
+    workspace = embed_workspace(
+        base_pdf, (Overlay("章", 0, str(stamp), (20, 20, 30, 30)),)
+    )
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        before_pixels = document[0].get_pixmap(alpha=True).samples
+        stripe_xref = next(
+            image[0] for image in document[0].get_images(full=True)
+            if image[2:4] == (200, 200)
+        )
+        document[0].replace_image(stripe_xref, filename=shifted_path)
+        assert document[0].get_pixmap(alpha=True).samples == before_pixels
+        modified = document.tobytes(garbage=4, deflate=True)
+
+    with pytest.raises(EditorError, match="工作層無法驗證"):
+        load_workspace(modified, tmp_path / "assets")
