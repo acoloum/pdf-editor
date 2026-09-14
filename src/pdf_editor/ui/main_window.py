@@ -3,12 +3,13 @@ from dataclasses import replace
 import hashlib
 import uuid
 import pymupdf
-from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal
+from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal,QPointF
 from PySide6.QtGui import QAction,QKeySequence,QIcon,QPixmap
 from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton,QAbstractItemView
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import write_pdf,publish_batch
 from pdf_editor.engine.render import render_page,thumbnail
+from pdf_editor.engine.geometry import transform_point,inverse_transform
 from pdf_editor.engine.inspection import unlock_pdf
 from pdf_editor.engine.text import replace_text, insert_text, find_table_cell
 from pdf_editor.engine.overlay import flatten_overlays
@@ -38,6 +39,8 @@ from pdf_editor.ui.comparison_dialog import ComparisonDialog
 from pdf_editor.ui.page_dialogs import (MergeDialog,SplitDialog,CropPagesDialog,
     PageDecorationDialog,HeaderFooterTemplatesDialog)
 from pdf_editor.ui.style import STYLE
+
+ZOOM_LEVELS=(0.25,0.5,0.75,1.0,1.25,1.5,1.75,2.0,2.5,3.0,4.0,5.0)
 
 def export_document(pdf,layers,target,source,overwrite):
     data=flatten_overlays(pdf,layers) if layers else pdf
@@ -236,8 +239,18 @@ class MainWindow(QMainWindow):
         self.page_spin.setRange(1,1)
         self.page_spin.valueChanged.connect(lambda n:self.goto_page(n-1))
         toolbar.addWidget(self.page_spin)
+        for name,label,handler,shortcuts,tip in [
+            ("zoom_out","－",lambda:self.zoom_by(-1),("Ctrl+-",),"縮小頁面（Ctrl+-）"),
+            ("zoom_in","＋",lambda:self.zoom_by(1),("Ctrl++","Ctrl+="),"放大頁面（Ctrl++）")]:
+            action=QAction(label,self)
+            action.triggered.connect(handler)
+            action.setShortcuts([QKeySequence(key) for key in shortcuts])
+            action.setToolTip(tip)
+            toolbar.addAction(action)
+            self.actions[name]=action
         self.zoom=QComboBox()
-        self.zoom.addItems(["適合頁面","適合寬度","75%","100%","125%","150%","200%"])
+        self.zoom.addItems(["適合頁面","適合寬度"]+
+            [f"{round(level*100)}%" for level in ZOOM_LEVELS])
         self.zoom.setCurrentText("125%")
         self.zoom.currentTextChanged.connect(self.change_zoom)
         toolbar.addWidget(self.zoom)
@@ -371,6 +384,8 @@ class MainWindow(QMainWindow):
         valid_search=active and not self.busy and bool(self.search_results) and self.search_revision==self.session.revision
         self.actions["search_previous"].setEnabled(valid_search)
         self.actions["search_next"].setEnabled(valid_search)
+        self.actions["zoom_out"].setEnabled(active and self.scale>ZOOM_LEVELS[0])
+        self.actions["zoom_in"].setEnabled(active and self.scale<ZOOM_LEVELS[-1])
         self.search_input.setEnabled(active and not self.busy)
         self.thumbs.setEnabled(active and not self.busy)
         self.text_panel.apply_button.setEnabled(edit and self.preview is not None)
@@ -990,8 +1005,32 @@ class MainWindow(QMainWindow):
         if text=="適合寬度":
             self.fit_zoom("width")
             return
+        view_center=self.visible_page_center()
         self.scale=float(text.rstrip("%"))/100
-        self.request_render()
+        self.request_render(view_center=view_center)
+
+    def visible_page_center(self):
+        if not self.page_data:
+            return None
+        center=self.canvas.mapToScene(self.canvas.viewport().rect().center())
+        return transform_point(inverse_transform(self.canvas.matrix),center.x(),center.y())
+
+    def zoom_by(self,direction):
+        if not self.session or direction==0:
+            return
+        view_center=self.visible_page_center()
+        if direction>0:
+            target=next((level for level in ZOOM_LEVELS if level>self.scale+1e-9),
+                ZOOM_LEVELS[-1])
+        else:
+            target=next((level for level in reversed(ZOOM_LEVELS)
+                if level<self.scale-1e-9),ZOOM_LEVELS[0])
+        self.scale=target
+        self.zoom.blockSignals(True)
+        self.zoom.setCurrentText(f"{round(target*100)}%")
+        self.zoom.blockSignals(False)
+        self.refresh_actions()
+        self.request_render(view_center=view_center)
 
     def fit_zoom(self,mode):
         if not self.page_data or mode not in ("page","width"):
@@ -1076,7 +1115,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"搜尋結果 {self.search_index+1} / {len(self.search_results)}，第 {match.page+1} 頁")
 
-    def request_render(self,completion_status=None):
+    def request_render(self,completion_status=None,view_center=None):
         if not self.session:
             return
         self.render_serial+=1
@@ -1090,6 +1129,9 @@ class MainWindow(QMainWindow):
             self.page_data=result
             try:
                 self.canvas.display(result,layers,self.layer_id)
+                if view_center is not None:
+                    x,y=transform_point(result["matrix"],*view_center)
+                    self.canvas.centerOn(QPointF(x,y))
                 if (self.search_results and self.search_revision==self.session.revision and
                         self.search_results[self.search_index].page==self.page):
                     self.canvas.show_search_result(self.search_results[self.search_index].rect)

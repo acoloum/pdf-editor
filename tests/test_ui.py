@@ -6,6 +6,7 @@ import pytest
 import pymupdf
 from PIL import Image
 from PySide6.QtCore import Qt, QPoint, QPointF, QItemSelectionModel, QEvent, QCoreApplication
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QAbstractItemView
 from PySide6.QtTest import QSignalSpy
 from pdf_editor.ui.main_window import MainWindow
@@ -846,6 +847,87 @@ def test_window_fit_page_and_width_update_zoom(qtbot,source_path):
         assert page_scale>0
         assert window.scale>=page_scale
         assert window.zoom.currentText()=="適合寬度"
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_zoom_buttons_move_to_neighboring_scale(qtbot,source_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        assert "zoom_in" in window.actions
+        assert "zoom_out" in window.actions
+
+        window.scale=1.25
+        window.zoom_by(1)
+        assert window.scale==pytest.approx(1.5)
+        assert window.zoom.currentText()=="150%"
+
+        window.zoom_by(-1)
+        assert window.scale==pytest.approx(1.25)
+        assert window.zoom.currentText()=="125%"
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_zoom_buttons_disable_at_limits(qtbot,source_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+
+        window.scale=0.25
+        window.refresh_actions()
+        assert not window.actions["zoom_out"].isEnabled()
+        assert window.actions["zoom_in"].isEnabled()
+
+        window.scale=5.0
+        window.refresh_actions()
+        assert window.actions["zoom_out"].isEnabled()
+        assert not window.actions["zoom_in"].isEnabled()
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_zoom_buttons_have_keyboard_shortcuts(qtbot):
+    window=MainWindow()
+    qtbot.addWidget(window)
+
+    assert QKeySequence("Ctrl+-") in window.actions["zoom_out"].shortcuts()
+    assert QKeySequence("Ctrl++") in window.actions["zoom_in"].shortcuts()
+    assert QKeySequence("Ctrl+=") in window.actions["zoom_in"].shortcuts()
+
+
+def test_window_zoom_keeps_visible_page_center(qtbot,source_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.resize(1100,700)
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        window.change_zoom("200%")
+        qtbot.waitUntil(lambda:window.page_data["display_size"][0]==pytest.approx(1000),
+            timeout=30000)
+        window.canvas.centerOn(QPointF(700,500))
+        before_scene=window.canvas.mapToScene(window.canvas.viewport().rect().center())
+        before=transform_point(inverse_transform(window.canvas.matrix),
+            before_scene.x(),before_scene.y())
+
+        window.zoom_by(1)
+
+        qtbot.waitUntil(lambda:window.page_data["display_size"][0]==pytest.approx(1250),
+            timeout=30000)
+        after_scene=window.canvas.mapToScene(window.canvas.viewport().rect().center())
+        after=transform_point(inverse_transform(window.canvas.matrix),
+            after_scene.x(),after_scene.y())
+        assert after==pytest.approx(before,abs=1.5)
     finally:
         window.session.saved_fingerprint=window.session.history.current[2]
         window.close()
