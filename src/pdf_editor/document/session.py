@@ -2,6 +2,17 @@ from pathlib import Path
 from pdf_editor.document.history import History
 from pdf_editor.engine.inspection import unlock_pdf
 from pdf_editor.errors import EditorError
+from pdf_editor.persistent_overlays import load_workspace
+
+
+def _load_workspace_or_none(pdf, asset_root):
+    """工作層無效時保留可見 PDF，並回傳可供介面顯示的提示。"""
+    try:
+        return load_workspace(pdf, asset_root), None
+    except EditorError as exc:
+        if exc.code != "WORKSPACE":
+            raise
+        return None, str(exc)
 
 class DocumentSession:
     @classmethod
@@ -10,6 +21,11 @@ class DocumentSession:
         obj.source = Path(path).resolve()
         data, obj.access = unlock_pdf(obj.source.read_bytes(), password)
         obj.history = History(data)
+        workspace, obj.open_notice = _load_workspace_or_none(
+            data, obj.history.root / "assets"
+        )
+        if workspace:
+            obj.history.replace_initial(workspace.base_pdf, workspace.overlays)
         obj.saved_fingerprint = obj.history.current[2]
         obj.revision = 0
         obj.password_used = bool(password)

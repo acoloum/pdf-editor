@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 import pymupdf
 from pdf_editor.errors import EditorError, BatchPublishError
+from pdf_editor.persistent_overlays import embed_workspace
 
 def same_file(a, b):
     a, b = Path(a), Path(b)
@@ -54,10 +55,7 @@ def save_as(session, target, overwrite=False):
     session._check_edit()
     revision = session.revision
     fingerprint = session.history.current[2]
-    pdf = session.pdf
-    if session.overlays:
-        from pdf_editor.engine.overlay import flatten_overlays
-        pdf = flatten_overlays(pdf, session.overlays)
+    pdf = embed_workspace(session.pdf, session.overlays) if session.overlays else session.pdf
     result = write_pdf(pdf, target, overwrite, (session.source,))
     if session.revision == revision:
         session.saved_fingerprint = fingerprint

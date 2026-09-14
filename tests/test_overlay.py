@@ -2,6 +2,8 @@ from pathlib import Path
 from PIL import Image
 import pymupdf
 from pdf_editor.assets import AssetStore
+from pdf_editor.document.save import save_as
+from pdf_editor.document.session import DocumentSession
 from pdf_editor.engine.overlay import flatten_overlays
 from pdf_editor.model import Overlay
 
@@ -22,8 +24,6 @@ def test_copy_and_flatten_preserves_alpha(tmp_path, pdf_bytes):
         assert pix.pixel(205, 205)[:3] == (255,255,255)
 
 def test_repeated_save_does_not_duplicate(tmp_path, source_path):
-    from pdf_editor.document.session import DocumentSession
-    from pdf_editor.document.save import save_as
     path = tmp_path / "stamp.png"
     Image.new("RGBA",(20,20),(255,0,0,100)).save(path)
     with DocumentSession.open(source_path) as s:
@@ -33,4 +33,20 @@ def test_repeated_save_does_not_duplicate(tmp_path, source_path):
         with pymupdf.open(tmp_path/"a.pdf") as a, pymupdf.open(tmp_path/"b.pdf") as b:
             assert a[0].get_pixmap().samples == b[0].get_pixmap().samples
         assert len(s.overlays) == 1
+
+
+def test_reopen_then_resave_has_one_visible_stamp(source_path, tmp_path):
+    """重開後另存若再平面化工作層，會造成半透明圖章重影。"""
+    stamp = tmp_path / "半透明章.png"
+    Image.new("RGBA", (20, 20), (255, 0, 0, 120)).save(stamp)
+    first, second = tmp_path / "first.pdf", tmp_path / "second.pdf"
+
+    with DocumentSession.open(source_path) as session:
+        session.set_overlays((Overlay("章", 0, str(stamp), (200, 200, 240, 240)),))
+        save_as(session, first)
+    with DocumentSession.open(first) as reopened:
+        save_as(reopened, second)
+
+    with pymupdf.open(first) as a, pymupdf.open(second) as b:
+        assert a[0].get_pixmap().samples == b[0].get_pixmap().samples
 

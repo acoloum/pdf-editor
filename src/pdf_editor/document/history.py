@@ -34,7 +34,7 @@ def cleanup_stale():
             pass
 
 class History:
-    def __init__(self, pdf):
+    def __init__(self, pdf, overlays=()):
         self.root = Path(tempfile.mkdtemp(prefix="session-", dir=history_root()))
         self.lock = (self.root / "session.lock").open("w+b")
         self.lock.write(b"1")
@@ -44,7 +44,15 @@ class History:
         self.items = []
         self.index = -1
         self.serial = 0
-        self.push(pdf, ())
+        self.push(pdf, overlays)
+
+    def replace_initial(self, pdf, overlays):
+        """以已驗證工作層取代剛建立的初始狀態，不建立復原步驟。"""
+        assert self.index == 0 and len(self.items) == 1
+        path = self.items[0][0]
+        overlays = tuple(overlays)
+        path.write_bytes(pdf)
+        self.items[0] = (path, overlays, fingerprint(pdf, overlays))
 
     def push(self, pdf, overlays):
         for item in self.items[self.index + 1:]:

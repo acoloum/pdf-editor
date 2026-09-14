@@ -1,4 +1,7 @@
+from dataclasses import replace
+
 import pytest
+from PIL import Image
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import save_as
 from pdf_editor.errors import EditorError
@@ -64,3 +67,19 @@ def test_apply_state_can_flatten_overlays_and_undo(source_path):
         assert session.overlays == ()
         session.undo()
         assert session.overlays == (layer,)
+
+
+def test_saved_stamp_reopens_as_editable_overlay(source_path, tmp_path):
+    """遺失工作層還原時，重開檔案後無法再移動已存的圖章。"""
+    stamp = tmp_path / "stamp.png"
+    Image.new("RGBA", (20, 20), (0, 0, 255, 180)).save(stamp)
+    target = tmp_path / "可重編.pdf"
+
+    with DocumentSession.open(source_path) as session:
+        session.set_overlays((Overlay("章", 0, str(stamp), (200, 200, 240, 240)),))
+        save_as(session, target)
+
+    with DocumentSession.open(target) as reopened:
+        original = reopened.overlays[0]
+        reopened.set_overlays((replace(original, rect=(260, 200, 300, 240)),))
+        assert reopened.overlays[0].rect == (260, 200, 300, 240)

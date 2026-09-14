@@ -474,6 +474,9 @@ class MainWindow(QMainWindow):
         self.refresh_actions()
         self.request_render()
         self.queue_thumbnail(0,self.token,session.revision)
+        if session.open_notice:
+            QMessageBox.warning(self, "圖章工作層", session.open_notice)
+            self.statusBar().showMessage(session.open_notice)
 
     def choose_comparison_pdf(self):
         if not self.session or self.busy:
