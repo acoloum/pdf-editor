@@ -21,8 +21,16 @@ def find_convertible_images(pdf: bytes) -> tuple[LegacyImageCandidate, ...]:
                 if len(locations) != 1:
                     continue
                 page_number, rect = locations[0]
-                if _is_not_page_scan(document[page_number], rect):
-                    candidates.append(_candidate_from_use(document, xref, page_number, rect))
+                if not _is_not_page_scan(document[page_number], rect):
+                    continue
+                if not _has_supported_placement(document[page_number], xref, rect):
+                    continue
+                try:
+                    candidate = _candidate_from_use(document, xref, page_number, rect)
+                except Exception:
+                    continue
+                if _replacement_preserves_appearance(pdf, candidate):
+                    candidates.append(candidate)
             return tuple(candidates)
     except EditorError:
         raise
@@ -46,6 +54,11 @@ def convert_legacy_image(pdf: bytes, candidate: LegacyImageCandidate, asset_root
             base_pdf = document.tobytes(garbage=4, deflate=True)
 
         _verify_pdf(base_pdf, candidate)
+        if not _replacement_from_base_preserves_appearance(pdf, base_pdf, candidate):
+            raise EditorError(
+                "STAMP_CONVERSION",
+                "既有圖章受其他內容或繪圖狀態影響，無法安全轉換。",
+            )
         asset = AssetStore(asset_root).import_png_bytes(candidate.png)
         return base_pdf, Overlay(uuid.uuid4().hex, candidate.page, str(asset), candidate.rect)
     except EditorError as exc:
@@ -71,8 +84,17 @@ def _rect_tuple(rect) -> tuple[float, float, float, float]:
 
 
 def _candidate_from_use(document, xref: int, page: int, rect) -> LegacyImageCandidate:
-    extracted = document.extract_image(xref)
-    png, width, height = _normalize_png(extracted["image"])
+    image_info = next(
+        (item for item in document[page].get_images(full=True) if item[0] == xref),
+        None,
+    )
+    if image_info is None:
+        raise ValueError("找不到影像資源")
+    pixmap = pymupdf.Pixmap(document, xref)
+    if image_info[1] > 0:
+        mask = pymupdf.Pixmap(document, image_info[1])
+        pixmap = pymupdf.Pixmap(pixmap, mask)
+    png, width, height = _normalize_png(pixmap.tobytes("png"))
     return LegacyImageCandidate(xref, page, rect, png, width, height)
 
 
@@ -88,6 +110,64 @@ def _is_not_page_scan(page, rect) -> bool:
     image_rect = pymupdf.Rect(rect)
     cropbox = page.cropbox
     return image_rect.get_area() < cropbox.get_area() * 0.9
+
+
+def _has_supported_placement(page, xref: int, rect) -> bool:
+    """目前只接受未旋轉、未鏡射且未斜切的軸向影像。"""
+    matching = [
+        matrix
+        for found_rect, matrix in page.get_image_rects(xref, transform=True)
+        if _rect_tuple(found_rect) == rect
+    ]
+    if len(matching) != 1:
+        return False
+    a, b, c, d, _e, _f = matching[0]
+    return a > 0 and d > 0 and abs(b) <= 1e-6 and abs(c) <= 1e-6
+
+
+def _replacement_preserves_appearance(pdf: bytes, candidate: LegacyImageCandidate) -> bool:
+    try:
+        with pymupdf.open(stream=pdf, filetype="pdf") as document:
+            document[candidate.page].delete_image(candidate.xref)
+            base_pdf = document.tobytes(garbage=4, deflate=True)
+        return _replacement_from_base_preserves_appearance(pdf, base_pdf, candidate)
+    except Exception:
+        return False
+
+
+def _replacement_from_base_preserves_appearance(
+        original_pdf: bytes, base_pdf: bytes, candidate: LegacyImageCandidate) -> bool:
+    try:
+        replacement = _insert_candidate(base_pdf, candidate)
+        return _rendered_region_matches(original_pdf, replacement, candidate)
+    except Exception:
+        return False
+
+
+def _insert_candidate(base_pdf: bytes, candidate: LegacyImageCandidate) -> bytes:
+    """以正式平面化流程相同的取樣方式重建候選影像。"""
+    with pymupdf.open(stream=base_pdf, filetype="pdf") as document:
+        document[candidate.page].insert_image(
+            candidate.rect, stream=candidate.png, keep_proportion=False
+        )
+        return document.tobytes(garbage=4, deflate=True)
+
+
+def _rendered_region_matches(
+        original_pdf: bytes, replacement_pdf: bytes,
+        candidate: LegacyImageCandidate) -> bool:
+    clip = pymupdf.Rect(candidate.rect)
+    samples = []
+    for pdf in (original_pdf, replacement_pdf):
+        with pymupdf.open(stream=pdf, filetype="pdf") as document:
+            pixmap = document[candidate.page].get_pixmap(
+                matrix=pymupdf.Matrix(2, 2), clip=clip, alpha=False
+            )
+            samples.append((pixmap.width, pixmap.height, pixmap.n, pixmap.samples))
+    if samples[0][:3] != samples[1][:3]:
+        return False
+    first, second = samples[0][3], samples[1][3]
+    return all(abs(a - b) <= 2 for a, b in zip(first, second))
 
 
 def _verify_pdf(base_pdf: bytes, candidate: LegacyImageCandidate) -> None:

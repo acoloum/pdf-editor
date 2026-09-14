@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QAbstractItemView,QDialog,QToolBar
 from PySide6.QtTest import QSignalSpy
 from pdf_editor.ui.main_window import MainWindow
 import pdf_editor.ui.main_window as main_window
+from pdf_editor.document.session import DocumentSession
 from pdf_editor.engine.render import render_page
 from pdf_editor.engine.geometry import transform_point, inverse_transform
 from pdf_editor.ui.signature_dialog import SignatureDialog
@@ -1921,6 +1922,37 @@ def test_window_converts_selected_legacy_stamp_into_layer(
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
+
+
+def test_window_save_reopens_stamp_as_editable_overlay(
+        qtbot, source_path, tmp_path, monkeypatch):
+    target = tmp_path / "介面另存.pdf"
+    stamp = tmp_path / "介面圖章.png"
+    Image.new("RGBA", (20, 20), (0, 40, 255, 200)).save(stamp)
+    window = _open_window_for_legacy_stamp(qtbot, source_path)
+    try:
+        layer = Overlay("ui-stamp", 0, str(stamp), (200, 180, 240, 220), 0)
+        window.session.set_overlays((layer,))
+        monkeypatch.setattr(main_window.QFileDialog, "getSaveFileName",
+            lambda *args: (str(target), "PDF (*.pdf)"))
+        window.jobs.submit = (
+            lambda function, arguments, success, failure:
+                _submit_synchronously(window.jobs, function, arguments, success, failure)
+        )
+
+        window.save()
+
+        qtbot.waitUntil(lambda: not window.busy and target.exists(), timeout=30000)
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+        with DocumentSession.open(target) as reopened:
+            assert len(reopened.overlays) == 1
+            assert reopened.overlays[0].id == "ui-stamp"
+            assert reopened.overlays[0].rect == (200, 180, 240, 220)
+    finally:
+        if window.session is not None:
+            window.session.saved_fingerprint = window.session.history.current[2]
+            window.close()
 
 
 def test_window_reports_when_no_legacy_stamp_candidate_exists(

@@ -11,6 +11,10 @@ def transformed_image(layer):
         width, height = x1 - x0, y1 - y0
         if width <= 0 or height <= 0 or not all(math.isfinite(v) for v in (*layer.rect, layer.angle)):
             raise EditorError("GEOMETRY", "圖章位置或大小無效。")
+        if math.isclose(layer.angle % 360, 0, abs_tol=1e-9):
+            buffer = io.BytesIO()
+            source.convert("RGBA").save(buffer, format="PNG")
+            return buffer.getvalue(), layer.rect
         scale = min(3.0, 3000 / max(width, height))
         image = source.convert("RGBA").resize((max(1, round(width * scale)),
             max(1, round(height * scale))), Image.Resampling.LANCZOS)

@@ -37,9 +37,12 @@ def has_only_workspace_embedded_files(document) -> bool:
             return False
         base_pdf = document.embfile_get(BASE_NAME)
         manifest = _validate_manifest(document.embfile_get(MANIFEST_NAME), base_pdf)
+        if manifest["visible_sha256"] != _visible_fingerprint(document):
+            return False
+        page_bounds = _pdf_page_bounds(base_pdf)
         referenced_assets = {
             _validated_overlay_data(
-                item, names, document, manifest["page_count"]
+                item, names, document, page_bounds
             )[4]
             for item in manifest["overlays"]
         }
@@ -52,7 +55,7 @@ def has_only_workspace_embedded_files(document) -> bool:
         return False
 
 
-def _validated_overlay_data(item: object, names: set[str], document, page_count: int):
+def _validated_overlay_data(item: object, names: set[str], document, page_bounds):
     """驗證圖層描述及資產內容，供載入與附件分類共用。"""
     try:
         if not isinstance(item, dict) or set(item) != {
@@ -65,6 +68,7 @@ def _validated_overlay_data(item: object, names: set[str], document, page_count:
         angle = item["angle"]
         asset_name = item["asset_name"]
         asset_sha256 = item["asset_sha256"]
+        page_count = len(page_bounds)
         if (
             not isinstance(identifier, str)
             or not isinstance(page, int)
@@ -87,6 +91,14 @@ def _validated_overlay_data(item: object, names: set[str], document, page_count:
             or asset_name not in names
         ):
             raise ValueError()
+        x0, y0, x1, y1 = rect
+        page_width, page_height = page_bounds[page]
+        if not (
+            0 <= x0 < x1 <= page_width
+            and 0 <= y0 < y1 <= page_height
+            and _rotated_rect_is_inside_page(rect, angle, page_width, page_height)
+        ):
+            raise ValueError()
         content = document.embfile_get(asset_name)
         if _sha256(content) != asset_sha256:
             raise ValueError()
@@ -100,13 +112,14 @@ def embed_workspace(base_pdf: bytes, overlays: tuple[Overlay, ...]) -> bytes:
     assets, manifest_overlays = _prepare_assets(overlays)
     base_sha256 = _sha256(base_pdf)
     page_count = _pdf_page_count(base_pdf)
+    visible = flatten_overlays(base_pdf, overlays)
     manifest = {
         "version": WORKSPACE_VERSION,
         "base_sha256": base_sha256,
         "page_count": page_count,
+        "visible_sha256": _visible_fingerprint(visible),
         "overlays": manifest_overlays,
     }
-    visible = flatten_overlays(base_pdf, overlays)
     with pymupdf.open(stream=visible, filetype="pdf") as document:
         document.embfile_add(BASE_NAME, base_pdf, filename="base.pdf")
         document.embfile_add(
@@ -130,6 +143,15 @@ def load_workspace(pdf: bytes, asset_root: Path) -> PersistentOverlayBundle | No
             manifest_bytes = document.embfile_get(MANIFEST_NAME)
             base_pdf = document.embfile_get(BASE_NAME)
             manifest = _validate_manifest(manifest_bytes, base_pdf)
+            if manifest["visible_sha256"] != _visible_fingerprint(document):
+                raise EditorError("WORKSPACE", _WORKSPACE_ERROR)
+            page_bounds = _pdf_page_bounds(base_pdf)
+            referenced_assets = {
+                _validated_overlay_data(item, names, document, page_bounds)[4]
+                for item in manifest["overlays"]
+            }
+            if names != {MANIFEST_NAME, BASE_NAME, *referenced_assets}:
+                raise EditorError("WORKSPACE", _WORKSPACE_ERROR)
             asset_store = AssetStore(asset_root)
             existing_assets = set(asset_store.root.iterdir())
             overlays = tuple(
@@ -138,12 +160,15 @@ def load_workspace(pdf: bytes, asset_root: Path) -> PersistentOverlayBundle | No
                     names,
                     document,
                     asset_store,
-                    manifest["page_count"],
+                    page_bounds,
                     existing_assets,
                     created_assets,
                 )
                 for item in manifest["overlays"]
             )
+            reconstructed = flatten_overlays(base_pdf, overlays)
+            if _visible_fingerprint(reconstructed) != manifest["visible_sha256"]:
+                raise EditorError("WORKSPACE", _WORKSPACE_ERROR)
             return PersistentOverlayBundle(base_pdf, overlays)
     except EditorError:
         _remove_created_assets(created_assets)
@@ -178,7 +203,7 @@ def _validate_manifest(manifest_bytes: bytes, base_pdf: bytes) -> dict:
     try:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
         if not isinstance(manifest, dict) or set(manifest) != {
-            "version", "base_sha256", "page_count", "overlays"
+            "version", "base_sha256", "page_count", "visible_sha256", "overlays"
         }:
             raise ValueError()
         if manifest["version"] != WORKSPACE_VERSION:
@@ -190,6 +215,11 @@ def _validate_manifest(manifest_bytes: bytes, base_pdf: bytes) -> dict:
         if not isinstance(manifest["page_count"], int) or isinstance(manifest["page_count"], bool):
             raise ValueError()
         if manifest["page_count"] != _pdf_page_count(base_pdf):
+            raise ValueError()
+        if (
+            not isinstance(manifest["visible_sha256"], str)
+            or len(manifest["visible_sha256"]) != 64
+        ):
             raise ValueError()
         if not isinstance(manifest["overlays"], list):
             raise ValueError()
@@ -203,13 +233,13 @@ def _restore_overlay(
     names: set[str],
     document,
     asset_store: AssetStore,
-    page_count: int,
+    page_bounds,
     existing_assets: set[Path],
     created_assets: set[Path],
 ) -> Overlay:
     try:
         identifier, page, rect, angle, _asset_name, content = _validated_overlay_data(
-            item, names, document, page_count
+            item, names, document, page_bounds
         )
         path = asset_store.import_png_bytes(content)
         if path not in existing_assets:
@@ -224,6 +254,56 @@ def _pdf_page_count(pdf: bytes) -> int:
         if document.page_count < 1:
             raise ValueError()
         return document.page_count
+
+
+def _pdf_page_bounds(pdf: bytes):
+    with pymupdf.open(stream=pdf, filetype="pdf") as document:
+        if document.page_count < 1:
+            raise ValueError()
+        return tuple((page.cropbox.width, page.cropbox.height) for page in document)
+
+
+def _rotated_rect_is_inside_page(rect, angle, page_width, page_height) -> bool:
+    """確認旋轉後的圖章外框仍完整位於頁面可渲染範圍。"""
+    x0, y0, x1, y1 = rect
+    radians = math.radians(angle % 360)
+    rotated_width = abs((x1 - x0) * math.cos(radians)) + abs(
+        (y1 - y0) * math.sin(radians)
+    )
+    rotated_height = abs((x1 - x0) * math.sin(radians)) + abs(
+        (y1 - y0) * math.cos(radians)
+    )
+    center_x, center_y = (x0 + x1) / 2, (y0 + y1) / 2
+    return (
+        center_x - rotated_width / 2 >= -1e-6
+        and center_y - rotated_height / 2 >= -1e-6
+        and center_x + rotated_width / 2 <= page_width + 1e-6
+        and center_y + rotated_height / 2 <= page_height + 1e-6
+    )
+
+
+def _visible_fingerprint(pdf_or_document) -> str:
+    """以頁面幾何與渲染像素辨識可見快照，不受附件位元差異影響。"""
+    owns_document = isinstance(pdf_or_document, (bytes, bytearray))
+    document = (
+        pymupdf.open(stream=pdf_or_document, filetype="pdf")
+        if owns_document else pdf_or_document
+    )
+    try:
+        digest = hashlib.sha256()
+        digest.update(str(document.page_count).encode("ascii"))
+        for page in document:
+            geometry = (
+                tuple(page.mediabox), tuple(page.cropbox), page.rotation,
+            )
+            digest.update(repr(geometry).encode("ascii"))
+            pixmap = page.get_pixmap(matrix=pymupdf.Matrix(1, 1), alpha=True)
+            digest.update(f"{pixmap.width}:{pixmap.height}:{pixmap.n}".encode("ascii"))
+            digest.update(pixmap.samples)
+        return digest.hexdigest()
+    finally:
+        if owns_document:
+            document.close()
 
 
 def _sha256(content: bytes) -> str:

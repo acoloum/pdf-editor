@@ -159,4 +159,82 @@ def test_workspace_failure_removes_assets_created_by_this_load(tmp_path, pdf_byt
     with pytest.raises(EditorError, match="工作層無法驗證"):
         load_workspace(invalid, asset_root)
 
-    assert not list(asset_root.iterdir())
+    assert not asset_root.exists() or not list(asset_root.iterdir())
+
+
+@pytest.mark.parametrize(
+    "rect",
+    [
+        [140, 110, 100, 130],
+        [100, 130, 140, 110],
+        [-1, 110, 140, 130],
+        [100, 110, 501, 130],
+    ],
+)
+def test_workspace_with_non_renderable_overlay_rect_is_rejected(
+        tmp_path, pdf_bytes, rect):
+    stamp = tmp_path / "章.png"
+    Image.new("RGBA", (20, 10), (0, 60, 255, 180)).save(stamp)
+    workspace = embed_workspace(
+        pdf_bytes, (Overlay("章-1", 0, str(stamp), (100, 110, 140, 130)),)
+    )
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        manifest = json.loads(document.embfile_get(MANIFEST_NAME).decode("utf-8"))
+    manifest["overlays"][0]["rect"] = rect
+    invalid = _embed_with_replaced_manifest(
+        workspace, json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+    )
+
+    with pytest.raises(EditorError, match="工作層無法驗證"):
+        load_workspace(invalid, tmp_path / "assets")
+
+
+def test_workspace_with_unreferenced_attachment_is_rejected(tmp_path, pdf_bytes):
+    stamp = tmp_path / "章.png"
+    Image.new("RGBA", (20, 10), (0, 60, 255, 180)).save(stamp)
+    workspace = embed_workspace(
+        pdf_bytes, (Overlay("章-1", 0, str(stamp), (100, 110, 140, 130)),)
+    )
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        document.embfile_add("客戶資料.bin", b"customer-attachment", filename="客戶資料.bin")
+        changed = document.tobytes(garbage=4, deflate=True)
+
+    with pytest.raises(EditorError, match="工作層無法驗證"):
+        load_workspace(changed, tmp_path / "assets")
+
+
+def test_workspace_with_valid_but_mismatched_overlay_rect_is_rejected(
+        tmp_path, pdf_bytes):
+    stamp = tmp_path / "章.png"
+    Image.new("RGBA", (20, 10), (0, 60, 255, 180)).save(stamp)
+    workspace = embed_workspace(
+        pdf_bytes, (Overlay("章-1", 0, str(stamp), (100, 110, 140, 130)),)
+    )
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        manifest = json.loads(document.embfile_get(MANIFEST_NAME).decode("utf-8"))
+    manifest["overlays"][0]["rect"] = [200, 110, 240, 130]
+    invalid = _embed_with_replaced_manifest(
+        workspace, json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+    )
+
+    with pytest.raises(EditorError, match="工作層無法驗證"):
+        load_workspace(invalid, tmp_path / "assets")
+
+
+@pytest.mark.parametrize("change", ["new_page", "same_page_text"])
+def test_workspace_with_changed_visible_snapshot_is_rejected(
+        tmp_path, pdf_bytes, change):
+    stamp = tmp_path / "章.png"
+    Image.new("RGBA", (20, 10), (0, 60, 255, 180)).save(stamp)
+    workspace = embed_workspace(
+        pdf_bytes, (Overlay("章-1", 0, str(stamp), (100, 110, 140, 130)),)
+    )
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        if change == "new_page":
+            document.new_page(width=500, height=400).insert_text((40, 40), "EXTERNAL PAGE")
+        else:
+            document[0].insert_text((40, 330), "EXTERNAL TEXT")
+        changed = document.tobytes(garbage=4, deflate=True)
+
+    with pytest.raises(EditorError, match="工作層無法驗證"):
+        load_workspace(changed, tmp_path / "assets")

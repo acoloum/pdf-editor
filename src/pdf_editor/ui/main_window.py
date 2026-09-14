@@ -26,6 +26,7 @@ from pdf_editor.legacy_overlay_conversion import (
     convert_legacy_image,
     find_convertible_images,
 )
+from pdf_editor.persistent_overlays import embed_workspace
 from pdf_editor.ocr_assets import validate_ocr_assets
 from pdf_editor.page_images import export_pages_as_png
 from pdf_editor.pages import (merge_pages,split_pages,move_pages,move_pages_to,rotate_pages,
@@ -48,7 +49,7 @@ from pdf_editor.ui.style import STYLE
 ZOOM_LEVELS=(0.25,0.5,0.75,1.0,1.25,1.5,1.75,2.0,2.5,3.0,4.0,5.0)
 
 def export_document(pdf,layers,target,source,overwrite):
-    data=flatten_overlays(pdf,layers) if layers else pdf
+    data=embed_workspace(pdf,layers) if layers else pdf
     return str(write_pdf(data,Path(target),overwrite,(Path(source),)))
 
 def export_merge(sources,order,target,paths):

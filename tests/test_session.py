@@ -1,11 +1,13 @@
 from dataclasses import replace
 
 import pytest
+import pymupdf
 from PIL import Image
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import save_as
 from pdf_editor.errors import EditorError
 from pdf_editor.model import Overlay
+from pdf_editor.persistent_overlays import embed_workspace
 
 def test_save_undo_dirty(source_path, tmp_path, pdf_bytes):
     with DocumentSession.open(source_path) as session:
@@ -83,3 +85,56 @@ def test_saved_stamp_reopens_as_editable_overlay(source_path, tmp_path):
         original = reopened.overlays[0]
         reopened.set_overlays((replace(original, rect=(260, 200, 300, 240)),))
         assert reopened.overlays[0].rect == (260, 200, 300, 240)
+
+
+def test_workspace_with_extra_attachment_falls_back_and_round_trips_bytes(
+        source_path, tmp_path):
+    stamp = tmp_path / "stamp.png"
+    Image.new("RGBA", (20, 20), (0, 0, 255, 180)).save(stamp)
+    workspace = embed_workspace(
+        source_path.read_bytes(),
+        (Overlay("章", 0, str(stamp), (200, 200, 240, 240)),),
+    )
+    attachment = b"\x00customer-attachment\xff"
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        document.embfile_add("customer.bin", attachment, filename="customer.bin")
+        modified = document.tobytes(garbage=4, deflate=True)
+    modified_path = tmp_path / "外加附件.pdf"
+    modified_path.write_bytes(modified)
+
+    with DocumentSession.open(modified_path) as session:
+        assert session.overlays == ()
+        assert "靜態 PDF" in session.open_notice
+        output = save_as(session, tmp_path / "附件往返.pdf")
+
+    with pymupdf.open(output) as document:
+        assert document.embfile_get("customer.bin") == attachment
+
+
+@pytest.mark.parametrize("change", ["new_page", "same_page_text"])
+def test_externally_changed_workspace_keeps_outer_pdf_as_static(
+        source_path, tmp_path, change):
+    stamp = tmp_path / "stamp.png"
+    Image.new("RGBA", (20, 20), (0, 0, 255, 180)).save(stamp)
+    workspace = embed_workspace(
+        source_path.read_bytes(),
+        (Overlay("章", 0, str(stamp), (200, 200, 240, 240)),),
+    )
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        if change == "new_page":
+            document.new_page(width=500, height=400).insert_text((40, 40), "EXTERNAL PAGE")
+        else:
+            document[0].insert_text((40, 330), "EXTERNAL TEXT")
+        changed = document.tobytes(garbage=4, deflate=True)
+    changed_path = tmp_path / f"外部變更-{change}.pdf"
+    changed_path.write_bytes(changed)
+
+    with DocumentSession.open(changed_path) as session:
+        assert session.overlays == ()
+        assert "靜態 PDF" in session.open_notice
+        with pymupdf.open(stream=session.pdf, filetype="pdf") as document:
+            if change == "new_page":
+                assert document.page_count == 2
+                assert "EXTERNAL PAGE" in document[1].get_text()
+            else:
+                assert "EXTERNAL TEXT" in document[0].get_text()
