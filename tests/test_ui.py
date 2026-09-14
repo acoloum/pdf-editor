@@ -132,6 +132,24 @@ def test_existing_text_editor_keeps_narrow_cell_center(qtbot, pdf_bytes):
     assert actual.y() == pytest.approx(expected.y(), abs=1)
 
 
+def test_existing_text_editor_expands_height_for_readable_input(qtbot, pdf_bytes):
+    canvas = Canvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(700, 600)
+    canvas.show()
+    canvas.display(render_page(pdf_bytes, 0, 1.0))
+    qtbot.waitExposed(canvas)
+    cell = (100, 100, 150, 114)
+
+    canvas.begin_inline_text(cell, "真直度", run=object(), size=8,
+        alignment="hcenter")
+
+    editor = canvas.inline_editor
+    expected = canvas.mapFromScene(QPointF(125, 107))
+    assert editor.height() >= editor.sizeHint().height()
+    assert editor.geometry().center().y() == pytest.approx(expected.y(), abs=1)
+
+
 def test_inline_text_editor_shows_horizontal_center_while_typing(qtbot, pdf_bytes):
     canvas = Canvas()
     qtbot.addWidget(canvas)
@@ -204,7 +222,8 @@ def test_canvas_layer_corner_drag_resizes_with_original_ratio(qtbot,pdf_bytes,tm
     item=next(item for item in canvas.scene().items() if hasattr(item,"layer"))
     assert item.isSelected()
     spy=QSignalSpy(canvas.layer_moved)
-    start=canvas.mapFromScene(item.sceneBoundingRect().bottomRight()-QPointF(2,2))
+    corner=item.mapToScene(item._content_rect().bottomRight())
+    start=canvas.mapFromScene(corner-QPointF(2,2))
     end=start+QPoint(40,20)
 
     qtbot.mousePress(canvas.viewport(),Qt.MouseButton.LeftButton,pos=start)
@@ -218,6 +237,42 @@ def test_canvas_layer_corner_drag_resizes_with_original_ratio(qtbot,pdf_bytes,tm
     assert width>80
     assert height>40
     assert width/height==pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(("corner_method","offset","drag"),(
+    ("topLeft",(-3,-3),(-40,-20)),
+    ("topRight",(3,-3),(40,-20)),
+    ("bottomLeft",(-3,3),(-40,20)),
+    ("bottomRight",(3,3),(40,20)),
+))
+def test_canvas_layer_visible_corner_area_resizes(qtbot,pdf_bytes,tmp_path,
+        corner_method,offset,drag):
+    from PIL import Image
+
+    image_path=tmp_path/"簽名.png"
+    Image.new("RGBA",(160,80),(25,25,25,220)).save(image_path)
+    layer=Overlay("signature",0,str(image_path),(100,100,180,140),0)
+    canvas=Canvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(700,600)
+    canvas.show()
+    canvas.display(render_page(pdf_bytes,0,1.0),(layer,),layer.id)
+    qtbot.waitExposed(canvas)
+    item=next(item for item in canvas.scene().items() if hasattr(item,"layer"))
+    spy=QSignalSpy(canvas.layer_moved)
+    corner=item.mapToScene(getattr(item._content_rect(),corner_method)())
+    start=canvas.mapFromScene(corner+QPointF(*offset))
+    end=start+QPoint(*drag)
+
+    qtbot.mousePress(canvas.viewport(),Qt.MouseButton.LeftButton,pos=start)
+    qtbot.mouseMove(canvas.viewport(),end)
+    qtbot.mouseRelease(canvas.viewport(),Qt.MouseButton.LeftButton,pos=end)
+
+    assert spy.count()==1
+    resized=spy.at(0)[0]
+    assert resized.rect[2]-resized.rect[0]>80
+    assert (resized.rect[2]-resized.rect[0])/(resized.rect[3]-resized.rect[1]) \
+        ==pytest.approx(2.0)
 
 def test_canvas_delete_key_emits_selected_run(qtbot, pdf_bytes):
     canvas = Canvas()

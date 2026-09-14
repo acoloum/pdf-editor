@@ -1,12 +1,15 @@
 from dataclasses import replace
 from PySide6.QtCore import Qt, Signal, QPointF, QTimer, QRectF
-from PySide6.QtGui import QPixmap, QPen, QColor, QTransform, QPainter, QKeyEvent, QBrush
+from PySide6.QtGui import (QPixmap,QPen,QColor,QTransform,QPainter,QKeyEvent,QBrush,
+    QPainterPath)
 from PySide6.QtWidgets import (QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,
     QGraphicsItem,QLabel,QLineEdit)
 from pdf_editor.engine.geometry import transformed_rect, transform_point, inverse_transform
 from pdf_editor.engine.overlay import transformed_image
 
 class LayerItem(QGraphicsPixmapItem):
+    HANDLE_RADIUS=6
+
     def __init__(self,pix,layer,canvas):
         super().__init__(pix)
         self.layer,self.canvas=layer,canvas
@@ -19,8 +22,28 @@ class LayerItem(QGraphicsPixmapItem):
         self.resize_scale=1.0
         self.setAcceptHoverEvents(True)
 
+    def _content_rect(self):
+        return super().boundingRect()
+
+    def boundingRect(self):
+        return self._content_rect().adjusted(-self.HANDLE_RADIUS,-self.HANDLE_RADIUS,
+            self.HANDLE_RADIUS,self.HANDLE_RADIUS)
+
+    def shape(self):
+        path=QPainterPath()
+        path.setFillRule(Qt.FillRule.WindingFill)
+        content=self._content_rect()
+        path.addRect(content)
+        if self.isSelected():
+            for corner in (content.topLeft(),content.topRight(),content.bottomLeft(),
+                    content.bottomRight()):
+                path.addRect(QRectF(corner.x()-self.HANDLE_RADIUS,
+                    corner.y()-self.HANDLE_RADIUS,self.HANDLE_RADIUS*2,
+                    self.HANDLE_RADIUS*2))
+        return path
+
     def _corner_at(self,point):
-        rect=self.boundingRect()
+        rect=self._content_rect()
         corners={"top_left":rect.topLeft(),"top_right":rect.topRight(),
             "bottom_left":rect.bottomLeft(),"bottom_right":rect.bottomRight()}
         for name,corner in corners.items():
@@ -59,10 +82,10 @@ class LayerItem(QGraphicsPixmapItem):
         pen.setCosmetic(True)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(self.boundingRect())
+        painter.drawRect(self._content_rect())
         painter.setBrush(QBrush(QColor("white")))
-        for corner in (self.boundingRect().topLeft(),self.boundingRect().topRight(),
-                self.boundingRect().bottomLeft(),self.boundingRect().bottomRight()):
+        for corner in (self._content_rect().topLeft(),self._content_rect().topRight(),
+                self._content_rect().bottomLeft(),self._content_rect().bottomRight()):
             painter.drawRect(QRectF(corner.x()-5,corner.y()-5,10,10))
         painter.restore()
 
@@ -88,7 +111,7 @@ class LayerItem(QGraphicsPixmapItem):
         corner=self._corner_at(event.pos())
         if corner:
             self.resize_corner=corner
-            self.resize_start=self.sceneBoundingRect()
+            self.resize_start=self.mapRectToScene(self._content_rect())
             self.resize_scale=1.0
             event.accept()
             return
@@ -108,7 +131,7 @@ class LayerItem(QGraphicsPixmapItem):
 
     def mouseReleaseEvent(self,event):
         if self.resize_corner:
-            rect=self.sceneBoundingRect()
+            rect=self.mapRectToScene(self._content_rect())
             center=rect.center()
             cx,cy=transform_point(inverse_transform(self.canvas.matrix),center.x(),center.y())
             original=self.layer.rect
@@ -545,14 +568,19 @@ class Canvas(QGraphicsView):
         if self.inline_run is None:
             width=max(100,bottom_right.x()-top_left.x()+12)
             height=max(30,bottom_right.y()-top_left.y()+8)
+            left=top_left.x()
+            top=top_left.y()
         else:
-            # 編輯既有文字時貼齊原文字框，避免窄表格儲存格在套用後產生視覺跳位。
+            # 編輯框維持原文字中心，同時保留足以完整顯示輸入字型的高度。
             width=max(1,bottom_right.x()-top_left.x())
-            height=max(1,bottom_right.y()-top_left.y())
+            height=max(self.inline_editor.sizeHint().height(),
+                bottom_right.y()-top_left.y())
+            left=(top_left.x()+bottom_right.x()-width)/2
+            top=(top_left.y()+bottom_right.y()-height)/2
         width=min(width,max(100,self.viewport().width()-12))
-        left=max(6,min(top_left.x(),self.viewport().width()-width-6))
-        top=max(6,min(top_left.y(),self.viewport().height()-height-6))
-        self.inline_editor.setGeometry(left,top,width,height)
+        left=max(6,min(round(left),self.viewport().width()-width-6))
+        top=max(6,min(round(top),self.viewport().height()-height-6))
+        self.inline_editor.setGeometry(round(left),round(top),round(width),round(height))
 
     def _finish_inline_editor(self):
         editor=self.inline_editor
