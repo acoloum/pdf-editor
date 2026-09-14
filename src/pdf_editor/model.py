@@ -51,6 +51,17 @@ class Overlay:
     rect: Rect
     angle: float = 0
 
+
+@dataclass(frozen=True)
+class LegacyImageCandidate:
+    """可安全抽離為可編輯圖章的既有 PDF 影像。"""
+    xref: int
+    page: int
+    rect: Rect
+    png: bytes
+    width: int
+    height: int
+
 @dataclass(frozen=True)
 class AnnotationInfo:
     xref: int
