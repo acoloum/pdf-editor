@@ -7,7 +7,7 @@ import pymupdf
 from PIL import Image
 from PySide6.QtCore import Qt, QPoint, QPointF, QItemSelectionModel, QEvent, QCoreApplication
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import QAbstractItemView
+from PySide6.QtWidgets import QAbstractItemView,QToolBar
 from PySide6.QtTest import QSignalSpy
 from pdf_editor.ui.main_window import MainWindow
 from pdf_editor.engine.render import render_page
@@ -902,6 +902,20 @@ def test_window_zoom_buttons_have_keyboard_shortcuts(qtbot):
     assert QKeySequence("Ctrl+-") in window.actions["zoom_out"].shortcuts()
     assert QKeySequence("Ctrl++") in window.actions["zoom_in"].shortcuts()
     assert QKeySequence("Ctrl+=") in window.actions["zoom_in"].shortcuts()
+
+
+def test_window_zoom_buttons_are_visible_at_default_width(qtbot):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1320,850)
+    window.show()
+    QCoreApplication.processEvents()
+
+    for name in ("zoom_out","zoom_in"):
+        action=window.actions[name]
+        toolbar=next(bar for bar in window.findChildren(QToolBar)
+            if action in bar.actions())
+        assert toolbar.widgetForAction(action).isVisible()
 
 
 def test_window_zoom_keeps_visible_page_center(qtbot,source_path):

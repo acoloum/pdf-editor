@@ -238,7 +238,6 @@ class MainWindow(QMainWindow):
         self.page_spin.setSuffix(" 頁")
         self.page_spin.setRange(1,1)
         self.page_spin.valueChanged.connect(lambda n:self.goto_page(n-1))
-        toolbar.addWidget(self.page_spin)
         for name,label,handler,shortcuts,tip in [
             ("zoom_out","－",lambda:self.zoom_by(-1),("Ctrl+-",),"縮小頁面（Ctrl+-）"),
             ("zoom_in","＋",lambda:self.zoom_by(1),("Ctrl++","Ctrl+="),"放大頁面（Ctrl++）")]:
@@ -246,14 +245,12 @@ class MainWindow(QMainWindow):
             action.triggered.connect(handler)
             action.setShortcuts([QKeySequence(key) for key in shortcuts])
             action.setToolTip(tip)
-            toolbar.addAction(action)
             self.actions[name]=action
         self.zoom=QComboBox()
         self.zoom.addItems(["適合頁面","適合寬度"]+
             [f"{round(level*100)}%" for level in ZOOM_LEVELS])
         self.zoom.setCurrentText("125%")
         self.zoom.currentTextChanged.connect(self.change_zoom)
-        toolbar.addWidget(self.zoom)
         self.addToolBarBreak()
         search_toolbar=QToolBar("文件搜尋",self)
         search_toolbar.setMovable(False)
@@ -280,6 +277,11 @@ class MainWindow(QMainWindow):
         self.actions["search_next"]=next_result
         self.search_count=QLabel("0 / 0")
         search_toolbar.addWidget(self.search_count)
+        search_toolbar.addSeparator()
+        search_toolbar.addWidget(self.page_spin)
+        search_toolbar.addAction(self.actions["zoom_out"])
+        search_toolbar.addWidget(self.zoom)
+        search_toolbar.addAction(self.actions["zoom_in"])
         splitter=QSplitter()
         self.thumbs=ThumbnailList()
         self.thumbs.setIconSize(QSize(110,140))
