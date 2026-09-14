@@ -1,6 +1,7 @@
 import pymupdf
 from pdf_editor.model import DocumentAccess
 from pdf_editor.errors import EditorError
+from pdf_editor.persistent_overlays import has_only_workspace_embedded_files
 
 def _access(doc):
     root = doc.pdf_catalog()
@@ -8,7 +9,9 @@ def _access(doc):
     special = form_type not in ("null", "none") or any(p.first_widget for p in doc)
     signed = doc.get_sigflags() > 0
     restricted = not (doc.permissions & pymupdf.PDF_PERM_MODIFY)
-    attachments = doc.embfile_count() > 0 or any(
+    attachments = (
+        doc.embfile_count() > 0 and not has_only_workspace_embedded_files(doc)
+    ) or any(
         a.type[0] == pymupdf.PDF_ANNOT_FILE_ATTACHMENT for p in doc for a in (p.annots() or []))
     reason = ("包含互動表單或簽章，第一版僅供閱讀。" if special or signed else
               "文件不允許修改。" if restricted else

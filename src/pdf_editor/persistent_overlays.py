@@ -29,6 +29,20 @@ class PersistentOverlayBundle:
     overlays: tuple[Overlay, ...]
 
 
+def has_only_workspace_embedded_files(document) -> bool:
+    """判斷內嵌檔是否全屬本程式保留的工作層命名空間。"""
+    names = set(document.embfile_names())
+    return (
+        bool(names)
+        and MANIFEST_NAME in names
+        and BASE_NAME in names
+        and all(
+            name in {MANIFEST_NAME, BASE_NAME} or name.startswith(ASSET_PREFIX)
+            for name in names
+        )
+    )
+
+
 def embed_workspace(base_pdf: bytes, overlays: tuple[Overlay, ...]) -> bytes:
     """輸出可直接顯示，且附帶可還原圖章資料的 PDF。"""
     assets, manifest_overlays = _prepare_assets(overlays)

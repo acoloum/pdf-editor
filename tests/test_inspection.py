@@ -1,7 +1,11 @@
 import pymupdf
 import pytest
+from PIL import Image
+
 from pdf_editor.engine.inspection import inspect_pdf, unlock_pdf
 from pdf_editor.errors import EditorError
+from pdf_editor.model import Overlay
+from pdf_editor.persistent_overlays import embed_workspace
 
 def test_form_is_read_only(pdf_bytes):
     with pymupdf.open(stream=pdf_bytes) as doc:
@@ -18,6 +22,19 @@ def test_attachment_blocks_reorganization(pdf_bytes):
         doc.embfile_add("note.txt", b"note")
         access = inspect_pdf(doc.tobytes(), None)
     assert not access.can_reorganize
+
+
+def test_internal_stamp_workspace_does_not_block_reorganization(pdf_bytes, tmp_path):
+    stamp = tmp_path / "stamp.png"
+    Image.new("RGBA", (20, 10), (0, 40, 255, 255)).save(stamp)
+    workspace = embed_workspace(
+        pdf_bytes,
+        (Overlay("stamp", 0, str(stamp), (100, 100, 120, 110)),),
+    )
+
+    access = inspect_pdf(workspace)
+
+    assert access.can_reorganize
 
 def test_password_and_restricted_permissions(pdf_bytes):
     with pymupdf.open(stream=pdf_bytes) as doc:

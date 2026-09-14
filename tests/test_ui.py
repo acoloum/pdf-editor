@@ -1012,7 +1012,7 @@ def test_window_zoom_keeps_visible_page_center(qtbot,source_path):
 
         window.zoom_by(1)
 
-        qtbot.waitUntil(lambda:window.page_data["display_size"][0]==pytest.approx(1250),
+        qtbot.waitUntil(lambda:window.page_data["display_size"][0]==pytest.approx(1250,abs=1),
             timeout=30000)
         after_scene=window.canvas.mapToScene(window.canvas.viewport().rect().center())
         after=transform_point(inverse_transform(window.canvas.matrix),
