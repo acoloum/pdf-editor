@@ -22,6 +22,10 @@ from pdf_editor.templates import HeaderFooterTemplateStore
 from pdf_editor.search import find_text
 from pdf_editor.ocr import ocr_pages
 from pdf_editor.comparison import compare_pages
+from pdf_editor.legacy_overlay_conversion import (
+    convert_legacy_image,
+    find_convertible_images,
+)
 from pdf_editor.ocr_assets import validate_ocr_assets
 from pdf_editor.page_images import export_pages_as_png
 from pdf_editor.pages import (merge_pages,split_pages,move_pages,move_pages_to,rotate_pages,
@@ -36,6 +40,7 @@ from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.ui.overlay_panel import OverlayPanel
 from pdf_editor.ui.signature_dialog import SignatureDialog
 from pdf_editor.ui.comparison_dialog import ComparisonDialog
+from pdf_editor.ui.legacy_stamp_dialog import LegacyStampDialog
 from pdf_editor.ui.page_dialogs import (MergeDialog,SplitDialog,CropPagesDialog,
     PageDecorationDialog,HeaderFooterTemplatesDialog)
 from pdf_editor.ui.style import STYLE
@@ -168,6 +173,7 @@ class MainWindow(QMainWindow):
             ("redo","重做",lambda:self.history_step(True),"Ctrl+Y"),
             ("add_text","新增文字",self.start_text_insertion,"Ctrl+T"),
             ("stamp","蓋章",self.add_stamp,None),
+            ("convert_stamp","轉換既有圖章",self.convert_legacy_stamp,None),
             ("signature","手寫簽名",self.add_signature,None),
             ("collection","常用圖章",self.add_collection,None),
             ("ocr","OCR 文字辨識",self.run_ocr,None),
@@ -343,8 +349,8 @@ class MainWindow(QMainWindow):
     def refresh_actions(self):
         active=self.session is not None
         edit=active and self.session.access.can_edit and not self.busy
-        for name in ("save","add_text","stamp","signature","collection","page_marks",
-                "header_footer"):
+        for name in ("save","add_text","stamp","convert_stamp","signature","collection",
+                "page_marks","header_footer"):
             self.actions[name].setEnabled(edit)
         self.actions["undo"].setEnabled(edit and self.session.can_undo)
         self.actions["redo"].setEnabled(edit and self.session.can_redo)
@@ -1591,6 +1597,91 @@ class MainWindow(QMainWindow):
         name,_=QFileDialog.getOpenFileName(self,"匯入圖章或簽名","","PNG (*.png)")
         if name:
             self.import_layer(Path(name),True)
+
+    def convert_legacy_stamp(self):
+        """掃描文件，讓使用者明確選取後將既有圖章抽離為工作層。"""
+        if (not self.session or self.busy or not self.session.access.can_edit
+                or self.preview):
+            return
+        token = self.token
+        revision = self.session.revision
+        pdf = self.session.pdf
+        self.busy = True
+        self.refresh_actions()
+        self.statusBar().showMessage("正在掃描可安全轉換的既有圖章…")
+
+        def done(candidates):
+            self._show_legacy_stamp_candidates(candidates, pdf, token, revision)
+
+        def failed(error):
+            self._finish_legacy_stamp_failure(error, token, revision)
+
+        self.jobs.submit(find_convertible_images, (pdf,), done, failed)
+
+    def _show_legacy_stamp_candidates(self, candidates, pdf, token, revision):
+        if not self._legacy_stamp_context_is_current(token, revision):
+            self._restore_after_legacy_stamp_job()
+            return
+        if not candidates:
+            self._restore_after_legacy_stamp_job()
+            self.statusBar().showMessage(
+                "沒有可安全轉換的既有圖章；Logo、整頁掃描與重複影像不會列出。"
+            )
+            return
+
+        dialog = LegacyStampDialog(candidates, self)
+        if not dialog.exec() or dialog.selected_candidate is None:
+            self._restore_after_legacy_stamp_job()
+            self.statusBar().showMessage("已取消轉換既有圖章。")
+            return
+
+        candidate = dialog.selected_candidate
+        self.statusBar().showMessage("正在轉換選取的既有圖章…")
+
+        def done(result):
+            self._apply_converted_legacy_stamp(result, token, revision)
+
+        def failed(error):
+            self._finish_legacy_stamp_failure(error, token, revision)
+
+        self.jobs.submit(
+            convert_legacy_image,
+            (pdf, candidate, self.asset_root),
+            done,
+            failed,
+        )
+
+    def _apply_converted_legacy_stamp(self, result, token, revision):
+        self.busy = False
+        if not self._legacy_stamp_context_is_current(token, revision):
+            self.refresh_actions()
+            return
+        try:
+            base_pdf, layer = result
+            self.session.apply_state(base_pdf, self.session.overlays + (layer,))
+            self.clear_search_results()
+            self.page_data = None
+            self.select_layer(layer.id)
+            self.refresh_actions()
+            self.request_render("已轉換為可編輯圖章。")
+            self.queue_thumbnail(layer.page, self.token, self.session.revision)
+        except Exception as exc:
+            self.error((getattr(exc, "code", "STAMP_CONVERSION"), str(exc), ()))
+
+    def _finish_legacy_stamp_failure(self, error, token, revision):
+        self.busy = False
+        if not self._legacy_stamp_context_is_current(token, revision):
+            self.refresh_actions()
+            return
+        self.error(error)
+
+    def _restore_after_legacy_stamp_job(self):
+        self.busy = False
+        self.refresh_actions()
+
+    def _legacy_stamp_context_is_current(self, token, revision):
+        return (not self.closed and self.session is not None
+            and token == self.token and revision == self.session.revision)
 
     def add_collection(self):
         name,_=QFileDialog.getOpenFileName(self,"選擇常用圖章",str(self.asset_root),"PNG (*.png)")

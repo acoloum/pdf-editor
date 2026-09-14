@@ -7,19 +7,40 @@ import pymupdf
 from PIL import Image
 from PySide6.QtCore import Qt, QPoint, QPointF, QItemSelectionModel, QEvent, QCoreApplication
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import QAbstractItemView,QToolBar
+from PySide6.QtWidgets import QAbstractItemView,QDialog,QToolBar
 from PySide6.QtTest import QSignalSpy
 from pdf_editor.ui.main_window import MainWindow
+import pdf_editor.ui.main_window as main_window
 from pdf_editor.engine.render import render_page
 from pdf_editor.engine.geometry import transform_point, inverse_transform
 from pdf_editor.ui.signature_dialog import SignatureDialog
 from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.annotations import mark_text
-from pdf_editor.model import Overlay
+from pdf_editor.model import LegacyImageCandidate, Overlay
 from pdf_editor.ocr import OcrResult
 from pdf_editor.comparison import PageComparison, compare_pages
 from test_text import request_for
+
+
+def _legacy_candidate(page=0, xref=17, rect=(20, 30, 100, 70)):
+    stream = io.BytesIO()
+    Image.new("RGBA", (80, 40), (30, 70, 210, 255)).save(stream, format="PNG")
+    return LegacyImageCandidate(xref, page, rect, stream.getvalue(), 80, 40)
+
+
+def test_legacy_stamp_dialog_requires_explicit_candidate(qtbot):
+    from pdf_editor.ui.legacy_stamp_dialog import LegacyStampDialog
+
+    candidates = (_legacy_candidate(page=0), _legacy_candidate(page=2, xref=23))
+    dialog = LegacyStampDialog(candidates)
+    qtbot.addWidget(dialog)
+
+    assert not dialog.ok_button.isEnabled()
+    assert dialog.selected_candidate is None
+    dialog.list.setCurrentRow(1)
+    assert dialog.ok_button.isEnabled()
+    assert dialog.selected_candidate == candidates[1]
 
 def test_reader_preview_apply_undo(qtbot, source_path, font_path):
     window = MainWindow()
@@ -1831,5 +1852,181 @@ def test_choose_comparison_pdf_reports_file_read_error(
 
         assert errors and errors[0][0] == "OPEN"
         assert window.comparison_dialog is None
+    finally:
+        window.close()
+
+
+def _open_window_for_legacy_stamp(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.open_document(source_path)
+    qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+    qtbot.waitUntil(lambda: not window.jobs.pending, timeout=30000)
+    return window
+
+
+def _accept_first_legacy_candidate(dialog):
+    dialog.list.setCurrentRow(0)
+    return QDialog.DialogCode.Accepted
+
+
+def test_window_exposes_legacy_stamp_conversion_only_for_open_idle_document(
+        qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        assert window.actions["convert_stamp"].text() == "轉換既有圖章"
+        assert not window.actions["convert_stamp"].isEnabled()
+
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        assert window.actions["convert_stamp"].isEnabled()
+
+        window.busy = True
+        window.refresh_actions()
+        assert not window.actions["convert_stamp"].isEnabled()
+    finally:
+        window.busy = False
+        window.close()
+
+
+def test_window_converts_selected_legacy_stamp_into_layer(
+        qtbot, source_path, tmp_path, monkeypatch):
+    candidate = _legacy_candidate()
+    asset_path = tmp_path / "轉換圖章.png"
+    asset_path.write_bytes(candidate.png)
+    converted_layer = Overlay(
+        "converted-stamp", candidate.page, str(asset_path), candidate.rect, 0)
+    calls = []
+
+    def fake_convert(pdf, selected, asset_root):
+        calls.append((selected, asset_root))
+        return pdf, converted_layer
+
+    monkeypatch.setattr(main_window.Jobs, "submit", _submit_synchronously)
+    monkeypatch.setattr(main_window, "find_convertible_images", lambda pdf: (candidate,))
+    monkeypatch.setattr(main_window, "convert_legacy_image", fake_convert)
+    monkeypatch.setattr(main_window.LegacyStampDialog, "exec",
+        _accept_first_legacy_candidate)
+    window = _open_window_for_legacy_stamp(qtbot, source_path)
+    try:
+        window.convert_legacy_stamp()
+
+        assert window.session.overlays == (converted_layer,)
+        assert window.layer_id == converted_layer.id
+        assert window.session.dirty
+        assert calls == [(candidate, window.asset_root)]
+        assert not window.busy
+        assert window.statusBar().currentMessage() == "已轉換為可編輯圖章。"
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_window_reports_when_no_legacy_stamp_candidate_exists(
+        qtbot, source_path, monkeypatch):
+    monkeypatch.setattr(main_window.Jobs, "submit", _submit_synchronously)
+    monkeypatch.setattr(main_window, "find_convertible_images", lambda pdf: ())
+    window = _open_window_for_legacy_stamp(qtbot, source_path)
+    try:
+        before = window.session.history.index
+
+        window.convert_legacy_stamp()
+
+        assert window.session.history.index == before
+        assert window.session.overlays == ()
+        assert not window.busy
+        assert window.actions["convert_stamp"].isEnabled()
+        assert "沒有可安全轉換" in window.statusBar().currentMessage()
+    finally:
+        window.close()
+
+
+def test_window_cancelled_legacy_stamp_conversion_keeps_document_unchanged(
+        qtbot, source_path, monkeypatch):
+    candidate = _legacy_candidate()
+    monkeypatch.setattr(main_window.Jobs, "submit", _submit_synchronously)
+    monkeypatch.setattr(main_window, "find_convertible_images", lambda pdf: (candidate,))
+    monkeypatch.setattr(main_window.LegacyStampDialog, "exec",
+        lambda dialog: QDialog.DialogCode.Rejected)
+    monkeypatch.setattr(main_window, "convert_legacy_image",
+        lambda *args: pytest.fail("取消後不應執行轉換"))
+    window = _open_window_for_legacy_stamp(qtbot, source_path)
+    try:
+        before = window.session.history.index
+
+        window.convert_legacy_stamp()
+
+        assert window.session.history.index == before
+        assert window.session.overlays == ()
+        assert not window.busy
+        assert window.actions["convert_stamp"].isEnabled()
+    finally:
+        window.close()
+
+
+def test_window_ignores_stale_legacy_stamp_scan_result(
+        qtbot, source_path, monkeypatch):
+    candidate = _legacy_candidate()
+    opened_dialogs = []
+    monkeypatch.setattr(main_window.LegacyStampDialog, "__init__",
+        lambda self, candidates, parent=None: opened_dialogs.append(tuple(candidates)))
+    window = _open_window_for_legacy_stamp(qtbot, source_path)
+    try:
+        pending = _defer_window_jobs(window)
+        window.convert_legacy_stamp()
+        window.token += 1
+
+        pending.pop(0)[2]((candidate,))
+
+        assert opened_dialogs == []
+        assert window.session.overlays == ()
+        assert not window.busy
+    finally:
+        window.close()
+
+
+def test_window_ignores_legacy_stamp_conversion_after_revision_changes(
+        qtbot, source_path, tmp_path, monkeypatch):
+    candidate = _legacy_candidate()
+    asset_path = tmp_path / "過期圖章.png"
+    asset_path.write_bytes(candidate.png)
+    converted_layer = Overlay(
+        "stale-stamp", candidate.page, str(asset_path), candidate.rect, 0)
+    monkeypatch.setattr(main_window.LegacyStampDialog, "exec",
+        _accept_first_legacy_candidate)
+    window = _open_window_for_legacy_stamp(qtbot, source_path)
+    try:
+        pending = _defer_window_jobs(window)
+        window.convert_legacy_stamp()
+        pending.pop(0)[2]((candidate,))
+        assert len(pending) == 1
+
+        window.session.set_overlays(())
+        pending.pop(0)[2]((window.session.pdf, converted_layer))
+
+        assert converted_layer not in window.session.overlays
+        assert window.layer_id is None
+        assert not window.busy
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
+
+
+def test_window_legacy_stamp_scan_failure_restores_controls(
+        qtbot, source_path, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(main_window.QMessageBox, "warning",
+        lambda parent, title, message: warnings.append((title, message)))
+    window = _open_window_for_legacy_stamp(qtbot, source_path)
+    try:
+        pending = _defer_window_jobs(window)
+        window.convert_legacy_stamp()
+
+        pending.pop(0)[3](("STAMP_CONVERSION", "無法掃描圖章。", ()))
+
+        assert not window.busy
+        assert window.actions["convert_stamp"].isEnabled()
+        assert warnings == [("無法完成操作", "無法掃描圖章。")]
     finally:
         window.close()
