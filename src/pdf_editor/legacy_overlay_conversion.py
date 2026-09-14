@@ -62,9 +62,7 @@ def _image_uses(document) -> dict[int, list[tuple[int, tuple[float, float, float
         xrefs = {image[0] for image in page.get_images(full=True) if image[0] > 0}
         for xref in xrefs:
             for rect in page.get_image_rects(xref):
-                location = (page_number, _rect_tuple(rect))
-                if location not in uses.setdefault(xref, []):
-                    uses[xref].append(location)
+                uses.setdefault(xref, []).append((page_number, _rect_tuple(rect)))
     return uses
 
 

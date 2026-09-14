@@ -56,6 +56,15 @@ def _single_scanned_page_pdf():
         return document.tobytes(garbage=4, deflate=True)
 
 
+def _pdf_with_image_drawn_twice_at_same_rect():
+    stamp = _png((60, 40), (0, 60, 255, 255))
+    with pymupdf.open() as document:
+        page = document.new_page(width=500, height=400)
+        page.insert_image((210, 260, 270, 300), stream=stamp)
+        page.insert_image((210, 260, 270, 300), stream=stamp)
+        return document.tobytes(garbage=4, deflate=True)
+
+
 def _blue_stamp_pixels(pdf):
     with pymupdf.open(stream=pdf, filetype="pdf") as document:
         pixmap = document[0].get_pixmap(alpha=False)
@@ -87,6 +96,10 @@ def test_convert_legacy_stamp_removes_base_image_and_returns_overlay(tmp_path):
 
 def test_full_page_scan_is_not_a_convertible_stamp():
     assert find_convertible_images(_single_scanned_page_pdf()) == ()
+
+
+def test_same_image_drawn_twice_at_same_rect_is_not_a_convertible_stamp():
+    assert find_convertible_images(_pdf_with_image_drawn_twice_at_same_rect()) == ()
 
 
 def test_stale_candidate_cannot_change_pdf(tmp_path):
