@@ -30,17 +30,69 @@ class PersistentOverlayBundle:
 
 
 def has_only_workspace_embedded_files(document) -> bool:
-    """判斷內嵌檔是否全屬本程式保留的工作層命名空間。"""
-    names = set(document.embfile_names())
-    return (
-        bool(names)
-        and MANIFEST_NAME in names
-        and BASE_NAME in names
-        and all(
-            name in {MANIFEST_NAME, BASE_NAME} or name.startswith(ASSET_PREFIX)
-            for name in names
-        )
-    )
+    """只接受經 manifest 完整引用且可驗證的工作層內嵌檔。"""
+    try:
+        names = set(document.embfile_names())
+        if MANIFEST_NAME not in names or BASE_NAME not in names:
+            return False
+        base_pdf = document.embfile_get(BASE_NAME)
+        manifest = _validate_manifest(document.embfile_get(MANIFEST_NAME), base_pdf)
+        referenced_assets = {
+            _validated_overlay_data(
+                item, names, document, manifest["page_count"]
+            )[4]
+            for item in manifest["overlays"]
+        }
+        return names == {
+            MANIFEST_NAME,
+            BASE_NAME,
+            *referenced_assets,
+        }
+    except Exception:
+        return False
+
+
+def _validated_overlay_data(item: object, names: set[str], document, page_count: int):
+    """驗證圖層描述及資產內容，供載入與附件分類共用。"""
+    try:
+        if not isinstance(item, dict) or set(item) != {
+            "id", "page", "rect", "angle", "asset_name", "asset_sha256"
+        }:
+            raise ValueError()
+        identifier = item["id"]
+        page = item["page"]
+        rect = item["rect"]
+        angle = item["angle"]
+        asset_name = item["asset_name"]
+        asset_sha256 = item["asset_sha256"]
+        if (
+            not isinstance(identifier, str)
+            or not isinstance(page, int)
+            or isinstance(page, bool)
+            or not 0 <= page < page_count
+            or not isinstance(rect, list)
+            or len(rect) != 4
+            or not all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+                for value in rect
+            )
+            or not isinstance(angle, (int, float))
+            or isinstance(angle, bool)
+            or not math.isfinite(angle)
+            or not isinstance(asset_name, str)
+            or not asset_name.startswith(ASSET_PREFIX)
+            or not isinstance(asset_sha256, str)
+            or asset_name not in names
+        ):
+            raise ValueError()
+        content = document.embfile_get(asset_name)
+        if _sha256(content) != asset_sha256:
+            raise ValueError()
+        return identifier, page, tuple(rect), angle, asset_name, content
+    except Exception as exc:
+        raise EditorError("WORKSPACE", _WORKSPACE_ERROR) from exc
 
 
 def embed_workspace(base_pdf: bytes, overlays: tuple[Overlay, ...]) -> bytes:
@@ -156,45 +208,13 @@ def _restore_overlay(
     created_assets: set[Path],
 ) -> Overlay:
     try:
-        if not isinstance(item, dict) or set(item) != {
-            "id", "page", "rect", "angle", "asset_name", "asset_sha256"
-        }:
-            raise ValueError()
-        identifier = item["id"]
-        page = item["page"]
-        rect = item["rect"]
-        angle = item["angle"]
-        asset_name = item["asset_name"]
-        asset_sha256 = item["asset_sha256"]
-        if (
-            not isinstance(identifier, str)
-            or not isinstance(page, int)
-            or isinstance(page, bool)
-            or not 0 <= page < page_count
-            or not isinstance(rect, list)
-            or len(rect) != 4
-            or not all(
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
-                and math.isfinite(value)
-                for value in rect
-            )
-            or not isinstance(angle, (int, float))
-            or isinstance(angle, bool)
-            or not math.isfinite(angle)
-            or not isinstance(asset_name, str)
-            or not asset_name.startswith(ASSET_PREFIX)
-            or not isinstance(asset_sha256, str)
-            or asset_name not in names
-        ):
-            raise ValueError()
-        content = document.embfile_get(asset_name)
-        if _sha256(content) != asset_sha256:
-            raise ValueError()
+        identifier, page, rect, angle, _asset_name, content = _validated_overlay_data(
+            item, names, document, page_count
+        )
         path = asset_store.import_png_bytes(content)
         if path not in existing_assets:
             created_assets.add(path)
-        return Overlay(identifier, page, str(path), tuple(rect), angle)
+        return Overlay(identifier, page, str(path), rect, angle)
     except Exception as exc:
         raise EditorError("WORKSPACE", _WORKSPACE_ERROR) from exc
 

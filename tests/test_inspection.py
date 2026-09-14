@@ -36,6 +36,23 @@ def test_internal_stamp_workspace_does_not_block_reorganization(pdf_bytes, tmp_p
 
     assert access.can_reorganize
 
+
+def test_unreferenced_internal_named_attachment_blocks_reorganization(
+        pdf_bytes, tmp_path):
+    stamp = tmp_path / "stamp.png"
+    Image.new("RGBA", (20, 10), (0, 40, 255, 255)).save(stamp)
+    workspace = embed_workspace(
+        pdf_bytes,
+        (Overlay("stamp", 0, str(stamp), (100, 100, 120, 110)),),
+    )
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        document.embfile_add("moye-pdf/assets/manual.pdf", b"manual")
+        contaminated = document.tobytes(garbage=4, deflate=True)
+
+    access = inspect_pdf(contaminated)
+
+    assert not access.can_reorganize
+
 def test_password_and_restricted_permissions(pdf_bytes):
     with pymupdf.open(stream=pdf_bytes) as doc:
         encrypted = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256,
