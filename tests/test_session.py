@@ -171,3 +171,35 @@ def test_workspace_with_pillow_expanded_rotation_falls_back_to_static(
         assert session.overlays == ()
         assert session.open_notice is not None
         assert "靜態 PDF" in session.open_notice
+
+
+def test_externally_revised_annotation_falls_back_and_survives_resave(tmp_path):
+    source = tmp_path / "原始註解.pdf"
+    with pymupdf.open() as document:
+        page = document.new_page(width=300, height=220)
+        page.add_text_annot((60, 60), "ORIGINAL NOTE")
+        source.write_bytes(document.tobytes(garbage=4, deflate=True))
+    stamp = tmp_path / "stamp.png"
+    Image.new("RGBA", (20, 20), (0, 40, 255, 180)).save(stamp)
+    workspace = embed_workspace(
+        source.read_bytes(),
+        (Overlay("章", 0, str(stamp), (180, 140, 220, 180)),),
+    )
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        page = document[0]
+        annotation = next(page.annots())
+        annotation.set_info(content="THIRD PARTY REVISED NOTE")
+        modified = document.tobytes(garbage=4, deflate=True)
+    modified_path = tmp_path / "第三方修改註解.pdf"
+    modified_path.write_bytes(modified)
+
+    with DocumentSession.open(modified_path) as session:
+        assert session.overlays == ()
+        assert session.open_notice is not None
+        assert "靜態 PDF" in session.open_notice
+        output = save_as(session, tmp_path / "註解往返.pdf")
+
+    with pymupdf.open(output) as document:
+        page = document[0]
+        annotation = next(page.annots())
+        assert annotation.info["content"] == "THIRD PARTY REVISED NOTE"

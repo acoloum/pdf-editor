@@ -274,3 +274,26 @@ def test_workspace_detects_one_native_pixel_resource_translation(tmp_path):
 
     with pytest.raises(EditorError, match="工作層無法驗證"):
         load_workspace(modified, tmp_path / "assets")
+
+
+@pytest.mark.parametrize("change", ["add", "delete"])
+def test_workspace_rejects_external_annotation_set_changes(tmp_path, change):
+    with pymupdf.open() as base:
+        page = base.new_page(width=300, height=220)
+        page.add_text_annot((60, 60), "ORIGINAL NOTE")
+        base_pdf = base.tobytes(garbage=4, deflate=True)
+    stamp = tmp_path / "章.png"
+    Image.new("RGBA", (10, 10), (0, 60, 255, 255)).save(stamp)
+    workspace = embed_workspace(
+        base_pdf, (Overlay("章", 0, str(stamp), (180, 140, 200, 160)),)
+    )
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        page = document[0]
+        if change == "add":
+            page.add_text_annot((100, 60), "ADDED NOTE")
+        else:
+            page.delete_annot(next(page.annots()))
+        modified = document.tobytes(garbage=4, deflate=True)
+
+    with pytest.raises(EditorError, match="工作層無法驗證"):
+        load_workspace(modified, tmp_path / "assets")

@@ -280,6 +280,8 @@ def _visible_fingerprint(pdf_or_document) -> str:
         digest = hashlib.sha256()
         digest.update(str(document.page_count).encode("ascii"))
         semantic_cache = {}
+        annotation_cache = {}
+        reference_tokens = _document_reference_tokens(document)
         for page in document:
             geometry = (
                 tuple(page.mediabox), tuple(page.cropbox), page.rotation,
@@ -288,29 +290,54 @@ def _visible_fingerprint(pdf_or_document) -> str:
             pixmap = page.get_pixmap(matrix=pymupdf.Matrix(1, 1), alpha=True)
             digest.update(f"{pixmap.width}:{pixmap.height}:{pixmap.n}".encode("ascii"))
             digest.update(pixmap.samples)
-            digest.update(_page_semantic_fingerprint(document, page, semantic_cache))
+            digest.update(_page_semantic_fingerprint(
+                document,
+                page,
+                semantic_cache,
+                annotation_cache,
+                reference_tokens,
+            ))
         return digest.hexdigest()
     finally:
         if owns_document:
             document.close()
 
 
-def _page_semantic_fingerprint(document, page, cache) -> bytes:
-    """雜湊頁面內容串流與資源圖；不遍歷 Catalog，因此排除內部附件。"""
+def _page_semantic_fingerprint(
+        document, page, cache, annotation_cache, reference_tokens) -> bytes:
+    """雜湊頁面內容、資源與註解；不向上遍歷文件樹或附件。"""
     digest = hashlib.sha256()
     contents = tuple(page.get_contents())
     digest.update(str(len(contents)).encode("ascii"))
     for xref in contents:
-        digest.update(_xref_semantic_fingerprint(document, xref, cache, set()))
+        digest.update(_xref_semantic_fingerprint(
+            document, xref, cache, set(), reference_tokens
+        ))
     resource_type, resource_value = document.xref_get_key(page.xref, "Resources")
     digest.update(resource_type.encode("ascii", errors="replace"))
     digest.update(
-        _canonical_pdf_value(document, resource_value, cache, set())
+        _canonical_pdf_value(
+            document, resource_value, cache, set(), reference_tokens
+        )
+    )
+    annotations_type, annotations_value = document.xref_get_key(page.xref, "Annots")
+    digest.update(annotations_type.encode("ascii", errors="replace"))
+    digest.update(
+        _canonical_pdf_value(
+            document,
+            annotations_value,
+            annotation_cache,
+            set(),
+            reference_tokens,
+        )
     )
     return digest.digest()
 
 
-def _xref_semantic_fingerprint(document, xref: int, cache, active) -> bytes:
+def _xref_semantic_fingerprint(
+        document, xref: int, cache, active, reference_tokens) -> bytes:
+    if xref in reference_tokens:
+        return hashlib.sha256(reference_tokens[xref]).digest()
     if xref in cache:
         return cache[xref]
     if xref in active:
@@ -320,7 +347,9 @@ def _xref_semantic_fingerprint(document, xref: int, cache, active) -> bytes:
     active = {*active, xref}
     digest = hashlib.sha256()
     value = document.xref_object(xref, compressed=False)
-    digest.update(_canonical_pdf_value(document, value, cache, active))
+    digest.update(_canonical_pdf_value(
+        document, value, cache, active, reference_tokens
+    ))
     if document.xref_is_stream(xref):
         digest.update(document.xref_stream(xref))
     result = digest.digest()
@@ -328,17 +357,37 @@ def _xref_semantic_fingerprint(document, xref: int, cache, active) -> bytes:
     return result
 
 
-def _canonical_pdf_value(document, value, cache, active) -> bytes:
+def _canonical_pdf_value(document, value, cache, active, reference_tokens) -> bytes:
     raw = value.encode("latin-1", errors="replace") if isinstance(value, str) else value
 
     def replace_reference(match):
         referenced_xref = int(match.group(1))
+        if referenced_xref in reference_tokens:
+            return reference_tokens[referenced_xref]
         referenced = _xref_semantic_fingerprint(
-            document, referenced_xref, cache, active
+            document, referenced_xref, cache, active, reference_tokens
         )
         return b"<semantic:" + referenced.hex().encode("ascii") + b">"
 
     return _PDF_REFERENCE.sub(replace_reference, raw)
+
+
+def _document_reference_tokens(document) -> dict[int, bytes]:
+    """以穩定代號截斷頁面反向參照，避免走入 Pages tree、Catalog 與附件。"""
+    tokens = {document.pdf_catalog(): b"<catalog>"}
+    for page_number, page in enumerate(document):
+        tokens[page.xref] = f"<page:{page_number}>".encode("ascii")
+        current = page.xref
+        visited = set()
+        while current not in visited:
+            visited.add(current)
+            parent_type, parent_value = document.xref_get_key(current, "Parent")
+            if parent_type != "xref":
+                break
+            parent_xref = int(parent_value.split()[0])
+            tokens.setdefault(parent_xref, b"<pages-tree>")
+            current = parent_xref
+    return tokens
 
 
 def _sha256(content: bytes) -> str:
