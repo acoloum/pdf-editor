@@ -8,6 +8,22 @@ from pdf_editor.engine.fonts import checked_font
 ALIGNMENTS = {"left": pymupdf.TEXT_ALIGN_LEFT, "hcenter": pymupdf.TEXT_ALIGN_CENTER,
     "center": pymupdf.TEXT_ALIGN_CENTER}
 
+def _cell_from_drawings(page, point):
+    """以繪圖矩形備援偵測儲存格，用於 find_tables 無法解析的矮列或單格表格。"""
+    page_area = page.rect.width * page.rect.height
+    candidates = []
+    for drawing in page.get_drawings():
+        candidate = pymupdf.Rect(drawing["rect"])
+        if candidate.is_empty or not candidate.contains(point):
+            continue
+        # 排除整頁背景等過大的填色矩形，避免誤判為儲存格。
+        if candidate.width * candidate.height > page_area / 4:
+            continue
+        candidates.append(candidate)
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: item.width * item.height)
+
 def find_table_cell(pdf: bytes, page: int, rect) -> tuple[float, float, float, float] | None:
     """找出包含文字中心點的表格儲存格，找不到時回傳 None。"""
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
@@ -16,7 +32,7 @@ def find_table_cell(pdf: bytes, page: int, rect) -> tuple[float, float, float, f
         try:
             tables = doc[page].find_tables().tables
         except (AttributeError, RuntimeError):
-            return None
+            tables = ()
         candidates = []
         for table in tables:
             for cell in table.cells:
@@ -25,9 +41,12 @@ def find_table_cell(pdf: bytes, page: int, rect) -> tuple[float, float, float, f
                 candidate = pymupdf.Rect(cell)
                 if candidate.contains(point):
                     candidates.append(candidate)
-        if not candidates:
-            return None
-        cell = min(candidates, key=lambda item: item.width * item.height)
+        if candidates:
+            cell = min(candidates, key=lambda item: item.width * item.height)
+        else:
+            cell = _cell_from_drawings(doc[page], point)
+            if cell is None:
+                return None
         inset = min(2.0, cell.width / 10, cell.height / 10)
         return (cell.x0 + inset, cell.y0 + inset, cell.x1 - inset, cell.y1 - inset)
 

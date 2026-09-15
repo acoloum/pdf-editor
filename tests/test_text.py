@@ -196,3 +196,49 @@ def test_replace_text_centers_in_short_table_row(font_path):
         assert result[0].rect.contains(replacement.rect)
         assert (replacement.rect[0] + replacement.rect[2]) / 2 == pytest.approx(100, abs=3)
         assert (replacement.rect[1] + replacement.rect[3]) / 2 == pytest.approx(56.5, abs=2)
+
+def test_find_table_cell_detects_short_row(font_path):
+    # 矮列只能以向量框線定位，find_tables 無法解析，需以繪圖矩形備援。
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    page.draw_rect((50, 50, 150, 63), width=0.5)
+    page.insert_text((60, 60), "ABC", fontsize=8)
+    data = doc.tobytes()
+    doc.close()
+    run = extract_runs(data, 0)[0]
+    cell = text_engine.find_table_cell(data, 0, run.rect)
+    assert cell is not None
+    assert cell == pytest.approx((50, 50, 150, 63), abs=2)
+
+def test_short_row_replacement_stays_centered(font_path):
+    # 改字後新文字應維持在偵測到的儲存格正中（水平及垂直置中）。
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    page.draw_rect((50, 50, 150, 63), width=0.5)
+    page.insert_text((60, 60), "ABC", fontsize=8)
+    data = doc.tobytes()
+    doc.close()
+    run = extract_runs(data, 0)[0]
+    cell = text_engine.find_table_cell(data, 0, run.rect)
+    assert cell is not None
+    cx = (cell[0] + cell[2]) / 2
+    cy = (cell[1] + cell[3]) / 2
+    request = TextReplacement(hashlib.sha256(data).hexdigest(), 0, run.id,
+        "硬度", cell, font_path, 8, (0, 0, 0), "center")
+
+    out = replace_text(data, request)
+
+    replacement = next(r for r in extract_runs(out, 0) if r.text == "硬度")
+    assert (replacement.rect[0] + replacement.rect[2]) / 2 == pytest.approx(cx, abs=3)
+    assert (replacement.rect[1] + replacement.rect[3]) / 2 == pytest.approx(cy, abs=2)
+
+def test_find_table_cell_detects_empty_short_cell(font_path):
+    # 空白矮儲存格（新增文字點選）同樣能靠繪圖矩形定位。
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    page.draw_rect((50, 50, 150, 63), width=0.5)
+    data = doc.tobytes()
+    doc.close()
+    cell = text_engine.find_table_cell(data, 0, (100, 56, 100, 56))
+    assert cell is not None
+    assert cell == pytest.approx((50, 50, 150, 63), abs=2)
