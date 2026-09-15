@@ -1201,6 +1201,14 @@ class MainWindow(QMainWindow):
         p=self.text_panel
         p.text.setPlainText(text)
         target_rect=tuple(rect or p.rect())
+        # 表格文字：提交時以儲存格重新解析，確保改字後仍位於表格正中央；
+        # 若使用者已手動移動文字框（差異超過 2 點）則尊重其設定。
+        if run is not None and p.alignment.currentData()=="center":
+            cell=find_table_cell(self.session.pdf,self.page,run.rect)
+            manual=tuple(p.rect())
+            if cell and (not p.modified or abs(manual[0]-cell[0])+abs(manual[1]-cell[1])
+                    +abs(manual[2]-cell[2])+abs(manual[3]-cell[3])<2.0):
+                target_rect=cell
         if run is not None and text==run.text and not p.modified:
             self.refresh_actions()
             self.statusBar().showMessage("文字維持不變，可繼續使用標記或格式工具。")
