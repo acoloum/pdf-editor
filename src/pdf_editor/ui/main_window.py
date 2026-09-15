@@ -1234,11 +1234,13 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("已取消新增文字。")
                 return
             request=TextInsertion(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
-                text,target_rect,font_path,p.size.value(),p.color,p.alignment.currentData())
+                text,target_rect,font_path,p.size.value(),p.color,p.alignment.currentData(),
+                p.bold.isChecked())
             self.apply_text_immediately(request,"正在新增文字…",insert_text)
             return
         request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
-            run.id,text,target_rect,font_path,p.size.value(),p.color,p.alignment.currentData())
+            run.id,text,target_rect,font_path,p.size.value(),p.color,p.alignment.currentData(),
+            p.bold.isChecked())
         self.apply_text_immediately(request,"正在更新文字…")
 
     def apply_text_format(self):
@@ -1264,14 +1266,14 @@ class MainWindow(QMainWindow):
         if self.insertion_rect is not None:
             req=TextInsertion(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
                 p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),p.color,
-                p.alignment.currentData())
+                p.alignment.currentData(), p.bold.isChecked())
             self.preview_replacement(req,insert_text)
             return
         if not self.run:
             return
         req=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),
-            self.page,self.run.id,p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),p.color,
-            p.alignment.currentData())
+            self.page,self.run.id,p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),
+            p.color, p.alignment.currentData(), p.bold.isChecked())
         self.preview_replacement(req)
 
     def move_run(self,run):
@@ -1284,7 +1286,7 @@ class MainWindow(QMainWindow):
         p=self.text_panel
         request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
             run.id,p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),p.color,
-            p.alignment.currentData())
+            p.alignment.currentData(), p.bold.isChecked())
         self.apply_text_immediately(request,"正在移動文字…")
 
     def start_text_insertion(self,checked=True):
@@ -1514,7 +1516,7 @@ class MainWindow(QMainWindow):
         x0,y0,x1,y1=run.rect
         insertion_rect=cell or (x0,y0,x1+40,y1+run.size)
         request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),
-            self.page,run.id,"",run.rect,p.font_path,run.size,run.color,"left")
+            self.page,run.id,"",run.rect,p.font_path,run.size,run.color,"left",False)
         revision=self.session.revision
         token=self.token
         self.busy=True

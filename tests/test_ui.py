@@ -2273,3 +2273,24 @@ def test_text_panel_shows_load_failure_warning(qtbot, monkeypatch):
         lambda **_: (_ for _ in ()).throw(RuntimeError("無法開啟")))
     panel._refresh_glyph_warning()
     assert "無法讀取字型檔" in panel.glyph_warning.text()
+
+
+def test_window_inline_edit_applies_bold_when_checked(qtbot, source_path, monkeypatch):
+    monkeypatch.setattr("pdf_editor.engine.text.resolve_bold", lambda path: None)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        run = next(item for item in window.page_data["runs"] if "品質" in item.text)
+        window.select_run(run)
+        window.canvas.inline_editor.setText("粗體測試")
+        window.text_panel.bold.setChecked(True)
+        qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
+        with pymupdf.open(stream=window.session.pdf) as doc:
+            assert "粗體測試" in doc[0].get_text()
+            assert b"2 Tr" in doc[0].read_contents()
+    finally:
+        window.session.saved_fingerprint = window.session.history.current[2]
+        window.close()
