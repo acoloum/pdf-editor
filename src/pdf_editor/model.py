@@ -25,6 +25,7 @@ class TextReplacement:
     size: float
     color: Color
     alignment: str = "left"
+    bold: bool = False
 
 @dataclass(frozen=True)
 class TextInsertion:
@@ -36,6 +37,7 @@ class TextInsertion:
     size: float
     color: Color
     alignment: str = "left"
+    bold: bool = False
 
 @dataclass(frozen=True)
 class DocumentAccess:

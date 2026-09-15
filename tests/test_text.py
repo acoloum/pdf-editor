@@ -242,3 +242,16 @@ def test_find_table_cell_detects_empty_short_cell(font_path):
     cell = text_engine.find_table_cell(data, 0, (100, 56, 100, 56))
     assert cell is not None
     assert cell == pytest.approx((50, 50, 150, 63), abs=2)
+
+
+def test_text_request_bold_defaults_to_false(pdf_bytes, font_path):
+    run = next(r for r in extract_runs(pdf_bytes, 0) if "品質" in r.text)
+    insertion = editor_model.TextInsertion(
+        hashlib.sha256(pdf_bytes).hexdigest(), 0, "新增",
+        (40, 55, 390, 105), font_path, 16, (0, 0, 0))
+    replacement = TextReplacement(
+        hashlib.sha256(pdf_bytes).hexdigest(), 0, run.id, "取代",
+        (40, 55, 390, 105), font_path, 16, (0, 0, 0))
+    assert insertion.bold is False
+    assert replacement.bold is False
+
