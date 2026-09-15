@@ -378,16 +378,10 @@ class MainWindow(QMainWindow):
         self.actions["ocr"].setEnabled(edit and bool(ocr_selected))
         self.actions["compare"].setEnabled(active and not self.busy)
         self.page_menu_button.setEnabled(manage or edit)
-        markup=edit and self.run is not None and self.run.editable
-        self.actions["highlight"].setEnabled(markup)
-        self.actions["underline"].setEnabled(markup)
-        self.actions["text_note"].setEnabled(edit)
-        self.actions["select_annotation"].setEnabled(edit)
-        selected_annotation=edit and self.annotation is not None
-        selected_highlight=selected_annotation and self.annotation.kind=="Highlight"
-        for name in ("highlight_yellow","highlight_green","highlight_pink","highlight_blue"):
-            self.actions[name].setEnabled(selected_highlight)
-        self.actions["delete_annotation"].setEnabled(selected_annotation)
+        for name in ("highlight","underline","text_note","select_annotation",
+                "highlight_yellow","highlight_green","highlight_pink",
+                "highlight_blue","delete_annotation"):
+            self.actions[name].setEnabled(edit)
         self.markup_menu_button.setEnabled(edit)
         self.actions["search"].setEnabled(active and not self.busy)
         valid_search=active and not self.busy and bool(self.search_results) and self.search_revision==self.session.revision
@@ -1181,6 +1175,12 @@ class MainWindow(QMainWindow):
         self.text_panel.set_run(run)
         self.text_panel.font_path=str(default_font())
         self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
+        if not run.editable:
+            message="此文字無法安全修改，但仍可加入螢光標記或底線。"
+            self.text_panel.info.setText(message)
+            self.refresh_actions()
+            self.statusBar().showMessage(message)
+            return
         original=embedded_font(self.session.pdf,self.page,run,self.session.history.root)
         if original:
             self.text_panel.font_path=str(original)
@@ -1380,26 +1380,67 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"已選取{names.get(item.kind,'註解')}；按 Delete 可直接刪除。")
 
+    def _guide_annotation_selection(self,message):
+        if not self.session or self.busy or not self.session.access.can_edit:
+            return
+        self.actions["select_annotation"].setChecked(True)
+        self.start_annotation_selection(True)
+        self.statusBar().showMessage(message)
+
+    def _guide_markup_selection(self,label):
+        if not self.session or self.busy or not self.session.access.can_edit:
+            return
+        self.canvas.cancel_inline_editor()
+        self.canvas.cancel_text_insertion()
+        self.actions["add_text"].setChecked(False)
+        self.canvas.cancel_note_insertion()
+        self.actions["text_note"].setChecked(False)
+        self.canvas.cancel_annotation_selection()
+        self.actions["select_annotation"].setChecked(False)
+        self.canvas.clear_annotation_selection()
+        self.cancel_direct_crop()
+        self.annotation=None
+        self.run=None
+        self.insertion_rect=None
+        self.text_panel.setEnabled(False)
+        self.canvas.clear_text_selection()
+        self.canvas.setFocus()
+        self.statusBar().showMessage(
+            f"請先點選要加入{label}的文字；選取後請再次選擇{label}。")
+
     def delete_selected_annotation(self,item=None):
         if hasattr(item,"xref"):
             self.annotation=item
-        if not self.annotation or self.busy:
+        if self.busy:
+            return
+        if not self.annotation:
+            self._guide_annotation_selection("請點選要刪除的註解；選取後按 Delete。")
             return
         selected=self.annotation
         self.submit_annotation(delete_annotation,(self.page,selected.xref),"正在刪除註解…")
 
     def change_highlight_color(self,color):
-        if not self.annotation or self.annotation.kind!="Highlight" or self.busy:
+        if self.busy:
+            return
+        if not self.annotation:
+            self._guide_annotation_selection(
+                "請先點選要變更顏色的螢光標記；選取後請再次選擇顏色。")
+            return
+        if self.annotation.kind!="Highlight":
+            self.statusBar().showMessage("只有螢光標記可以變更顏色。")
             return
         self.submit_annotation(set_highlight_color,
             (self.page,self.annotation.xref,color),"正在變更螢光標記顏色…")
 
     def apply_selected_markup(self,kind):
-        if not self.run or self.busy:
+        label="螢光標記" if kind=="highlight" else "底線"
+        if self.busy:
+            return
+        if not self.run:
+            self._guide_markup_selection(label)
             return
         run=self.run
         self.canvas.cancel_inline_editor()
-        label="螢光標記" if kind=="highlight" else "底線"
         self.submit_annotation(mark_text,(self.page,run.rect,kind),f"正在加入{label}…")
 
     def submit_annotation(self,operation,args,status):

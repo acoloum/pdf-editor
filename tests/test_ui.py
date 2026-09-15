@@ -1270,6 +1270,149 @@ def test_markup_menu_exposes_highlight_underline_and_note(qtbot):
     )]==["螢光標記","加底線","文字註解"]
 
 
+def test_markup_menu_keeps_every_action_clickable_for_editable_document(
+        qtbot,source_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        names=("highlight","underline","text_note","select_annotation",
+            "highlight_yellow","highlight_green","highlight_pink",
+            "highlight_blue","delete_annotation")
+
+        assert [name for name in names if not window.actions[name].isEnabled()]==[]
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+@pytest.mark.parametrize("action,label",[
+    ("highlight","螢光標記"),
+    ("underline","底線"),
+])
+def test_markup_action_explains_missing_text_selection(
+        qtbot,source_path,action,label):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+
+        assert window.actions[action].isEnabled()
+        window.actions[action].trigger()
+
+        assert window.statusBar().currentMessage()==(
+            f"請先點選要加入{label}的文字；選取後請再次選擇{label}。")
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+@pytest.mark.parametrize("active_action",[
+    "add_text","text_note","select_annotation","direct_crop",
+])
+def test_markup_action_cancels_conflicting_canvas_mode(
+        qtbot,source_path,active_action):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        window.actions[active_action].trigger()
+
+        window.actions["highlight"].trigger()
+
+        assert not window.canvas._text_insertion
+        assert not window.canvas._note_insertion
+        assert not window.canvas._annotation_selection
+        assert not window.canvas._crop_mode
+        assert not window.actions["add_text"].isChecked()
+        assert not window.actions["text_note"].isChecked()
+        assert not window.actions["select_annotation"].isChecked()
+        assert not window.actions["direct_crop"].isChecked()
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_markup_action_after_note_mode_selects_text_instead_of_adding_note(
+        qtbot,source_path,monkeypatch):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr("pdf_editor.ui.main_window.QInputDialog.getMultiLineText",
+        lambda *args:("",False))
+    try:
+        window.resize(1100,760)
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        note_requests=QSignalSpy(window.canvas.note_insertion_requested)
+        run=next(item for item in window.page_data["runs"] if "品質" in item.text)
+        window.actions["text_note"].trigger()
+
+        window.actions["highlight"].trigger()
+        x,y=transform_point(window.page_data["matrix"],
+            (run.rect[0]+run.rect[2])/2,(run.rect[1]+run.rect[3])/2)
+        point=window.canvas.mapFromScene(QPointF(x,y))
+        qtbot.mouseClick(window.canvas.viewport(),Qt.MouseButton.LeftButton,pos=point)
+
+        assert note_requests.count()==0
+        assert window.run==run
+    finally:
+        window.canvas.cancel_inline_editor()
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+@pytest.mark.parametrize("action,message",[
+    ("highlight_green","請先點選要變更顏色的螢光標記；選取後請再次選擇顏色。"),
+    ("delete_annotation","請點選要刪除的註解；選取後按 Delete。"),
+])
+def test_annotation_management_action_starts_selection_when_none_is_selected(
+        qtbot,source_path,action,message):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+
+        assert window.actions[action].isEnabled()
+        window.actions[action].trigger()
+
+        assert window.actions["select_annotation"].isChecked()
+        assert window.canvas._annotation_selection
+        assert window.statusBar().currentMessage()==message
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_window_applies_markup_to_selected_noneditable_text(qtbot,source_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        run=next(item for item in window.page_data["runs"] if "品質" in item.text)
+        noneditable=replace(run,editable=False)
+        window.select_run(noneditable)
+
+        assert window.actions["highlight"].isEnabled()
+        assert window.canvas.inline_editor is None
+        assert not window.text_panel.isEnabled()
+        assert window.statusBar().currentMessage()==(
+            "此文字無法安全修改，但仍可加入螢光標記或底線。")
+        window.actions["highlight"].trigger()
+
+        qtbot.waitUntil(lambda:not window.busy and window.session.dirty,timeout=30000)
+        with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
+            assert [item.type[1] for item in (doc[0].annots() or [])]==["Highlight"]
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
 @pytest.mark.parametrize("kind,expected",[("highlight","Highlight"),("underline","Underline")])
 def test_window_applies_native_markup_to_selected_text(qtbot,source_path,kind,expected):
     window=MainWindow()
@@ -1391,6 +1534,26 @@ def test_window_changes_selected_highlight_color_immediately(qtbot,source_path):
         with pymupdf.open(stream=window.session.pdf,filetype="pdf") as doc:
             color=list(doc[0].annots())[0].colors["stroke"]
             assert color==pytest.approx((1.0,0.84,0.18),abs=0.01)
+    finally:
+        window.session.saved_fingerprint=window.session.history.current[2]
+        window.close()
+
+
+def test_highlight_color_action_explains_non_highlight_selection(qtbot,source_path):
+    window=MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda:window.page_data is not None,timeout=30000)
+        run=next(item for item in window.page_data["runs"] if "品質" in item.text)
+        window.submit_annotation(mark_text,(0,run.rect,"underline"),"加入底線")
+        qtbot.waitUntil(lambda:not window.busy and window.page_data is not None,timeout=30000)
+        window.select_annotation(window.page_data["annotations"][0])
+
+        assert window.actions["highlight_green"].isEnabled()
+        window.actions["highlight_green"].trigger()
+
+        assert window.statusBar().currentMessage()=="只有螢光標記可以變更顏色。"
     finally:
         window.session.saved_fingerprint=window.session.history.current[2]
         window.close()
