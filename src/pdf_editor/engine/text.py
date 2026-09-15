@@ -3,7 +3,7 @@ import math
 import pymupdf
 from pdf_editor.model import TextRun, TextReplacement, TextInsertion
 from pdf_editor.errors import EditorError
-from pdf_editor.engine.fonts import checked_font
+from pdf_editor.engine.fonts import checked_font, resolve_bold
 
 ALIGNMENTS = {"left": pymupdf.TEXT_ALIGN_LEFT, "hcenter": pymupdf.TEXT_ALIGN_CENTER,
     "center": pymupdf.TEXT_ALIGN_CENTER}
@@ -62,11 +62,26 @@ def _font_resource_name(prefix, font_path, text):
     token = hashlib.sha256(f"{font_path}\0{text}".encode("utf-8")).hexdigest()[:12]
     return f"{prefix}_{token}"
 
-def _new_text_shape(page, rect, text, font_path, font, size, color, alignment, fontname):
+def _resolve_bold(request):
+    """依請求的粗體旗標解析最終字型檔與是否模擬粗體。"""
+    if not getattr(request, "bold", False):
+        return request.font_path, False
+    bold_path = resolve_bold(request.font_path)
+    if bold_path:
+        try:
+            pymupdf.Font(fontfile=bold_path)
+        except Exception:
+            return request.font_path, True
+        return bold_path, False
+    return request.font_path, True
+
+def _new_text_shape(page, rect, text, font_path, font, size, color, alignment, fontname,
+        fake_bold=False):
     """建立文字形狀；單行文字以基準線寫入，避免窄表格列被誤判為溢位。"""
     box = pymupdf.Rect(rect)
     page.insert_font(fontname=fontname, fontfile=font_path)
     shape = page.new_shape()
+    stroke = dict(render_mode=2, fill=color, border_width=size * 0.04) if fake_bold else {}
     if "\n" not in text:
         width = font.text_length(text, fontsize=size)
         if width > box.width + 0.01 or size > box.height + 0.01:
@@ -77,11 +92,12 @@ def _new_text_shape(page, rect, text, font_path, font, size, color, alignment, f
                 + font.ascender * size
         else:
             baseline = box.y0 + font.ascender * size
-        shape.insert_text((x, baseline), text, fontname=fontname, fontsize=size, color=color)
+        shape.insert_text((x, baseline), text, fontname=fontname, fontsize=size,
+            color=color, **stroke)
         return shape
     placement = _vertical_centered_rect(box, text, size) if alignment == "center" else box
     remaining = shape.insert_textbox(placement, text, fontname=fontname,
-        fontsize=size, color=color, align=ALIGNMENTS[alignment])
+        fontsize=size, color=color, align=ALIGNMENTS[alignment], **stroke)
     if remaining < 0:
         raise EditorError("TEXT_OVERFLOW", "文字超出範圍，請擴大文字框或減小字級。")
     return shape
@@ -105,15 +121,16 @@ def insert_text(pdf: bytes, request: TextInsertion) -> bytes:
     for run in extract_runs(pdf, request.page):
         if rect.intersects(run.rect):
             raise EditorError("OVERLAP", "文字框與其他文字重疊，請縮小範圍。")
-    font = checked_font(request.font_path, request.text)
+    font_path, fake_bold = _resolve_bold(request)
+    font = checked_font(font_path, request.text)
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         page = doc[request.page]
         bounds = pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
         if not bounds.contains(rect):
             raise EditorError("GEOMETRY", "文字框必須位於頁面內。")
-        shape = _new_text_shape(page, rect, request.text, request.font_path, font,
+        shape = _new_text_shape(page, rect, request.text, font_path, font,
             request.size, request.color, request.alignment,
-            _font_resource_name("insertion", request.font_path, request.text))
+            _font_resource_name("insertion", font_path, request.text), fake_bold)
         shape.commit()
         doc.subset_fonts(fallback=True)
         return doc.tobytes(garbage=4, deflate=True)
@@ -160,7 +177,8 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
     for other in runs:
         if other.id != run.id and (old_rect.intersects(other.rect) or rect.intersects(other.rect)):
             raise EditorError("OVERLAP", "文字框與其他文字重疊，請縮小範圍。")
-    font = checked_font(request.font_path, request.text) if request.text else None
+    font_path, fake_bold = _resolve_bold(request)
+    font = checked_font(font_path, request.text) if request.text else None
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         page = doc[request.page]
         if page.first_annot:
@@ -170,17 +188,17 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
         if not bounds.contains(rect):
             raise EditorError("GEOMETRY", "文字框必須位於頁面內。")
         if request.text:
-            resource_name=_font_resource_name("replacement",request.font_path,request.text)
-            _new_text_shape(page, rect, request.text, request.font_path, font,
-                request.size, request.color, request.alignment, resource_name)
+            resource_name = _font_resource_name("replacement", font_path, request.text)
+            _new_text_shape(page, rect, request.text, font_path, font,
+                request.size, request.color, request.alignment, resource_name, fake_bold)
         page.add_redact_annot(old_rect, fill=False, cross_out=False)
         page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
             graphics=pymupdf.PDF_REDACT_LINE_ART_NONE, text=pymupdf.PDF_REDACT_TEXT_REMOVE)
         if not request.text:
             return doc.tobytes(garbage=4, deflate=True)
         # 移除後重新建立形狀，避免使用已失效的頁面資源。
-        shape = _new_text_shape(page, rect, request.text, request.font_path, font,
-            request.size, request.color, request.alignment, resource_name)
+        shape = _new_text_shape(page, rect, request.text, font_path, font,
+            request.size, request.color, request.alignment, resource_name, fake_bold)
         shape.commit()
         doc.subset_fonts(fallback=True)
         return doc.tobytes(garbage=4, deflate=True)

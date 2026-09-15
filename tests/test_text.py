@@ -255,3 +255,54 @@ def test_text_request_bold_defaults_to_false(pdf_bytes, font_path):
     assert insertion.bold is False
     assert replacement.bold is False
 
+
+def test_insert_bold_without_real_bold_file_uses_fake_bold(
+        pdf_bytes, font_path, monkeypatch):
+    monkeypatch.setattr("pdf_editor.engine.text.resolve_bold", lambda path: None)
+    request = editor_model.TextInsertion(
+        hashlib.sha256(pdf_bytes).hexdigest(), 0, "粗體測試",
+        (40, 300, 390, 350), font_path, 16, (0, 0, 0), "left", True)
+    out = text_engine.insert_text(pdf_bytes, request)
+    with pymupdf.open(stream=out) as doc:
+        assert "粗體測試" in doc[0].get_text()
+        assert b"2 Tr" in doc[0].read_contents()
+    run = next(r for r in extract_runs(out, 0) if "粗體測試" in r.text)
+    assert run.size == 16
+
+
+def test_insert_bold_uses_real_bold_file_when_available(
+        pdf_bytes, font_path, monkeypatch):
+    monkeypatch.setattr("pdf_editor.engine.text.resolve_bold",
+        lambda path: font_path)
+    request = editor_model.TextInsertion(
+        hashlib.sha256(pdf_bytes).hexdigest(), 0, "真粗體",
+        (40, 300, 390, 350), font_path, 16, (0, 0, 0), "left", True)
+    out = text_engine.insert_text(pdf_bytes, request)
+    with pymupdf.open(stream=out) as doc:
+        assert "真粗體" in doc[0].get_text()
+        assert b"2 Tr" not in doc[0].read_contents()
+
+
+def test_replace_text_bold_branch_renders_render_mode_two(
+        pdf_bytes, font_path, monkeypatch):
+    monkeypatch.setattr("pdf_editor.engine.text.resolve_bold", lambda path: None)
+    run = next(r for r in extract_runs(pdf_bytes, 0) if "品質" in r.text)
+    request = TextReplacement(
+        hashlib.sha256(pdf_bytes).hexdigest(), 0, run.id, "加粗取代",
+        (40, 55, 390, 105), font_path, 16, (0, 0, 0), "left", True)
+    out = text_engine.replace_text(pdf_bytes, request)
+    with pymupdf.open(stream=out) as doc:
+        assert "加粗取代" in doc[0].get_text()
+        assert b"2 Tr" in doc[0].read_contents()
+
+
+def test_insert_multi_line_bold_smoke(pdf_bytes, font_path, monkeypatch):
+    monkeypatch.setattr("pdf_editor.engine.text.resolve_bold", lambda path: None)
+    request = editor_model.TextInsertion(
+        hashlib.sha256(pdf_bytes).hexdigest(), 0, "第一段\n第二段",
+        (40, 300, 390, 380), font_path, 12, (0, 0, 0), "center", True)
+    out = text_engine.insert_text(pdf_bytes, request)
+    with pymupdf.open(stream=out) as doc:
+        assert "第一段" in doc[0].get_text() and "第二段" in doc[0].get_text()
+
+
