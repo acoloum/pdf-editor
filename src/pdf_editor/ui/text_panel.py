@@ -1,7 +1,10 @@
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QWidget,QVBoxLayout,QFormLayout,QLabel,QTextEdit,QDoubleSpinBox,QPushButton,QFileDialog,QColorDialog,QComboBox
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLabel,
+    QTextEdit, QDoubleSpinBox, QPushButton, QFileDialog, QColorDialog,
+    QComboBox, QCheckBox)
 from PySide6.QtGui import QColor
-from pdf_editor.engine.fonts import default_font
+import pymupdf
+from pdf_editor.engine.fonts import default_font, system_fonts
 
 class TextPanel(QWidget):
     preview_requested=Signal()
@@ -24,6 +27,7 @@ class TextPanel(QWidget):
         self.text.setMaximumHeight(140)
         layout.addWidget(self.text)
         self.text.hide()
+        self.text.textChanged.connect(self._refresh_glyph_warning)
         form=QFormLayout()
         self.size=QDoubleSpinBox()
         self.size.setRange(1,300)
@@ -44,8 +48,22 @@ class TextPanel(QWidget):
         for spin in self.box:
             spin.valueChanged.connect(self.mark_modified)
         layout.addLayout(form)
-        self.font_path=str(default_font())
-        self.font_label=QLabel("替代字型：Noto Sans CJK TC")
+        self._font_path = str(default_font())
+        self.font_combo = QComboBox()
+        self.font_combo.addItem("內建 Noto Sans CJK TC", self._font_path)
+        for name, path in system_fonts():
+            self.font_combo.addItem(name, path)
+        self.font_combo.currentIndexChanged.connect(self._on_font_combo)
+        form.addRow("字型", self.font_combo)
+        self.bold = QCheckBox("粗體")
+        self.bold.toggled.connect(self.mark_modified)
+        form.addRow("文字樣式", self.bold)
+        self.glyph_warning = QLabel()
+        self.glyph_warning.setObjectName("hint")
+        self.glyph_warning.setWordWrap(True)
+        self.glyph_warning.hide()
+        layout.addWidget(self.glyph_warning)
+        self.font_label = QLabel("替代字型：Noto Sans CJK TC")
         self.font_label.setWordWrap(True)
         self.font_label.setMinimumHeight(60)
         layout.addWidget(self.font_label)
@@ -80,16 +98,68 @@ class TextPanel(QWidget):
         layout.addStretch()
         self.setEnabled(False)
 
+    @property
+    def font_path(self):
+        return self._font_path
+
+    @font_path.setter
+    def font_path(self, value):
+        self._font_path = value
+        if hasattr(self, "font_combo"):
+            index = self.font_combo.findData(value)
+            if index >= 0:
+                previous = self._loading
+                self._loading = True
+                self.font_combo.setCurrentIndex(index)
+                self._loading = previous
+
+    def _on_font_combo(self, *_):
+        if self._loading:
+            return
+        self._font_path = self.font_combo.currentData()
+        if self._font_path:
+            self.font_label.setText("選用字型：" + self.font_combo.currentText())
+        self.mark_modified()
+        self._refresh_glyph_warning()
+
+    def _refresh_glyph_warning(self):
+        text = self.text.toPlainText()
+        if not text.strip() or not self._font_path:
+            self.glyph_warning.hide()
+            return
+        try:
+            font = pymupdf.Font(fontfile=self._font_path)
+            missing = [c for c in text
+                if not c.isspace() and not font.has_glyph(ord(c))]
+        except Exception:
+            self.glyph_warning.setText("無法讀取字型檔")
+            self.glyph_warning.show()
+            return
+        if missing:
+            shown = "、".join(missing[:10]) + ("…" if len(missing) > 10 else "")
+            self.glyph_warning.setText("此字型缺少部分字元：" + shown)
+            self.glyph_warning.show()
+        else:
+            self.glyph_warning.hide()
+
     def choose_font(self):
-        path,_=QFileDialog.getOpenFileName(self,"選擇字型","","字型 (*.ttf *.otf)")
-        if path:
-            self.font_path=path
-            self.font_label.setText("選用字型："+path.split("/")[-1])
-            self.mark_modified()
+        path, _ = QFileDialog.getOpenFileName(self, "選擇字型", "", "字型 (*.ttf *.otf)")
+        if not path:
+            return
+        index = self.font_combo.findData(path)
+        if index < 0:
+            self.font_combo.addItem("自訂字型檔…", path)
+            index = self.font_combo.count() - 1
+        self.font_combo.setCurrentIndex(index)
+        self._font_path = path
+        self.font_label.setText("選用字型：" + path.split("/")[-1])
+        self.mark_modified()
+        self._refresh_glyph_warning()
 
     def use_default_font(self):
-        self.font_path=str(default_font())
+        self.font_path = str(default_font())
         self.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
+        self.glyph_warning.hide()
         self.mark_modified()
 
     def choose_color(self):
@@ -114,6 +184,7 @@ class TextPanel(QWidget):
         self.alignment.setCurrentIndex(0)
         x0,y0,x1,y1=run.rect
         self.set_rect((x0,y0,x1+10,y1+run.size*0.5))
+        self.bold.setChecked(False)
         self._loading=False
         self.modified=False
 
@@ -126,6 +197,7 @@ class TextPanel(QWidget):
         self.color=(0,0,0)
         self.alignment.setCurrentIndex(2 if centered else 0)
         self.set_rect(rect)
+        self.bold.setChecked(False)
         self._loading=False
         self.modified=False
 

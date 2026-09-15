@@ -17,6 +17,7 @@ from pdf_editor.engine.geometry import transform_point, inverse_transform
 from pdf_editor.ui.signature_dialog import SignatureDialog
 from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
+from pdf_editor.engine.fonts import default_font
 from pdf_editor.annotations import mark_text
 from pdf_editor.model import LegacyImageCandidate, Overlay
 from pdf_editor.ocr import OcrResult
@@ -2224,3 +2225,51 @@ def test_window_legacy_stamp_scan_failure_restores_controls(
         assert warnings == [("無法完成操作", "無法掃描圖章。")]
     finally:
         window.close()
+
+
+def test_text_panel_font_combo_has_default_noto_first(qtbot):
+    panel = TextPanel()
+    qtbot.addWidget(panel)
+    assert panel.font_combo.itemData(0) == str(default_font())
+    assert panel.font_path == str(default_font())
+
+
+def test_text_panel_bold_checkbox_emits_format(qtbot):
+    panel = TextPanel()
+    qtbot.addWidget(panel)
+    spy = QSignalSpy(panel.format_requested)
+    panel.bold.setChecked(True)
+    assert spy.count() == 1
+
+
+def test_text_panel_shows_glyph_warning_for_missing_chars(qtbot, monkeypatch):
+    import types
+    panel = TextPanel()
+    qtbot.addWidget(panel)
+    panel.text.setPlainText("缺字測試")
+    monkeypatch.setattr("pdf_editor.ui.text_panel.pymupdf.Font",
+        lambda **_: types.SimpleNamespace(has_glyph=lambda code: False))
+    panel._refresh_glyph_warning()
+    assert not panel.glyph_warning.isHidden()
+    assert "缺少" in panel.glyph_warning.text()
+
+
+def test_text_panel_hides_glyph_warning_when_complete(qtbot, monkeypatch):
+    import types
+    panel = TextPanel()
+    qtbot.addWidget(panel)
+    panel.text.setPlainText("完整文字")
+    monkeypatch.setattr("pdf_editor.ui.text_panel.pymupdf.Font",
+        lambda **_: types.SimpleNamespace(has_glyph=lambda code: True))
+    panel._refresh_glyph_warning()
+    assert panel.glyph_warning.isHidden()
+
+
+def test_text_panel_shows_load_failure_warning(qtbot, monkeypatch):
+    panel = TextPanel()
+    qtbot.addWidget(panel)
+    panel.text.setPlainText("測試")
+    monkeypatch.setattr("pdf_editor.ui.text_panel.pymupdf.Font",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("無法開啟")))
+    panel._refresh_glyph_warning()
+    assert "無法讀取字型檔" in panel.glyph_warning.text()
