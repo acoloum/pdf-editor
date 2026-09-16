@@ -1,6 +1,8 @@
+import hashlib
 import os
 from pathlib import Path
 import sys
+import tempfile
 import pymupdf
 from pdf_editor.errors import EditorError
 
@@ -9,6 +11,69 @@ def resource_root():
 
 def default_font():
     return resource_root() / "resources/fonts/NotoSansCJKtc-Regular.otf"
+
+_SUBSET_CACHE_DIR: Path | None = None
+
+def _subset_cache_dir():
+    """回傳字型子集快取目錄（%LOCALAPPDATA%\\LocalPDFEditor\\fontsubsets）；
+    避免每次編輯都把完整巨量 CJK 字型嵌入 PDF 再全表子集化。"""
+    global _SUBSET_CACHE_DIR
+    if _SUBSET_CACHE_DIR is None:
+        base = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir())
+        _SUBSET_CACHE_DIR = base / "LocalPDFEditor" / "fontsubsets"
+        _SUBSET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return _SUBSET_CACHE_DIR
+
+def subset_font(font_path, text):
+    """將 font_path 子集化至僅含 text 所需字元，回傳子集檔路徑。
+
+    編輯文字時若直接嵌入完整字型（如 16MB 的 Noto CJK），
+    doc.subset_fonts 被迫對巨量字型做全表子集化（通常 1 秒以上）；
+    預先以 fontTools 只保留本次文字用到的字元，嵌入的是數 KB 的小字型，
+    之後就不需要再呼叫 doc.subset_fonts。子集結果依 (字型, 字元集) 快取，
+    同樣文字重複編輯時直接沿用。子集化失敗時回傳原路徑，由呼叫端改走原本的
+    完整嵌入＋subset_fonts 流程。
+    """
+    if not text:
+        return str(font_path)
+    chars = sorted({c for c in text if not c.isspace()})
+    if not chars:
+        return str(font_path)
+    source = str(font_path)
+    key = hashlib.sha256(f"{source}\0{''.join(chars)}".encode("utf-8")).hexdigest()[:24]
+    suffix = Path(source).suffix.lower() or ".otf"
+    target = _subset_cache_dir() / f"{key}{suffix}"
+    if target.exists() and target.stat().st_size > 0:
+        return str(target)
+    try:
+        from fontTools.subset import Options, Subsetter
+        from fontTools.ttLib import TTFont
+        options = Options()
+        options.font_number = 0
+        options.notdef_outline = True
+        options.recommended_glyphs = False
+        options.layout_features = ["*"]
+        options.name_IDs = ["*"]
+        options.name_legacy = True
+        options.drop_tables = ["meta", "FFTM", "FDSC", "fmtx",
+            "mort", "morx", "prop", "trak", "gasp"]
+        subsetter = Subsetter(options=options)
+        font = TTFont(source, fontNumber=0)
+        subsetter.populate(text="".join(chars))
+        subsetter.subset(font)
+        # 先寫臨時檔再以 os.replace 原子搬移，避免多執行緒同時寫入競態。
+        fd, tmp = tempfile.mkstemp(suffix=suffix, dir=_subset_cache_dir())
+        os.close(fd)
+        font.save(tmp)
+        font.close()
+        os.replace(tmp, target)
+        return str(target)
+    except Exception:
+        try:
+            font.close()  # noqa: F821 子集化失敗時確保釋放資源
+        except Exception:
+            pass
+        return source
 
 def checked_font(path, text):
     try:

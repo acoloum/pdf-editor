@@ -1,9 +1,10 @@
+import functools
 import hashlib
 import math
 import pymupdf
 from pdf_editor.model import TextRun, TextReplacement, TextInsertion
 from pdf_editor.errors import EditorError
-from pdf_editor.engine.fonts import checked_font, resolve_bold
+from pdf_editor.engine.fonts import checked_font, resolve_bold, subset_font
 
 ALIGNMENTS = {"left": pymupdf.TEXT_ALIGN_LEFT, "hcenter": pymupdf.TEXT_ALIGN_CENTER,
     "center": pymupdf.TEXT_ALIGN_CENTER}
@@ -36,8 +37,14 @@ def _cell_from_drawings(page, point):
         return None
     return min(candidates, key=lambda item: item.width * item.height)
 
+@functools.lru_cache(maxsize=8)
 def find_table_cell(pdf: bytes, page: int, rect) -> tuple[float, float, float, float] | None:
-    """找出包含文字中心點的表格儲存格，找不到時回傳 None。"""
+    """找出包含文字中心點的表格儲存格，找不到時回傳 None。
+
+    選取文字（select_run）與提交編輯（commit_inline_text）會對同一份
+    pdf 與 rect 重複呼叫，此函數每次耗時可達上百毫秒且執行於 UI 執行緒，
+    以 lru_cache 讓提交時直接命中選取時的快取。
+    """
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         box = pymupdf.Rect(rect)
         point = pymupdf.Point((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
@@ -139,16 +146,20 @@ def insert_text(pdf: bytes, request: TextInsertion) -> bytes:
             raise EditorError("OVERLAP", "文字框與其他文字重疊，請縮小範圍。")
     font_path, fake_bold = _resolve_bold(request)
     font = checked_font(font_path, request.text)
+    embed_path = subset_font(font_path, request.text)
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         page = doc[request.page]
         bounds = pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
         if not bounds.contains(rect):
             raise EditorError("GEOMETRY", "文字框必須位於頁面內。")
-        shape = _new_text_shape(page, rect, request.text, font_path, font,
+        shape = _new_text_shape(page, rect, request.text, embed_path, font,
             request.size, request.color, request.alignment,
             _font_resource_name("insertion", font_path, request.text), fake_bold)
         shape.commit()
-        doc.subset_fonts(fallback=True)
+        # 已以預子集字型嵌入，無需再對整份文件做全表子集化；
+        # 唯有子集化失敗（embed_path 退回原字型）時保留原流程。
+        if embed_path == font_path:
+            doc.subset_fonts(fallback=True)
         return doc.tobytes(garbage=4, deflate=True)
 
 def extract_runs(pdf: bytes, page: int) -> list[TextRun]:
@@ -195,6 +206,9 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
             raise EditorError("OVERLAP", "文字框與其他文字重疊，請縮小範圍。")
     font_path, fake_bold = _resolve_bold(request)
     font = checked_font(font_path, request.text) if request.text else None
+    # 以 fontTools 預先子集化：嵌入僅含本次文字字元的小字型，
+    # 免除後續 doc.subset_fonts 對完整巨量 CJK 字型的全表子集化作業。
+    embed_path = subset_font(font_path, request.text) if request.text else font_path
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         page = doc[request.page]
         if page.first_annot:
@@ -205,7 +219,7 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
             raise EditorError("GEOMETRY", "文字框必須位於頁面內。")
         if request.text:
             resource_name = _font_resource_name("replacement", font_path, request.text)
-            _new_text_shape(page, rect, request.text, font_path, font,
+            _new_text_shape(page, rect, request.text, embed_path, font,
                 request.size, request.color, request.alignment, resource_name, fake_bold)
         page.add_redact_annot(old_rect, fill=False, cross_out=False)
         page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
@@ -213,8 +227,11 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
         if not request.text:
             return doc.tobytes(garbage=4, deflate=True)
         # 移除後重新建立形狀，避免使用已失效的頁面資源。
-        shape = _new_text_shape(page, rect, request.text, font_path, font,
+        shape = _new_text_shape(page, rect, request.text, embed_path, font,
             request.size, request.color, request.alignment, resource_name, fake_bold)
         shape.commit()
-        doc.subset_fonts(fallback=True)
+        # 已以預子集字型嵌入，無需再對整份文件做全表子集化；
+        # 唯有子集化失敗（embed_path 退回原字型）時保留原流程。
+        if embed_path == font_path:
+            doc.subset_fonts(fallback=True)
         return doc.tobytes(garbage=4, deflate=True)
