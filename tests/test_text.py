@@ -2,16 +2,39 @@ from dataclasses import replace
 import hashlib
 import pytest
 import pymupdf
+from PIL import Image
 from pdf_editor.engine import text as text_engine
-from pdf_editor.engine.text import extract_runs, replace_text
+from pdf_editor.engine.text import extract_runs, insert_text, replace_text
 from pdf_editor import model as editor_model
-from pdf_editor.model import TextReplacement
+from pdf_editor.model import TextInsertion, TextReplacement
 from pdf_editor.errors import EditorError
 
 def request_for(data, font_path):
     run = next(r for r in extract_runs(data, 0) if "品質" in r.text)
     return TextReplacement(hashlib.sha256(data).hexdigest(), 0, run.id,
         "檢測合格 XYZ 789", (40, 55, 390, 105), font_path, 16, (0, 0, 0))
+
+def ink_coverage(pdf, page, clip):
+    """計算指定區域的墨水覆蓋率（以墨水包圍框為分母），用於驗證渲染品質。"""
+    with pymupdf.open(stream=pdf) as doc:
+        pix = doc[page].get_pixmap(clip=clip, matrix=pymupdf.Matrix(2, 2), alpha=False)
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples).convert("L")
+    xs, ys = [], []
+    for j in range(img.height):
+        for i in range(img.width):
+            if img.getpixel((i, j)) < 128:
+                xs.append(i)
+                ys.append(j)
+    if not xs:
+        return 0.0
+    box = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+    dark = total = 0
+    for j in range(box[1], box[3]):
+        for i in range(box[0], box[2]):
+            total += 1
+            if img.getpixel((i, j)) < 128:
+                dark += 1
+    return dark / total
 
 def test_replace_removes_only_target_and_preserves_background(pdf_bytes, font_path):
     request = request_for(pdf_bytes, font_path)
@@ -304,5 +327,23 @@ def test_insert_multi_line_bold_smoke(pdf_bytes, font_path, monkeypatch):
     out = text_engine.insert_text(pdf_bytes, request)
     with pymupdf.open(stream=out) as doc:
         assert "第一段" in doc[0].get_text() and "第二段" in doc[0].get_text()
+
+
+def test_simulated_bold_render_is_not_solid_blob(pdf_bytes, font_path, monkeypatch):
+    """回歸：模擬粗體（render_mode=2）不得渲染成一團黑塊。
+
+    舊實作 border_width=size*0.04 在 PyMuPDF 對 CJK 字型會放大 stroke，
+    墨水覆蓋率高達 ~90%（成團）；修正為固定 0.01pt 後約 ~44%。
+    """
+    monkeypatch.setattr("pdf_editor.engine.text.resolve_bold", lambda path: None)
+    run = next(r for r in extract_runs(pdf_bytes, 0) if "品質" in r.text)
+    request = TextReplacement(
+        hashlib.sha256(pdf_bytes).hexdigest(), 0, run.id, "加粗取代",
+        (40, 55, 390, 105), font_path, 16, (0, 0, 0), "left", True)
+    out = text_engine.replace_text(pdf_bytes, request)
+    with pymupdf.open(stream=out) as doc:
+        assert "加粗取代" in doc[0].get_text()
+    coverage = ink_coverage(out, 0, (40, 55, 390, 105))
+    assert coverage < 0.70, f"模擬粗體渲染成團狀黑塊（墨水覆蓋率 {coverage:.2%}）"
 
 

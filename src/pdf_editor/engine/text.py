@@ -81,7 +81,11 @@ def _new_text_shape(page, rect, text, font_path, font, size, color, alignment, f
     box = pymupdf.Rect(rect)
     page.insert_font(fontname=fontname, fontfile=font_path)
     shape = page.new_shape()
-    stroke = dict(render_mode=2, fill=color, border_width=size * 0.04) if fake_bold else {}
+    # 模擬粗體：render_mode=2（fill+stroke）。
+    # PyMuPDF 對 CJK Type0 字型會依字級比例放大 stroke 寬度，
+    # border_width 固定 0.01pt 時墨水覆蓋率約 43%（≈真實粗體），
+    # 若改為 size*0.04 會被放大成一團黑塊（覆蓋率 ~89%）。
+    stroke = dict(render_mode=2, fill=color, border_width=0.01) if fake_bold else {}
     if "\n" not in text:
         width = font.text_length(text, fontsize=size)
         if width > box.width + 0.01 or size > box.height + 0.01:
