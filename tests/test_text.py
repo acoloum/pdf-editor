@@ -355,3 +355,15 @@ def test_simulated_bold_render_is_not_solid_blob(pdf_bytes, font_path, monkeypat
     assert coverage < 0.70, f"模擬粗體渲染成團狀黑塊（墨水覆蓋率 {coverage:.2%}）"
 
 
+
+def test_bold_replace_preserves_text_after_space(pdf_bytes, font_path):
+    """0.15.2 回歸：含空格的文字勾粗體後，空格後面的文字不得消失。
+    先前 subset_font 把空格排除在子集字元集外，導致「訂單號碼/Order Number」
+    這類含空格的多欄位標題在粗體重繪時，空格後的文字全部消失。"""
+    request = replace(request_for(pdf_bytes, font_path),
+        text="訂單號碼/Order Number", bold=True)
+    out = replace_text(pdf_bytes, request)
+    with pymupdf.open(stream=out) as doc:
+        page_text = doc[0].get_text()
+        assert "Order Number" in page_text
+        assert "訂單號碼" in page_text

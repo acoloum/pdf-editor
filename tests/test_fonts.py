@@ -75,3 +75,33 @@ def test_resolve_bold_none_when_bold_file_missing(monkeypatch):
     assert fonts.resolve_bold(r"C:\Windows\Fonts\demo.ttf") is None
 
 
+
+def test_subset_font_keeps_regular_space_glyph(tmp_path, font_path, monkeypatch):
+    """0.15.2 回歸：子集字型必須保留一般空格 glyph（U+0020），
+    否則含空格的欄位文字（如「訂單號碼/Order Number」）在粗體重繪時，
+    空格之後的文字會因缺 glyph 而全部消失。"""
+    monkeypatch.setattr(fonts, "_subset_cache_dir", lambda: tmp_path)
+    subset = fonts.subset_font(font_path, "訂單號碼/Order Number")
+    from fontTools.ttLib import TTFont
+    font = TTFont(subset, fontNumber=0)
+    try:
+        cmap = font.getBestCmap()
+        assert 0x20 in cmap, "子集字型缺少 U+0020 一般空格 glyph"
+        assert 0x8A02 in cmap, "子集字型應保留中文字元（訂）"
+    finally:
+        font.close()
+
+
+def test_subset_font_keeps_nbsp_glyph(tmp_path, font_path, monkeypatch):
+    """0.15.2 回歸：子集字型必須保留不換行空格 glyph（U+00A0），
+    部分 PDF 的 run 文字以 U+00A0 表示空格，若被剃除同樣會造成
+    粗體重繪時空格後文字消失。"""
+    monkeypatch.setattr(fonts, "_subset_cache_dir", lambda: tmp_path)
+    subset = fonts.subset_font(font_path, "訂單號碼\u00a0Order Number")
+    from fontTools.ttLib import TTFont
+    font = TTFont(subset, fontNumber=0)
+    try:
+        cmap = font.getBestCmap()
+        assert 0xA0 in cmap, "子集字型缺少 U+00A0 不換行空格 glyph"
+    finally:
+        font.close()

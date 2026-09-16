@@ -36,7 +36,11 @@ def subset_font(font_path, text):
     """
     if not text:
         return str(font_path)
-    chars = sorted({c for c in text if not c.isspace()})
+    # 僅排除換行字符；務必保留空格（U+0020、U+00A0 等）：
+    # 前版以 c.isspace() 過濾會連空格一併剃除，導致含空格的欄位文字
+    # （如「訂單號碼/Order Number」）在粗體重繪時，空格之後的文字因
+    # 子集字型缺空格 glyph 而全部消失（0.15.2 回歸）。
+    chars = sorted({c for c in text if c not in ("\n", "\r")})
     if not chars:
         return str(font_path)
     source = str(font_path)
@@ -57,6 +61,13 @@ def subset_font(font_path, text):
         options.name_legacy = True
         options.drop_tables = ["meta", "FFTM", "FDSC", "fmtx",
             "mort", "morx", "prop", "trak", "gasp"]
+        # 保留原始 glyph ID：fontTools 預設會重排 glyph ID，對 CJK OTF
+        # （CID-keyed CFF、含 FDArray/FDSelect）會破壞 CharStrings 索引
+        # 對應，導致 PyMuPDF 輸出子集字型後無法正確光柵化、下一版用的
+        # 粗體文字在視覺上全部消失（text layer 正常、墨水為零；0.15.2
+        # 回歸的根因）。retain_gids=True 時子集仍只含所需字元，只犧牲
+        # glyph ID 壓縮，換取可渲染性。
+        options.retain_gids = True
         subsetter = Subsetter(options=options)
         font = TTFont(source, fontNumber=0)
         subsetter.populate(text="".join(chars))
