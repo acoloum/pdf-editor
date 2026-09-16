@@ -90,6 +90,14 @@ def test_second_edit_adds_new_chinese_glyphs(pdf_bytes, font_path):
     with pymupdf.open(stream=second) as doc:
         assert '完成覆核' in doc[0].get_text()
 
+def test_find_table_cell_ignores_image_backed_frame(pdf_bytes):
+    # 圖像底片＋裝飾框（如標題橫幅）不應被誤判為表格儲存格：
+    # 否則選取框內文字勾粗體時，commit 會把文字置中重繪到整個框的中央，
+    # 原本欄位位置墨點幾乎歸零，使用者看到「欄位裡的字消失」。
+    run = next(r for r in extract_runs(pdf_bytes, 0)
+        if "品質" in r.text and r.rect[1] < 100)
+    assert text_engine.find_table_cell(pdf_bytes, 0, run.rect) is None
+
 def test_replace_text_supports_horizontal_and_vertical_center(pdf_bytes, font_path):
     assert "alignment" in TextReplacement.__dataclass_fields__
     request = replace(request_for(pdf_bytes, font_path),

@@ -8,9 +8,17 @@ from pdf_editor.engine.fonts import checked_font, resolve_bold
 ALIGNMENTS = {"left": pymupdf.TEXT_ALIGN_LEFT, "hcenter": pymupdf.TEXT_ALIGN_CENTER,
     "center": pymupdf.TEXT_ALIGN_CENTER}
 
+def _image_covers_rect(img_info, rect):
+    """圖像是否大面積覆蓋矩形（視為裝飾底圖而非儲存格）。"""
+    inter = pymupdf.Rect(img_info["bbox"]) & rect
+    if inter.is_empty:
+        return False
+    return inter.get_area() / rect.get_area() > 0.5
+
 def _cell_from_drawings(page, point):
     """以繪圖矩形備援偵測儲存格，用於 find_tables 無法解析的矮列或單格表格。"""
     page_area = page.rect.width * page.rect.height
+    images = page.get_image_info()
     candidates = []
     for drawing in page.get_drawings():
         candidate = pymupdf.Rect(drawing["rect"])
@@ -18,6 +26,10 @@ def _cell_from_drawings(page, point):
             continue
         # 排除整頁背景等過大的填色矩形，避免誤判為儲存格。
         if candidate.width * candidate.height > page_area / 4:
+            continue
+        # 排除被圖像大面積覆蓋的裝飾框（標題橫幅、LOGO 底框等），
+        # 避免勾粗體時把框內文字置中重繪到框中央，造成「字消失」。
+        if any(_image_covers_rect(img, candidate) for img in images):
             continue
         candidates.append(candidate)
     if not candidates:
