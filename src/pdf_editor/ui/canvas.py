@@ -10,17 +10,28 @@ from pdf_editor.engine.overlay import transformed_image
 class LayerItem(QGraphicsPixmapItem):
     HANDLE_RADIUS=6
 
-    def __init__(self,pix,layer,canvas):
+    def __init__(self,pix,layer,canvas,pixel_ratio=1.0):
         super().__init__(pix)
         self.layer,self.canvas=layer,canvas
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
                       QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.start=QPointF()
+        # 保留原始解析度影像，每次縮放都從原圖取樣，避免重複縮放造成模糊。
         self.source_pixmap=QPixmap(pix)
+        self.pixel_ratio=max(1.0,float(pixel_ratio))
         self.resize_corner=None
         self.resize_start=None
         self.resize_scale=1.0
         self.setAcceptHoverEvents(True)
+
+    def set_display_size(self,width,height):
+        """依螢幕實體像素縮放圖章，於高 DPI 螢幕上維持清晰。"""
+        ratio=self.pixel_ratio
+        scaled=self.source_pixmap.scaled(max(1,round(width*ratio)),max(1,round(height*ratio)),
+            Qt.AspectRatioMode.IgnoreAspectRatio,Qt.TransformationMode.SmoothTransformation)
+        scaled.setDevicePixelRatio(ratio)
+        self.prepareGeometryChange()
+        self.setPixmap(scaled)
 
     def _content_rect(self):
         return super().boundingRect()
@@ -123,9 +134,7 @@ class LayerItem(QGraphicsPixmapItem):
             return
         rect=self._resized_rect(event.scenePos())
         self.resize_scale=rect.width()/self.resize_start.width()
-        scaled=self.source_pixmap.scaled(max(1,round(rect.width())),max(1,round(rect.height())),
-            Qt.AspectRatioMode.IgnoreAspectRatio,Qt.TransformationMode.SmoothTransformation)
-        self.setPixmap(scaled)
+        self.set_display_size(rect.width(),rect.height())
         self.setPos(rect.topLeft())
         event.accept()
 
@@ -270,12 +279,12 @@ class Canvas(QGraphicsView):
                 continue
             png,rect=transformed_image(layer)
             screen=transformed_rect(self.matrix,rect)
-            lp=QPixmap()
-            lp.loadFromData(png)
-            lp=lp.transformed(QTransform().rotate(data["rotation"]),Qt.TransformationMode.SmoothTransformation)
-            lp=lp.scaled(max(1,round(screen[2]-screen[0])),max(1,round(screen[3]-screen[1])),
-                Qt.AspectRatioMode.IgnoreAspectRatio,Qt.TransformationMode.SmoothTransformation)
-            item=LayerItem(lp,layer,self)
+            source=QPixmap()
+            source.loadFromData(png)
+            source=source.transformed(QTransform().rotate(data["rotation"]),
+                Qt.TransformationMode.SmoothTransformation)
+            item=LayerItem(source,layer,self,data.get("pixel_ratio",1.0))
+            item.set_display_size(screen[2]-screen[0],screen[3]-screen[1])
             item.setPos(screen[0],screen[1])
             item.setZValue(5)
             self.scene().addItem(item)

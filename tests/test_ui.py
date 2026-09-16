@@ -230,6 +230,23 @@ def test_canvas_dragging_text_emits_moved_run(qtbot, pdf_bytes):
     assert spy.at(0)[0].rect[0] > run.rect[0]
 
 
+def test_canvas_layer_uses_device_pixels_on_high_dpi(qtbot,pdf_bytes,tmp_path):
+    image_path=tmp_path/"印章.png"
+    Image.new("RGBA",(800,400),(210,35,45,210)).save(image_path)
+    layer=Overlay("stamp",0,str(image_path),(100,100,180,140),0)
+    canvas=Canvas()
+    qtbot.addWidget(canvas)
+
+    canvas.display(render_page(pdf_bytes,0,1.25,pixel_ratio=2.0),(layer,),layer.id)
+
+    item=next(item for item in canvas.scene().items() if hasattr(item,"layer"))
+    # 圖章須以實體像素繪製，邏輯大小仍與頁面座標一致。
+    assert item.pixmap().devicePixelRatio()==2.0
+    assert item.pixmap().width()==200
+    assert item._content_rect().width()==pytest.approx(100,abs=1)
+    assert item.source_pixmap.width()==800
+
+
 def test_canvas_layer_corner_drag_resizes_with_original_ratio(qtbot,pdf_bytes,tmp_path):
     from PIL import Image
 
@@ -2294,3 +2311,18 @@ def test_window_inline_edit_applies_bold_when_checked(qtbot, source_path, monkey
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
+
+
+def test_signature_png_is_high_resolution_and_cropped(qtbot):
+    dialog = SignatureDialog()
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.mousePress(dialog.pad, Qt.MouseButton.LeftButton, pos=QPoint(100,60))
+    qtbot.mouseMove(dialog.pad, QPoint(200,110))
+    qtbot.mouseRelease(dialog.pad, Qt.MouseButton.LeftButton, pos=QPoint(200,110))
+    with Image.open(io.BytesIO(dialog.png_bytes())) as image:
+        # 筆跡範圍約 100×50 邏輯像素，應以超取樣倍率輸出且裁掉空白。
+        factor = dialog.pad.SUPERSAMPLE
+        assert image.width >= 100 * factor
+        assert image.width < 600 * factor
+        assert image.height < 220 * factor
