@@ -4,8 +4,19 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QImage, QPaintEngine, QPainter, QTransform
 
 MAX_PRINT_DPI = 300
-# 預覽畫面不需要印表機解析度，降低解析度可大幅加快多頁文件的預覽速度。
-PREVIEW_DPI = 150
+# 預覽會把每頁影像保留在記憶體中，依總頁面面積分配解析度，
+# 頁數少時與實際列印同樣清晰，頁數多時才降低以控制記憶體用量。
+PREVIEW_MEMORY_BUDGET = 400_000_000
+MIN_PREVIEW_DPI = 110
+
+
+def preview_dpi(page_sizes, maximum=MAX_PRINT_DPI):
+    """依頁面尺寸（點）計算預覽解析度；每個像素以 4 位元組估算。"""
+    area = sum(width * height for width, height in page_sizes)
+    if area <= 0:
+        return maximum
+    dpi = int((PREVIEW_MEMORY_BUDGET / (area * 4)) ** 0.5 * 72)
+    return max(MIN_PREVIEW_DPI, min(maximum, dpi))
 
 
 def print_pages(printer, pdf, pages, progress=None):
@@ -22,9 +33,10 @@ def print_pages(printer, pdf, pages, progress=None):
     printed = 0
     try:
         dpi = max(72, min(MAX_PRINT_DPI, printer.resolution()))
-        if is_preview(painter):
-            dpi = min(dpi, PREVIEW_DPI)
         with pymupdf.open(stream=pdf, filetype="pdf") as doc:
+            if is_preview(painter):
+                dpi = min(dpi, preview_dpi([(doc[index].rect.width, doc[index].rect.height)
+                    for index in pages]))
             for index, page_index in enumerate(pages):
                 if progress is not None and progress(index, len(pages)) is False:
                     break

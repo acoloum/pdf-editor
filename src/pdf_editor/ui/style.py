@@ -147,6 +147,7 @@ QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {{ image: url
 QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: center right; width: 24px; border: 0; }}
 QComboBox::down-arrow {{ image: url("{ARROWS.get('down', '')}"); width: 10px; height: 7px; }}
 QComboBox::down-arrow:disabled {{ image: url("{ARROWS.get('down_disabled', '')}"); }}
+QComboBox QLineEdit {{ background: transparent; border: 0; padding: 0; margin: 0; }}
 QComboBox QAbstractItemView {{ background: {C['elevated']}; border: 1px solid {C['border_strong']};
     selection-background-color: {C['accent_soft']}; selection-color: {C['accent']}; padding: 4px; }}
 

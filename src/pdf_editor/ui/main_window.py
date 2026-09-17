@@ -1140,24 +1140,32 @@ class MainWindow(QMainWindow):
 
     def style_print_preview(self,preview):
         """預覽工具列的內建圖示在深色主題下看不清楚，改用主題圖示。"""
-        from PySide6.QtWidgets import QToolBar
+        from PySide6.QtCore import QCoreApplication
+        from PySide6.QtGui import QColor,QIcon,QTransform
+        from PySide6.QtWidgets import QGraphicsView,QToolBar
         from pdf_editor.ui.style import COLORS
-        glyphs={"fit_width":"\ue9a6","fit_page":"\ue740","zoom_in":"\ue8a3","zoom_out":"\ue71f",
-            "portrait":"\ue8a5","landscape":"\ue7c3","first":"\ue892","previous":"\ue76b",
-            "next":"\ue76c","last":"\ue893","single":"\ue7c3","facing":"\ue8a9","overview":"\ue8a9",
-            "page_setup":"\ue713","print":"\ue749"}
-        names=["fit_width","fit_page","zoom_in","zoom_out","portrait","landscape","first","previous",
-            "next","last","single","facing","overview","page_setup","print"]
-        # QPrintPreviewDialog 的工具按鈕順序固定，依序替換為主題圖示。
+        # 以 Qt 原始按鈕名稱（含翻譯後名稱）對應圖示，不依賴按鈕排列順序。
+        glyphs={"Fit width":"\ue740","Fit page":"\ue9a6","Zoom in":"\ue8a3","Zoom out":"\ue71f",
+            "Portrait":"\ue7c3","Landscape":"\ue7c3","First page":"\ue892","Previous page":"\ue76b",
+            "Next page":"\ue76c","Last page":"\ue893","Show single page":"\ue7c3",
+            "Show facing pages":"\ue736","Show overview of all pages":"\ue80a",
+            "Page setup":"\ue713","Print":"\ue749"}
+        lookup={}
+        for source,glyph in glyphs.items():
+            lookup[source]=(source,glyph)
+            lookup[QCoreApplication.translate("QPrintPreviewDialog",source)]=(source,glyph)
         for toolbar in preview.findChildren(QToolBar):
             toolbar.setIconSize(QSize(20,20))
-            actions=[action for action in toolbar.actions() if not action.isSeparator()
-                and toolbar.widgetForAction(action) is not None
-                and toolbar.widgetForAction(action).metaObject().className()=="QToolButton"]
-            for name,action in zip(names,actions):
-                action.setIcon(themed_glyph_icon(glyphs[name],20))
-        from PySide6.QtGui import QColor
-        from PySide6.QtWidgets import QGraphicsView
+            for action in toolbar.actions():
+                match=lookup.get(action.text())
+                if match is None:
+                    continue
+                source,glyph=match
+                icon=themed_glyph_icon(glyph,20)
+                if source=="Landscape":
+                    # 橫印圖示以直印圖示旋轉 90 度表示。
+                    icon=QIcon(icon.pixmap(QSize(40,40)).transformed(QTransform().rotate(90)))
+                action.setIcon(icon)
         for view in preview.findChildren(QGraphicsView):
             view.setBackgroundBrush(QColor(COLORS["canvas"]))
 

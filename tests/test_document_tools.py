@@ -181,3 +181,37 @@ def test_qt_standard_dialogs_are_translated(qtbot):
         assert QCoreApplication.translate("QPrintPreviewDialog", "Print") == "列印"
     finally:
         app.removeTranslator(translator)
+
+
+def test_preview_resolution_scales_with_page_count():
+    from pdf_editor.ui.printing import MAX_PRINT_DPI, MIN_PREVIEW_DPI, preview_dpi
+    a4 = (595, 842)
+    # 少量頁面與實際列印同樣清晰，放大預覽不會模糊。
+    assert preview_dpi([a4]) == MAX_PRINT_DPI
+    assert preview_dpi([a4] * 10) == MAX_PRINT_DPI
+    many = preview_dpi([a4] * 60)
+    assert MIN_PREVIEW_DPI <= many < MAX_PRINT_DPI
+    assert preview_dpi([a4] * 5000) == MIN_PREVIEW_DPI
+
+
+def test_preview_toolbar_icons_follow_button_meaning(qtbot, multi_page_path):
+    from PySide6.QtPrintSupport import QPrinter, QPrintPreviewDialog
+    from PySide6.QtWidgets import QToolBar
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        preview = QPrintPreviewDialog(QPrinter())
+        qtbot.addWidget(preview)
+        toolbar = preview.findChildren(QToolBar)[0]
+        actions = {action.text(): action for action in toolbar.actions() if action.text()}
+        before = actions["Zoom in"].icon().cacheKey()
+        window.style_print_preview(preview)
+        zoom_in = actions["Zoom in"].icon().pixmap(20, 20).toImage()
+        zoom_out = actions["Zoom out"].icon().pixmap(20, 20).toImage()
+        assert actions["Zoom in"].icon().cacheKey() != before
+        # 放大與縮小圖示必須不同，且各自對應正確的按鈕。
+        from pdf_editor.ui.style import themed_glyph_icon
+        assert zoom_in == themed_glyph_icon("", 20).pixmap(20, 20).toImage()
+        assert zoom_out == themed_glyph_icon("", 20).pixmap(20, 20).toImage()
+    finally:
+        _close(window)
