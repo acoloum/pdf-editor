@@ -58,6 +58,8 @@ ICON_GLYPHS = {
     "zoom_in": "\ue710",
     "previous_page": "\ue70e",
     "next_page": "\ue70d",
+    "first_page": "\ue892",
+    "last_page": "\ue893",
 }
 
 C = COLORS
@@ -204,6 +206,23 @@ QStatusBar {{ background: {C['surface']}; border-top: 1px solid {C['border']}; c
     padding: 3px 8px; }}
 QStatusBar::item {{ border: 0; }}
 QMessageBox, QInputDialog {{ background: {C['bg']}; }}
+QToolButton[popupMode="1"] {{ padding-right: 16px; }}
+QToolButton::menu-button {{ border: 0; border-left: 1px solid transparent; width: 14px;
+    border-top-right-radius: 6px; border-bottom-right-radius: 6px; }}
+QToolButton::menu-button:hover {{ background: {C['accent_soft']}; border-left-color: {C['border_strong']}; }}
+QToolButton::menu-arrow {{ image: url("{ARROWS.get('down', '')}"); width: 8px; height: 6px; }}
+QToolButton::menu-arrow:disabled {{ image: url("{ARROWS.get('down_disabled', '')}"); }}
+
+QFrame#searchBar {{ background: {C['elevated']}; border: 1px solid {C['accent']}; border-radius: 10px; }}
+QFrame#searchBar QLineEdit {{ background: {C['input']}; }}
+QFrame#searchBar QToolButton {{ padding: 4px; }}
+
+QStatusBar QLabel#statusField {{ color: {C['text_muted']}; padding: 0 10px; border-left: 1px solid {C['border']};
+    font-family: "Consolas", "Microsoft JhengHei UI"; }}
+QStatusBar QLabel#dirtyIndicator {{ color: {C['search']}; padding: 0 10px; font-weight: 600; }}
+QStatusBar QWidget#statusGroup {{ border-left: 1px solid {C['border']}; }}
+QStatusBar QToolButton {{ padding: 3px; border-radius: 4px; }}
+QStatusBar QSpinBox, QStatusBar QComboBox {{ padding: 2px 6px; }}
 """
 
 

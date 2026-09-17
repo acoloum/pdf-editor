@@ -1006,11 +1006,11 @@ def test_window_zoom_buttons_are_visible_at_default_width(qtbot):
     window.show()
     QCoreApplication.processEvents()
 
-    for name in ("zoom_out","zoom_in"):
-        action=window.actions[name]
-        toolbar=next(bar for bar in window.findChildren(QToolBar)
-            if action in bar.actions())
-        assert toolbar.widgetForAction(action).isVisible()
+    for name in ("zoom_out","zoom_in","previous_page","next_page"):
+        # 縮放與翻頁按鈕移到狀態列，預設寬度下必須完整可見。
+        button=window.status_buttons[name]
+        assert button.defaultAction() is window.actions[name]
+        assert button.isVisible()
 
 
 def test_window_zoom_keeps_visible_page_center(qtbot,source_path):

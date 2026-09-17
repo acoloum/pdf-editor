@@ -5,7 +5,7 @@ import uuid
 import pymupdf
 from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal,QPointF
 from PySide6.QtGui import QAction,QKeySequence,QIcon,QPixmap
-from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton,QAbstractItemView,QApplication
+from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton,QAbstractItemView,QApplication,QHBoxLayout
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import write_pdf,publish_batch
 from pdf_editor.engine.render import render_page,thumbnail
@@ -46,6 +46,8 @@ from pdf_editor.ui.page_dialogs import (MergeDialog,SplitDialog,CropPagesDialog,
     PageDecorationDialog,HeaderFooterTemplatesDialog)
 from pdf_editor.ui.style import STYLE,apply_theme,apply_dark_title_bar,glyph_icon,thumbnail_icon
 from pdf_editor.ui.settings import AppSettings
+from pdf_editor.ui.info_panel import DocumentInfoPanel,describe_document
+from pdf_editor.ui.search_bar import SearchBar
 
 ZOOM_LEVELS=(0.25,0.5,0.75,1.0,1.25,1.5,1.75,2.0,2.5,3.0,4.0,5.0)
 
@@ -193,6 +195,7 @@ class MainWindow(QMainWindow):
         toolbar.setIconSize(QSize(20,20))
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.addToolBar(toolbar)
+        self.toolbar=toolbar
         self.actions={}
         for name,label,handler,key in [
             ("open","開啟 PDF",self.choose_open,"Ctrl+O"),
@@ -216,15 +219,12 @@ class MainWindow(QMainWindow):
                 action.setShortcut(QKeySequence(key))
             if name=="add_text":
                 action.setCheckable(True)
-            toolbar.addAction(action)
             self.actions[name]=action
         # 另存新檔同時支援 Ctrl+S 與 Ctrl+Shift+S，避免習慣按 Ctrl+S 時沒有反應。
         self.actions["save"].setShortcuts([QKeySequence("Ctrl+S"),QKeySequence("Ctrl+Shift+S")])
         self.recent_menu=QMenu("最近開啟的檔案",self)
         self.recent_menu.aboutToShow.connect(self.rebuild_recent_menu)
         self.actions["open"].setMenu(self.recent_menu)
-        toolbar.widgetForAction(self.actions["open"]).setPopupMode(
-            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         page_menu=QMenu(self)
         for name,label,handler,key in [
             ("page_up","選取頁面上移",lambda:self.move_current_page(-1),"Alt+Up"),
@@ -245,14 +245,10 @@ class MainWindow(QMainWindow):
             if name=="direct_crop":
                 action.setCheckable(True)
             page_menu.addAction(action)
+            if name in ("rotate_right","blank_page","export_png","crop_page"):
+                page_menu.addSeparator()
             self.actions[name]=action
-        self.page_menu_button=QToolButton()
-        self.page_menu_button.setText("頁面操作")
-        self.page_menu_button.setIcon(glyph_icon("page_menu"))
-        self.page_menu_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        self.page_menu_button.setMenu(page_menu)
-        self.page_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        toolbar.addWidget(self.page_menu_button)
+        self.page_menu=page_menu
         markup_menu=QMenu(self)
         for name,label,handler in [
             ("highlight","螢光標記",lambda:self.apply_selected_markup("highlight")),
@@ -269,83 +265,95 @@ class MainWindow(QMainWindow):
             if name in ("text_note","select_annotation"):
                 action.setCheckable(True)
             markup_menu.addAction(action)
+            if name in ("underline","select_annotation","highlight_blue"):
+                markup_menu.addSeparator()
             self.actions[name]=action
-        self.markup_menu_button=QToolButton()
-        self.markup_menu_button.setText("標記註解")
-        self.markup_menu_button.setIcon(glyph_icon("markup_menu"))
-        self.markup_menu_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        self.markup_menu_button.setMenu(markup_menu)
-        self.markup_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        toolbar.addWidget(self.markup_menu_button)
-        toolbar.addSeparator()
-        self.page_spin=QSpinBox()
-        self.page_spin.setPrefix("第 ")
-        self.page_spin.setSuffix(" 頁")
-        self.page_spin.setRange(1,1)
-        self.page_spin.valueChanged.connect(lambda n:self.goto_page(n-1))
+        stamp_menu=QMenu(self)
+        for name in ("stamp","collection","convert_stamp"):
+            stamp_menu.addAction(self.actions[name])
         for name,label,handler,shortcuts,tip in [
-            ("zoom_out","－",lambda:self.zoom_by(-1),("Ctrl+-",),"縮小頁面（Ctrl+-）"),
-            ("zoom_in","＋",lambda:self.zoom_by(1),("Ctrl++","Ctrl+="),"放大頁面（Ctrl++）")]:
-            action=QAction(glyph_icon(name),label,self)
-            action.triggered.connect(handler)
-            action.setShortcuts([QKeySequence(key) for key in shortcuts])
-            action.setToolTip(tip)
-            self.actions[name]=action
-        for name,label,handler,shortcuts,tip in [
+            ("zoom_out","縮小",lambda:self.zoom_by(-1),("Ctrl+-",),"縮小頁面（Ctrl+- 或 Ctrl+滾輪）"),
+            ("zoom_in","放大",lambda:self.zoom_by(1),("Ctrl++","Ctrl+="),"放大頁面（Ctrl++ 或 Ctrl+滾輪）"),
             ("previous_page","上一頁",lambda:self.step_page(-1),("PgUp",),"上一頁（PageUp）"),
             ("next_page","下一頁",lambda:self.step_page(1),("PgDown",),"下一頁（PageDown）"),
             ("first_page","第一頁",lambda:self.goto_page_with_scroll(0,"top"),("Ctrl+Home",),"第一頁（Ctrl+Home）"),
             ("last_page","最後一頁",lambda:self.goto_page_with_scroll(self.page_count-1,"top"),
-                ("Ctrl+End",),"最後一頁（Ctrl+End）")]:
+                ("Ctrl+End",),"最後一頁（Ctrl+End）"),
+            ("search","搜尋",self.focus_search,("Ctrl+F",),"搜尋全文（Ctrl+F）"),
+            ("search_previous","上一筆",lambda:self.next_search_result(-1),("Shift+F3",),"上一筆結果（Shift+F3）"),
+            ("search_next","下一筆",self.next_search_result,("F3",),"下一筆結果（F3）")]:
             action=QAction(glyph_icon(name),label,self)
             action.triggered.connect(handler)
             action.setShortcuts([QKeySequence(key) for key in shortcuts])
             action.setToolTip(tip)
             self.actions[name]=action
+        # 工具列依用途分組：檔案｜復原｜編輯與圖章｜頁面｜工具。
+        self.stamp_menu_button=QToolButton()
+        self.stamp_menu_button.setDefaultAction(self.actions["stamp"])
+        self.stamp_menu_button.setMenu(stamp_menu)
+        self.stamp_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.page_menu_button=QToolButton()
+        self.page_menu_button.setText("頁面操作")
+        self.page_menu_button.setIcon(glyph_icon("page_menu"))
+        self.page_menu_button.setMenu(page_menu)
+        self.page_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.markup_menu_button=QToolButton()
+        self.markup_menu_button.setText("標記註解")
+        self.markup_menu_button.setIcon(glyph_icon("markup_menu"))
+        self.markup_menu_button.setMenu(markup_menu)
+        self.markup_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        for button in (self.stamp_menu_button,self.page_menu_button,self.markup_menu_button):
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        layout=[("open","save"),("undo","redo"),
+            ("add_text",self.markup_menu_button,self.stamp_menu_button,"signature"),
+            (self.page_menu_button,"merge","split","page_marks","header_footer"),
+            ("ocr","compare","search")]
+        for group_index,group in enumerate(layout):
+            if group_index:
+                toolbar.addSeparator()
+            for item in group:
+                if isinstance(item,str):
+                    toolbar.addAction(self.actions[item])
+                else:
+                    toolbar.addWidget(item)
+        toolbar.widgetForAction(self.actions["open"]).setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        tips={
+            "open":"開啟 PDF（Ctrl+O）；點右側箭頭可選最近開啟的檔案",
+            "save":"另存新檔（Ctrl+S）；原始檔案不會被覆蓋",
+            "undo":"復原上一步（Ctrl+Z）",
+            "redo":"重做（Ctrl+Y）",
+            "add_text":"在頁面上點選位置新增文字（Ctrl+T）",
+            "stamp":"匯入 PNG 圖章；點右側箭頭可使用常用圖章或轉換既有圖章",
+            "collection":"從收藏中選擇常用圖章或簽名",
+            "convert_stamp":"將文件中原有的圖章影像轉為可移動、縮放的圖層",
+            "signature":"手寫簽名後放到頁面上",
+            "ocr":"辨識縮圖列中選取頁面的文字，讓掃描檔可搜尋與複製",
+            "compare":"與另一份 PDF 逐頁比較差異",
+            "merge":"合併多份 PDF",
+            "split":"將文件拆分為多個檔案",
+            "page_marks":"加入頁碼或文字／圖片浮水印",
+            "header_footer":"套用頁首頁尾範本",
+        }
+        for name,tip in tips.items():
+            self.actions[name].setToolTip(tip)
+        self.page_menu_button.setToolTip("移動、旋轉、複製、裁切、抽取或刪除選取頁面")
+        self.markup_menu_button.setToolTip("螢光標記、底線與文字註解")
+        self.page_spin=QSpinBox()
+        self.page_spin.setRange(1,1)
+        self.page_spin.setToolTip("輸入頁碼後按 Enter 跳頁")
+        self.page_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.page_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page_spin.setMinimumWidth(56)
+        self.page_spin.valueChanged.connect(lambda n:self.goto_page(n-1))
+        self.page_total=QLabel("/ 0")
         self.zoom=QComboBox()
         self.zoom.addItems(["適合頁面","適合寬度"]+
             [f"{round(level*100)}%" for level in ZOOM_LEVELS])
         self.zoom.setCurrentText("125%")
+        self.zoom.setToolTip("縮放比例")
         self.zoom.currentTextChanged.connect(self.change_zoom)
-        self.addToolBarBreak()
-        search_toolbar=QToolBar("文件搜尋",self)
-        search_toolbar.setMovable(False)
-        search_toolbar.setIconSize(QSize(16,16))
-        search_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.addToolBar(search_toolbar)
-        search_action=QAction(glyph_icon("search"),"搜尋",self)
-        search_action.setShortcut(QKeySequence("Ctrl+F"))
-        search_action.triggered.connect(self.focus_search)
-        search_toolbar.addAction(search_action)
-        self.actions["search"]=search_action
-        self.search_input=QLineEdit()
-        self.search_input.setPlaceholderText("輸入全文搜尋文字後按 Enter")
-        self.search_input.setMaximumWidth(360)
-        self.search_input.returnPressed.connect(lambda:self.perform_search())
-        search_toolbar.addWidget(self.search_input)
-        previous=QAction(glyph_icon("search_previous"),"上一筆",self)
-        previous.setShortcut(QKeySequence("Shift+F3"))
-        previous.triggered.connect(lambda:self.next_search_result(-1))
-        search_toolbar.addAction(previous)
-        self.actions["search_previous"]=previous
-        next_result=QAction(glyph_icon("search_next"),"下一筆",self)
-        next_result.setShortcut(QKeySequence("F3"))
-        next_result.triggered.connect(self.next_search_result)
-        search_toolbar.addAction(next_result)
-        self.actions["search_next"]=next_result
-        self.search_count=QLabel("0 / 0")
-        search_toolbar.addWidget(self.search_count)
-        search_toolbar.addSeparator()
-        search_toolbar.addAction(self.actions["previous_page"])
-        search_toolbar.addWidget(self.page_spin)
-        search_toolbar.addAction(self.actions["next_page"])
-        search_toolbar.addAction(self.actions["zoom_out"])
-        search_toolbar.addWidget(self.zoom)
-        search_toolbar.addAction(self.actions["zoom_in"])
-        for name in ("zoom_out","zoom_in"):
-            # 縮放按鈕僅顯示圖示，文字說明保留在提示中。
-            search_toolbar.widgetForAction(self.actions[name]).setToolButtonStyle(
-                Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.build_status_bar()
         splitter=QSplitter()
         self.thumbs=ThumbnailList()
         self.thumbs.setIconSize(QSize(110,140))
@@ -383,8 +391,16 @@ class MainWindow(QMainWindow):
         self.canvas.zoom_step_requested.connect(self.zoom_by)
         self.canvas.page_step_requested.connect(self.step_page)
         self.canvas.files_dropped.connect(self.open_dropped_files)
+        self.canvas.pointer_moved.connect(self.show_pointer_position)
+        self.search_bar=SearchBar(self.canvas,self.actions["search_previous"],self.actions["search_next"])
+        self.search_input=self.search_bar.input
+        self.search_count=self.search_bar.count
+        self.search_input.returnPressed.connect(lambda:self.perform_search())
+        self.search_bar.closed.connect(self.close_search_bar)
         splitter.addWidget(self.canvas)
         self.panels=QStackedWidget()
+        self.info_panel=DocumentInfoPanel()
+        self.panels.addWidget(self.info_panel)
         self.text_panel=TextPanel()
         self.text_panel.preview_requested.connect(self.preview_from_panel)
         self.text_panel.apply_requested.connect(self.apply_preview)
@@ -414,6 +430,96 @@ class MainWindow(QMainWindow):
         self.restore_window_state()
         self.statusBar().showMessage("開啟 PDF 開始編輯；也可以直接把 PDF 拖進視窗。文件全程在本機處理。")
         self.refresh_actions()
+
+    def build_status_bar(self):
+        """狀態列右側：游標座標、頁面尺寸、儲存狀態、翻頁與縮放。"""
+        bar=self.statusBar()
+        self.pointer_label=QLabel("")
+        self.pointer_label.setObjectName("statusField")
+        self.pointer_label.setMinimumWidth(150)
+        self.pointer_label.setToolTip("游標所在的 PDF 座標（單位：點，72 點 = 1 英吋）")
+        self.page_size_label=QLabel("")
+        self.page_size_label.setObjectName("statusField")
+        self.dirty_label=QLabel("")
+        self.dirty_label.setObjectName("dirtyIndicator")
+        for widget in (self.pointer_label,self.page_size_label,self.dirty_label):
+            bar.addPermanentWidget(widget)
+        navigation=QWidget()
+        navigation.setObjectName("statusGroup")
+        row=QHBoxLayout(navigation)
+        row.setContentsMargins(6,0,6,0)
+        row.setSpacing(2)
+        self.status_buttons={}
+        def button(name):
+            widget=QToolButton()
+            widget.setDefaultAction(self.actions[name])
+            widget.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            widget.setAutoRaise(True)
+            self.status_buttons[name]=widget
+            return widget
+        row.addWidget(button("first_page"))
+        row.addWidget(button("previous_page"))
+        row.addWidget(self.page_spin)
+        row.addWidget(self.page_total)
+        row.addWidget(button("next_page"))
+        row.addWidget(button("last_page"))
+        row.addSpacing(10)
+        row.addWidget(button("zoom_out"))
+        row.addWidget(self.zoom)
+        row.addWidget(button("zoom_in"))
+        bar.addPermanentWidget(navigation)
+
+    def show_pointer_position(self,point):
+        if point is None or not self.session:
+            self.pointer_label.setText("")
+            return
+        self.pointer_label.setText(f"X {point[0]:.1f}  Y {point[1]:.1f} pt")
+
+    def update_status_fields(self):
+        """同步狀態列的頁數、頁面尺寸與未儲存標示。"""
+        active=self.session is not None
+        self.page_total.setText(f"/ {self.page_count}" if active else "/ 0")
+        if active and self.page_data:
+            width,height=self.page_data["bounds"][2:]
+            self.page_size_label.setText(f"{width/72*25.4:.0f} × {height/72*25.4:.0f} mm")
+        elif not active:
+            self.page_size_label.setText("")
+        if active and self.session.dirty:
+            self.dirty_label.setText("● 未儲存")
+            self.dirty_label.setToolTip("有尚未另存的變更（Ctrl+S 另存新檔）")
+        else:
+            self.dirty_label.setText("")
+            self.dirty_label.setToolTip("")
+
+    def update_side_panel(self):
+        """沒有選取文字或圖章時，右側改顯示文件資訊。"""
+        current=self.panels.currentWidget()
+        editing_text=self.run is not None or self.insertion_rect is not None or self.preview is not None
+        layer_selected=self.session is not None and any(
+            layer.id==self.layer_id for layer in self.session.overlays)
+        if current is self.text_panel and editing_text:
+            return
+        if current is self.overlay_panel and layer_selected:
+            return
+        if current is not self.info_panel:
+            self.panels.setCurrentWidget(self.info_panel)
+        self.refresh_document_info()
+
+    def refresh_document_info(self):
+        if self.panels.currentWidget() is not self.info_panel:
+            return
+        if not self.session:
+            self.info_panel.clear()
+            return
+        key=(self.token,self.session.revision,self.page)
+        if getattr(self,"_info_key",None)==key:
+            return
+        self._info_key=key
+        try:
+            self.info_panel.set_info(describe_document(self.session.pdf,self.page,
+                self.session.source,self.session.access,self.session.password_used))
+        except Exception:
+            self.info_panel.clear()
 
     def restore_window_state(self):
         """還原上次的視窗大小、面板寬度與縮放模式。"""
@@ -555,6 +661,14 @@ class MainWindow(QMainWindow):
         self.overlay_panel.setEnabled(edit)
         self.text_panel.setEnabled(edit and ((self.run is not None and self.run.editable) or
             self.insertion_rect is not None))
+        self.actions["previous_page"].setEnabled(active and not self.busy and self.page>0)
+        self.actions["first_page"].setEnabled(active and not self.busy and self.page>0)
+        self.actions["next_page"].setEnabled(active and not self.busy and self.page<self.page_count-1)
+        self.actions["last_page"].setEnabled(active and not self.busy and self.page<self.page_count-1)
+        self.page_spin.setEnabled(active and not self.busy)
+        self.zoom.setEnabled(active)
+        self.update_status_fields()
+        self.update_side_panel()
 
     def error(self,error):
         self.busy=False
@@ -1222,8 +1336,11 @@ class MainWindow(QMainWindow):
     def focus_search(self):
         if not self.session:
             return
-        self.search_input.setFocus()
-        self.search_input.selectAll()
+        self.search_bar.open_bar()
+
+    def close_search_bar(self):
+        self.canvas.clear_search_result()
+        self.canvas.setFocus()
 
     def clear_search_results(self,clear_query=False):
         self.search_results=()
@@ -1328,6 +1445,7 @@ class MainWindow(QMainWindow):
                 status=self.session.access.reason or ("預覽中，尚未套用" if self.preview else
                     "有未儲存變更" if self.session.dirty else "可編輯")
                 self.statusBar().showMessage(f"第 {self.page+1} / {self.page_count} 頁  ·  {status}")
+            self.update_status_fields()
         pixel_ratio=float(self.canvas.devicePixelRatioF())
         self.jobs.submit(render_page,(data,self.page,self.scale,pixel_ratio),done,self.error)
 
