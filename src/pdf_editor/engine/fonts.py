@@ -228,3 +228,53 @@ def resolve_bold(base_path):
 
 
 
+
+
+# 依原字型名稱判斷字體風格，對應 Windows 內建的相近字型（依序嘗試）。
+FONT_STYLE_HINTS = (
+    ("kai", ("kai", "楷")),
+    ("serif", ("times", "serif", "roman", "ming", "song", "sun", "明", "宋", "georgia",
+        "garamond", "cambria", "century", "fangsong", "仿宋")),
+    ("sans", ("arial", "helvetica", "sans", "hei", "gothic", "黑", "calibri", "verdana",
+        "tahoma", "segoe", "jhenghei", "yahei")),
+)
+SIMILAR_FONTS = {
+    "kai": {"latin": ("Times New Roman",), "cjk": ("DFKai-SB", "標楷體", "STKaiti")},
+    "serif": {"latin": ("Times New Roman", "Georgia"), "cjk": ("PMingLiU", "MingLiU", "新細明體", "SimSun")},
+    "sans": {"latin": ("Arial", "Calibri"), "cjk": ("Microsoft JhengHei", "微軟正黑體", "Microsoft YaHei")},
+}
+
+
+def font_style(font_name):
+    """回傳 kai、serif、sans；無法判斷（如 Type3 字型）時回傳 None。"""
+    name = str(font_name or "").split("+")[-1].lower()
+    if not name or name.startswith("type3"):
+        return None
+    for style, hints in FONT_STYLE_HINTS:
+        if any(hint in name for hint in hints):
+            return style
+    return None
+
+
+def similar_font(font_name, text, fonts=None):
+    """找出與原字型風格相近、且含有全部字元的系統字型，回傳（顯示名稱, 路徑）。"""
+    style = font_style(font_name)
+    if style is None:
+        return None
+    installed = {}
+    for display, path in (system_fonts() if fonts is None else fonts):
+        for alias in display.split(" & "):
+            installed.setdefault(alias.strip().lower(), (display, path))
+    groups = SIMILAR_FONTS[style]
+    ascii_only = all(ord(char) < 128 for char in text)
+    order = groups["latin"] + groups["cjk"] if ascii_only else groups["cjk"] + groups["latin"]
+    for candidate in order:
+        match = installed.get(candidate.lower())
+        if match is None:
+            continue
+        try:
+            checked_font(match[1], text)
+        except EditorError:
+            continue
+        return match
+    return None

@@ -591,7 +591,30 @@ class Canvas(QGraphicsView):
         x=max(12,(self.viewport().width()-self.insertion_hint.width())//2)
         self.insertion_hint.move(x,12)
 
-    def begin_inline_text(self,rect,text,run=None,size=11,alignment="left"):
+    _font_families={}
+
+    @classmethod
+    def font_family_for(cls,font_path):
+        """載入字型檔並回傳字型家族名稱，讓輸入框外觀接近頁面上的字。"""
+        if not font_path:
+            return None
+        if font_path not in cls._font_families:
+            from PySide6.QtGui import QFontDatabase
+            families=()
+            try:
+                font_id=QFontDatabase.addApplicationFont(str(font_path))
+                if font_id>=0:
+                    families=QFontDatabase.applicationFontFamilies(font_id)
+            except Exception:
+                families=()
+            cls._font_families[font_path]=families[0] if families else None
+        return cls._font_families[font_path]
+
+    def view_scale(self):
+        a,b=self.matrix[0],self.matrix[1]
+        return max(0.1,(a*a+b*b)**0.5)
+
+    def begin_inline_text(self,rect,text,run=None,size=11,alignment="left",font_path=None):
         self.cancel_inline_editor()
         self.inline_run=run
         self.inline_rect=tuple(rect)
@@ -600,14 +623,17 @@ class Canvas(QGraphicsView):
             else Qt.AlignmentFlag.AlignLeft)
         editor.setAlignment(horizontal | Qt.AlignmentFlag.AlignVCenter)
         editor.setPlaceholderText("直接輸入文字")
+        editor.setObjectName("inlineEditor")
+        # PDF 點數依目前縮放換算成螢幕像素，輸入時的字大小與頁面上一致；
+        # 字型須寫在樣式表內，否則會被全域樣式表的字級覆蓋。
+        pixels=max(8,round(float(size)*self.view_scale()))
+        family=self.font_family_for(font_path)
+        families=(f'"{family}", ' if family else "")+'"Microsoft JhengHei UI"'
         editor.setStyleSheet(
-            "QLineEdit{background:rgba(255,255,255,240);color:#0b1220;border:2px solid %s;"
-            "border-radius:3px;padding:2px 5px;}"
-            "QLineEdit[error=\"true\"]{border:2px solid %s;background:#fff5f5;}"
-            %(COLORS["accent_strong"],COLORS["danger"]))
-        font=editor.font()
-        font.setPointSizeF(max(6,float(size)))
-        editor.setFont(font)
+            "#inlineEditor{background:rgba(255,255,255,240);color:#0b1220;border:2px solid %s;"
+            "border-radius:3px;padding:2px 5px;font-size:%dpx;font-family:%s;}"
+            "#inlineEditor[error=\"true\"]{border:2px solid %s;background:#fff5f5;}"
+            %(COLORS["accent_strong"],pixels,families,COLORS["danger"]))
         editor.commit_requested.connect(self._commit_inline_text)
         editor.cancel_requested.connect(self._cancel_inline_text)
         editor.error_label=self.inline_error

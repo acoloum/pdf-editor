@@ -200,3 +200,103 @@ def test_successful_edit_reselects_text_for_further_formatting(qtbot, source_pat
         assert window.canvas.inline_editor is not None
     finally:
         _close(window)
+
+
+def test_font_style_and_similar_font_selection():
+    from pdf_editor.engine.fonts import font_style, similar_font
+    assert font_style("ABCDEF+TimesNewRomanPSMT") == "serif"
+    assert font_style("PMingLiU") == "serif"
+    assert font_style("ArialMT") == "sans"
+    assert font_style("DFKai-SB") == "kai"
+    assert font_style("Type3 (4 0 R)") is None
+    installed = [("Times New Roman", "times"), ("MingLiU & PMingLiU & MingLiU_HKSCS", "mingliu"),
+        ("Microsoft JhengHei & Microsoft JhengHei UI", "msjh"), ("Arial", "arial")]
+    import pdf_editor.engine.fonts as fonts
+    covered = {"times": set("0123456789 ABC"), "arial": set("0123456789 ABC")}
+
+    def fake_checked(path, text):
+        if path in covered and not set(text) <= covered[path]:
+            raise EditorError("FONT_MISSING_GLYPH", "缺字")
+        return object()
+
+    original = fonts.checked_font
+    fonts.checked_font = fake_checked
+    try:
+        # 英數字優先使用西文字型；含中文時改用中文字型。
+        assert similar_font("TimesNewRomanPSMT", "316", installed)[1] == "times"
+        assert similar_font("TimesNewRomanPSMT", "修正 316", installed)[1] == "mingliu"
+        assert similar_font("Helvetica", "測試", installed)[1] == "msjh"
+        assert similar_font("Type3 (4 0 R)", "測試", installed) is None
+    finally:
+        fonts.checked_font = original
+
+
+def test_page_cell_index_is_cached_per_page(font_path):
+    import time
+    from pdf_editor.engine import text as text_engine
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    for x in (20, 120):
+        page.draw_rect((x, 20, x + 100, 50))
+        page.insert_text((x + 10, 40), f"CELL{x}", fontsize=10)
+    data = doc.tobytes()
+    doc.close()
+    text_engine.page_cell_index.cache_clear()
+    runs = extract_runs(data, 0)
+    started = time.perf_counter()
+    first = text_engine.find_table_cell(data, 0, runs[0].rect)
+    second = text_engine.find_table_cell(data, 0, runs[1].rect)
+    assert first is not None and second is not None and first != second
+    info = text_engine.page_cell_index.cache_info()
+    # 同一頁點選兩段文字只分析一次頁面。
+    assert info.misses == 1 and info.hits == 1
+    assert time.perf_counter() - started < 5
+
+
+def test_centered_title_keeps_center_alignment(qtbot, tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=400, height=300)
+    title = "CENTERED TITLE"
+    width = pymupdf.get_text_length(title, fontsize=14)
+    page.insert_text(((400 - width) / 2, 40), title, fontsize=14)
+    page.insert_text((30, 120), "LEFT TEXT", fontsize=12)
+    path = tmp_path / "置中.pdf"
+    path.write_bytes(doc.tobytes())
+    doc.close()
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.show()
+        window.open_document(path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        runs = {run.text: run for run in window.page_data["runs"]}
+        window.select_run(runs[title])
+        assert window.text_panel.alignment.currentData() == "hcenter"
+        window.canvas.cancel_inline_editor()
+        window.select_run(runs["LEFT TEXT"])
+        assert window.text_panel.alignment.currentData() == "left"
+    finally:
+        _close(window)
+
+
+def test_inline_editor_font_follows_zoom(qtbot, source_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.show()
+        window.open_document(source_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        run = next(item for item in window.page_data["runs"] if "KEEP" in item.text)
+        window.select_run(run)
+        small = window.canvas.inline_editor.font().pixelSize()
+        assert small == max(8, round(run.size * window.canvas.view_scale()))
+        window.canvas.cancel_inline_editor()
+        window.zoom_by(1)
+        window.zoom_by(1)
+        qtbot.waitUntil(lambda: not window.busy and window.page_data is not None
+            and window.canvas.view_scale() > 1.6, timeout=30000)
+        run = next(item for item in window.page_data["runs"] if "KEEP" in item.text)
+        window.select_run(run)
+        assert window.canvas.inline_editor.font().pixelSize() > small
+    finally:
+        _close(window)

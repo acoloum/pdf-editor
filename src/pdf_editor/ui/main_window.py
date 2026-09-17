@@ -3,7 +3,7 @@ from dataclasses import replace
 import hashlib
 import uuid
 import pymupdf
-from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal,QPointF
+from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal,QPointF,QTimer
 from PySide6.QtGui import QAction,QKeySequence,QIcon,QPixmap
 from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton,QAbstractItemView,QApplication,QHBoxLayout,QTabWidget,QTreeWidget,QTreeWidgetItem,QProgressDialog
 from pdf_editor.document.session import DocumentSession
@@ -14,7 +14,8 @@ from pdf_editor.engine.inspection import unlock_pdf
 from pdf_editor.engine.text import replace_text, insert_text, find_table_cell
 from pdf_editor.engine.text import overlaps as text_overlaps
 from pdf_editor.engine.overlay import flatten_overlays
-from pdf_editor.engine.fonts import default_font,embedded_font,checked_font
+from pdf_editor.engine.fonts import default_font,embedded_font,checked_font,similar_font
+from pdf_editor.engine.text import page_cell_index
 from pdf_editor.model import TextReplacement,TextInsertion,Overlay
 from pdf_editor.errors import EditorError
 from pdf_editor.workers import Jobs
@@ -1734,6 +1735,7 @@ class MainWindow(QMainWindow):
                     self.canvas.show_search_result(self.search_results[self.search_index].rect)
                 if self._reselect_after_render:
                     self.reselect_text_after_render(result)
+                self.schedule_cell_analysis()
                 if self.annotation is not None:
                     selected=next((item for item in result.get("annotations",())
                         if item.xref==self.annotation.xref),None)
@@ -1780,11 +1782,20 @@ class MainWindow(QMainWindow):
         original=embedded_font(self.session.pdf,self.page,run,self.session.history.root)
         if original:
             self.text_panel.font_path=str(original)
-            self.text_panel.font_label.setText("原字型："+run.font_name+"；缺字時請使用內建中文字型。")
+            self.text_panel.font_label.setText("原字型："+run.font_name+"；缺字時會改用相近字型。")
+        else:
+            similar=similar_font(run.font_name,run.text)
+            if similar:
+                self.text_panel.font_path=similar[1]
+                self.text_panel.font_label.setText(
+                    f"原字型 {run.font_name} 無法直接使用，改用相近字型：{similar[0]}")
         cell=find_table_cell(self.session.pdf,self.page,run.rect)
         if cell:
             self.text_panel.set_rect(cell)
             self.text_panel.set_alignment(2)
+        elif self.page_data and self.is_page_centered(run.rect):
+            # 標題等置中文字：改字後維持以原中心點置中。
+            self.text_panel.set_alignment(1)
         if not open_editor:
             self.canvas.highlight_run(run)
             self.text_panel.info.setText("已套用。右側可繼續調整格式；按 Enter、F2 或再點一次文字可修改內容。")
@@ -1792,8 +1803,13 @@ class MainWindow(QMainWindow):
             return
         self.text_panel.info.setText("請直接在頁面文字框輸入；Enter 或點到別處套用，Esc 取消。")
         self.canvas.begin_inline_text(self.text_panel.rect(),run.text,run,run.size,
-            self.text_panel.alignment.currentData())
+            self.text_panel.alignment.currentData(),self.text_panel.font_path)
         self.refresh_actions()
+
+    def is_page_centered(self,rect,tolerance=3.0):
+        width=self.page_data["bounds"][2]
+        center=(rect[0]+rect[2])/2
+        return abs(center-width/2)<=tolerance and rect[2]-rect[0]<=width*0.9
 
     def commit_inline_text(self,payload):
         if not self.session or self.busy:
@@ -1829,9 +1845,14 @@ class MainWindow(QMainWindow):
                 if exc.code!="FONT_MISSING_GLYPH":
                     self.error((exc.code,str(exc),()))
                     return
-                font_path=str(default_font())
+                similar=similar_font(run.font_name if run is not None else "",text)
+                if similar:
+                    font_path=similar[1]
+                    p.font_label.setText(f"原字型缺少部分字元，已改用相近字型：{similar[0]}")
+                else:
+                    font_path=str(default_font())
+                    p.font_label.setText("已自動改用內建中文字型，以完整顯示新文字。")
                 p.font_path=font_path
-                p.font_label.setText("已自動改用內建中文字型，以完整顯示新文字。")
         if run is None:
             if not text:
                 self.run=None
@@ -2109,7 +2130,7 @@ class MainWindow(QMainWindow):
         self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
         self.text_panel.set_insertion(rect,centered=cell is not None)
         self.canvas.begin_inline_text(rect,"",None,self.text_panel.size.value(),
-            self.text_panel.alignment.currentData())
+            self.text_panel.alignment.currentData(),self.text_panel.font_path)
         self.refresh_actions()
 
     def delete_run(self,run):
@@ -2146,7 +2167,7 @@ class MainWindow(QMainWindow):
             self.refresh_actions()
             self.request_render()
             self.canvas.begin_inline_text(insertion_rect,"",None,run.size,
-                self.text_panel.alignment.currentData())
+                self.text_panel.alignment.currentData(),self.text_panel.font_path)
         self.jobs.submit(replace_text,(self.session.pdf,request),done,self.error)
 
     RECOVERABLE_TEXT_ERRORS=("TEXT_OVERFLOW","OVERLAP","GEOMETRY","FONT_MISSING_GLYPH",
@@ -2195,7 +2216,7 @@ class MainWindow(QMainWindow):
             return
         self.panels.setCurrentWidget(self.text_panel)
         self.canvas.begin_inline_text(rect,text,run,self.text_panel.size.value(),
-            self.text_panel.alignment.currentData())
+            self.text_panel.alignment.currentData(),self.text_panel.font_path)
         self.canvas.show_inline_error(message)
         if code=="OVERLAP":
             own=run.id if run is not None else None
@@ -2204,6 +2225,19 @@ class MainWindow(QMainWindow):
                     or (run is not None and text_overlaps(item.rect,run.rect)))]
             self.canvas.show_conflicts(conflicts)
         self.statusBar().showMessage(message.split("\n")[0])
+
+    def schedule_cell_analysis(self):
+        """頁面顯示後稍候預先分析表格，點選文字時不必再等待。"""
+        if not self.session or not self.session.access.can_edit:
+            return
+        pdf,page=self.session.pdf,self.page
+        def analyse():
+            if self.session is not None and self.session.pdf is pdf and self.page==page and not self.busy:
+                try:
+                    page_cell_index(pdf,page)
+                except Exception:
+                    pass
+        QTimer.singleShot(200,analyse)
 
     def reselect_text_after_render(self,result):
         """套用後自動選回剛修改的文字，方便連續調整格式。"""

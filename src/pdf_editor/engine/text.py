@@ -16,58 +16,48 @@ def _image_covers_rect(img_info, rect):
         return False
     return inter.get_area() / rect.get_area() > 0.5
 
-def _cell_from_drawings(page, point):
-    """以繪圖矩形備援偵測儲存格，用於 find_tables 無法解析的矮列或單格表格。"""
-    page_area = page.rect.width * page.rect.height
-    images = page.get_image_info()
-    candidates = []
-    for drawing in page.get_drawings():
-        candidate = pymupdf.Rect(drawing["rect"])
-        if candidate.is_empty or not candidate.contains(point):
-            continue
-        # 排除整頁背景等過大的填色矩形，避免誤判為儲存格。
-        if candidate.width * candidate.height > page_area / 4:
-            continue
-        # 排除被圖像大面積覆蓋的裝飾框（標題橫幅、LOGO 底框等），
-        # 避免勾粗體時把框內文字置中重繪到框中央，造成「字消失」。
-        if any(_image_covers_rect(img, candidate) for img in images):
-            continue
-        candidates.append(candidate)
-    if not candidates:
-        return None
-    return min(candidates, key=lambda item: item.width * item.height)
+@functools.lru_cache(maxsize=4)
+def page_cell_index(pdf: bytes, page: int):
+    """分析整頁的表格儲存格與可用繪圖框，每頁只做一次。
 
-@functools.lru_cache(maxsize=8)
-def find_table_cell(pdf: bytes, page: int, rect) -> tuple[float, float, float, float] | None:
-    """找出包含文字中心點的表格儲存格，找不到時回傳 None。
-
-    選取文字（select_run）與提交編輯（commit_inline_text）會對同一份
-    pdf 與 rect 重複呼叫，此函數每次耗時可達上百毫秒且執行於 UI 執行緒，
-    以 lru_cache 讓提交時直接命中選取時的快取。
+    表格偵測每次約需上百毫秒；改為依頁快取後，同頁點選不同文字只需查表。
     """
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
-        box = pymupdf.Rect(rect)
-        point = pymupdf.Point((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
+        current = doc[page]
         try:
-            tables = doc[page].find_tables().tables
+            tables = current.find_tables().tables
         except (AttributeError, RuntimeError):
             tables = ()
-        candidates = []
-        for table in tables:
-            for cell in table.cells:
-                if cell is None:
-                    continue
-                candidate = pymupdf.Rect(cell)
-                if candidate.contains(point):
-                    candidates.append(candidate)
-        if candidates:
-            cell = min(candidates, key=lambda item: item.width * item.height)
-        else:
-            cell = _cell_from_drawings(doc[page], point)
-            if cell is None:
-                return None
-        inset = min(2.0, cell.width / 10, cell.height / 10)
-        return (cell.x0 + inset, cell.y0 + inset, cell.x1 - inset, cell.y1 - inset)
+        cells = tuple(tuple(cell) for table in tables for cell in table.cells if cell is not None)
+        page_area = current.rect.width * current.rect.height
+        images = current.get_image_info()
+        drawings = []
+        for drawing in current.get_drawings():
+            candidate = pymupdf.Rect(drawing["rect"])
+            # 排除空框、整頁背景，以及被圖像大面積覆蓋的裝飾框（標題橫幅、LOGO 底框等）。
+            if candidate.is_empty or candidate.width * candidate.height > page_area / 4:
+                continue
+            if any(_image_covers_rect(img, candidate) for img in images):
+                continue
+            drawings.append(tuple(candidate))
+        return cells, tuple(drawings)
+
+
+@functools.lru_cache(maxsize=64)
+def find_table_cell(pdf: bytes, page: int, rect) -> tuple[float, float, float, float] | None:
+    """找出包含文字中心點的表格儲存格，找不到時回傳 None。"""
+    box = pymupdf.Rect(rect)
+    point = pymupdf.Point((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
+    cells, drawings = page_cell_index(pdf, page)
+    candidates = [pymupdf.Rect(cell) for cell in cells if pymupdf.Rect(cell).contains(point)]
+    if not candidates:
+        # 以繪圖矩形備援偵測儲存格，用於 find_tables 無法解析的矮列或單格表格。
+        candidates = [pymupdf.Rect(item) for item in drawings if pymupdf.Rect(item).contains(point)]
+    if not candidates:
+        return None
+    cell = min(candidates, key=lambda item: item.width * item.height)
+    inset = min(2.0, cell.width / 10, cell.height / 10)
+    return (cell.x0 + inset, cell.y0 + inset, cell.x1 - inset, cell.y1 - inset)
 
 FITS = ("none", "expand", "shrink")
 MIN_SHRINK_RATIO = 0.7

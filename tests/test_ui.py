@@ -2307,7 +2307,9 @@ def test_window_inline_edit_applies_bold_when_checked(qtbot, source_path, monkey
         qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
         with pymupdf.open(stream=window.session.pdf) as doc:
             assert "粗體測試" in doc[0].get_text()
-            assert b"2 Tr" in doc[0].read_contents()
+            # 有同族粗體字型檔時使用真粗體，否則以描邊模擬粗體。
+            fonts=" ".join(font[3] for font in doc[0].get_fonts()).lower()
+            assert b"2 Tr" in doc[0].read_contents() or "bold" in fonts
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
