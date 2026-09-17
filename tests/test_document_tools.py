@@ -135,3 +135,49 @@ def test_window_print_range_uses_selected_pages(qtbot, multi_page_path):
         assert window.print_page_indices(printer) == [0, 1, 2]
     finally:
         _close(window)
+
+
+def test_print_preview_uses_lower_resolution(qtbot, multi_page_path):
+    from PySide6.QtGui import QPainter, QPicture
+    from PySide6.QtPrintSupport import QPrinter
+    from pdf_editor.ui.printing import is_preview
+    picture = QPicture()
+    painter = QPainter(picture)
+    try:
+        # 預覽元件以圖片引擎記錄內容，需辨識為預覽以降低解析度。
+        assert is_preview(painter)
+    finally:
+        painter.end()
+
+
+def test_print_action_opens_preview_first(qtbot, multi_page_path, monkeypatch):
+    from PySide6.QtPrintSupport import QPrintPreviewDialog
+    window = MainWindow()
+    qtbot.addWidget(window)
+    opened = []
+
+    def fake_exec(dialog):
+        opened.append(dialog.windowTitle())
+        return QPrintPreviewDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QPrintPreviewDialog, "exec", fake_exec)
+    try:
+        window.open_document(multi_page_path)
+        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+        window.actions["print"].trigger()
+        assert opened == [f"預覽列印 — {multi_page_path.name}"]
+        assert window.statusBar().currentMessage() == "已關閉預覽列印。"
+    finally:
+        _close(window)
+
+
+def test_qt_standard_dialogs_are_translated(qtbot):
+    from PySide6.QtCore import QCoreApplication
+    from pdf_editor.__main__ import _install_qt_translations
+    app = QApplication.instance()
+    translator = _install_qt_translations(app)
+    try:
+        assert translator is not None
+        assert QCoreApplication.translate("QPrintPreviewDialog", "Print") == "列印"
+    finally:
+        app.removeTranslator(translator)

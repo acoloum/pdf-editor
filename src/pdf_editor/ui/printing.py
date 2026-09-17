@@ -1,9 +1,11 @@
 """以點陣方式列印 PDF 頁面，圖章與簽名會先合併到頁面上。"""
 import pymupdf
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QImage, QPainter, QTransform
+from PySide6.QtGui import QImage, QPaintEngine, QPainter, QTransform
 
 MAX_PRINT_DPI = 300
+# 預覽畫面不需要印表機解析度，降低解析度可大幅加快多頁文件的預覽速度。
+PREVIEW_DPI = 150
 
 
 def print_pages(printer, pdf, pages, progress=None):
@@ -20,6 +22,8 @@ def print_pages(printer, pdf, pages, progress=None):
     printed = 0
     try:
         dpi = max(72, min(MAX_PRINT_DPI, printer.resolution()))
+        if is_preview(painter):
+            dpi = min(dpi, PREVIEW_DPI)
         with pymupdf.open(stream=pdf, filetype="pdf") as doc:
             for index, page_index in enumerate(pages):
                 if progress is not None and progress(index, len(pages)) is False:
@@ -44,3 +48,9 @@ def print_pages(printer, pdf, pages, progress=None):
     finally:
         painter.end()
     return printed
+
+
+def is_preview(painter):
+    """預覽列印時 Qt 以圖片引擎記錄繪圖，實際列印則是印表機引擎。"""
+    engine = painter.paintEngine()
+    return engine is not None and engine.type() == QPaintEngine.Type.Picture

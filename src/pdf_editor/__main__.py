@@ -76,6 +76,25 @@ def _install_exception_hook(app):
     sys.excepthook = hook
 
 
+def _install_qt_translations(app):
+    """載入 Qt 內建繁體中文翻譯，讓預覽列印等標準視窗顯示中文。"""
+    from pathlib import Path
+
+    import PySide6
+    from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
+
+    locale = QLocale(QLocale.Language.Chinese, QLocale.Country.Taiwan)
+    # 封裝版的 Qt 路徑設定可能不同，找不到時改用 PySide6 套件內的翻譯資料夾。
+    folders = (QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath),
+               str(Path(PySide6.__file__).parent / "translations"))
+    for folder in folders:
+        translator = QTranslator(app)
+        if translator.load(locale, "qtbase", "_", folder):
+            app.installTranslator(translator)
+            return translator
+    return None
+
+
 def main(argv=None):
     multiprocessing.freeze_support()
     args=list(sys.argv[1:] if argv is None else argv)
@@ -88,6 +107,7 @@ def main(argv=None):
     app.setApplicationName("墨頁 PDF")
     cleanup_stale()
     _install_exception_hook(app)
+    _install_qt_translations(app)
     window=MainWindow()
     window.show()
     if args and args[0]=="--smoke-test":

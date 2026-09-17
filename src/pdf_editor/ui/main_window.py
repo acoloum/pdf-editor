@@ -44,7 +44,8 @@ from pdf_editor.ui.comparison_dialog import ComparisonDialog
 from pdf_editor.ui.legacy_stamp_dialog import LegacyStampDialog
 from pdf_editor.ui.page_dialogs import (MergeDialog,SplitDialog,CropPagesDialog,
     PageDecorationDialog,HeaderFooterTemplatesDialog)
-from pdf_editor.ui.style import STYLE,apply_theme,apply_dark_title_bar,glyph_icon,thumbnail_icon
+from pdf_editor.ui.style import (STYLE,apply_theme,apply_dark_title_bar,glyph_icon,thumbnail_icon,
+    themed_glyph_icon)
 from pdf_editor.ui.settings import AppSettings
 from pdf_editor.ui.info_panel import DocumentInfoPanel,describe_document
 from pdf_editor.ui.search_bar import SearchBar
@@ -298,7 +299,7 @@ class MainWindow(QMainWindow):
             ("search","搜尋",self.focus_search,("Ctrl+F",),"搜尋全文（Ctrl+F）"),
             ("search_previous","上一筆",lambda:self.next_search_result(-1),("Shift+F3",),"上一筆結果（Shift+F3）"),
             ("search_next","下一筆",self.next_search_result,("F3",),"下一筆結果（F3）"),
-            ("print","列印",self.print_document,("Ctrl+P",),"列印文件（Ctrl+P），圖章與簽名會一併印出"),
+            ("print","列印",self.print_document,("Ctrl+P",),"預覽並列印文件（Ctrl+P），圖章與簽名會一併印出"),
             ("copy_text","複製文字",self.copy_selected_text,("Ctrl+C",),"複製選取的文字（Ctrl+C）"),
             ("copy_page_text","複製本頁全部文字",self.copy_page_text,("Ctrl+Shift+C",),
                 "複製目前頁面的全部文字（Ctrl+Shift+C）"),
@@ -356,7 +357,7 @@ class MainWindow(QMainWindow):
             "split":"將文件拆分為多個檔案",
             "page_marks":"加入頁碼或文字／圖片浮水印",
             "header_footer":"套用頁首頁尾範本",
-            "print":"列印（Ctrl+P），圖章與簽名會一併印出",
+            "print":"預覽並列印（Ctrl+P），圖章與簽名會一併印出",
         }
         for name,tip in tips.items():
             self.actions[name].setToolTip(tip)
@@ -1118,20 +1119,47 @@ class MainWindow(QMainWindow):
         self.copy_to_clipboard(text)
 
     def print_document(self):
+        """先開啟程式內的預覽列印；Windows 列印對話框無法替桌面程式顯示預覽。"""
         if not self.session or self.busy:
             return
-        from PySide6.QtPrintSupport import QPrinter,QPrintDialog
+        from PySide6.QtPrintSupport import QPrinter,QPrintPreviewDialog
         printer=QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setDocName(self.session.source.stem)
-        dialog=QPrintDialog(printer,self)
-        dialog.setWindowTitle("列印")
-        dialog.setMinMax(1,self.page_count)
-        dialog.setOption(QPrintDialog.PrintDialogOption.PrintPageRange,True)
-        dialog.setOption(QPrintDialog.PrintDialogOption.PrintCurrentPage,True)
-        if dialog.exec()!=QPrintDialog.DialogCode.Accepted:
-            return
-        pages=self.print_page_indices(printer)
-        self.print_to(printer,pages)
+        preview=QPrintPreviewDialog(printer,self)
+        preview.setWindowTitle(f"預覽列印 — {self.session.source.name}")
+        preview.resize(max(900,int(self.width()*0.8)),max(700,int(self.height()*0.9)))
+        self.style_print_preview(preview)
+        result={"printed":None}
+        def paint(target):
+            result["printed"]=self.print_to(target,self.print_page_indices(target),announce=False)
+        preview.paintRequested.connect(paint)
+        if preview.exec()==QPrintPreviewDialog.DialogCode.Accepted and result["printed"] is not None:
+            self.statusBar().showMessage(f"已送出 {result['printed']} 頁到印表機。")
+        else:
+            self.statusBar().showMessage("已關閉預覽列印。")
+
+    def style_print_preview(self,preview):
+        """預覽工具列的內建圖示在深色主題下看不清楚，改用主題圖示。"""
+        from PySide6.QtWidgets import QToolBar
+        from pdf_editor.ui.style import COLORS
+        glyphs={"fit_width":"\ue9a6","fit_page":"\ue740","zoom_in":"\ue8a3","zoom_out":"\ue71f",
+            "portrait":"\ue8a5","landscape":"\ue7c3","first":"\ue892","previous":"\ue76b",
+            "next":"\ue76c","last":"\ue893","single":"\ue7c3","facing":"\ue8a9","overview":"\ue8a9",
+            "page_setup":"\ue713","print":"\ue749"}
+        names=["fit_width","fit_page","zoom_in","zoom_out","portrait","landscape","first","previous",
+            "next","last","single","facing","overview","page_setup","print"]
+        # QPrintPreviewDialog 的工具按鈕順序固定，依序替換為主題圖示。
+        for toolbar in preview.findChildren(QToolBar):
+            toolbar.setIconSize(QSize(20,20))
+            actions=[action for action in toolbar.actions() if not action.isSeparator()
+                and toolbar.widgetForAction(action) is not None
+                and toolbar.widgetForAction(action).metaObject().className()=="QToolButton"]
+            for name,action in zip(names,actions):
+                action.setIcon(themed_glyph_icon(glyphs[name],20))
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QGraphicsView
+        for view in preview.findChildren(QGraphicsView):
+            view.setBackgroundBrush(QColor(COLORS["canvas"]))
 
     def print_page_indices(self,printer):
         from PySide6.QtPrintSupport import QPrinter
@@ -1144,20 +1172,20 @@ class MainWindow(QMainWindow):
             return list(range(first-1,last))
         return list(range(self.page_count))
 
-    def print_to(self,printer,pages):
+    def print_to(self,printer,pages,announce=True):
         """合併工作層後逐頁列印，並顯示可取消的進度。"""
         try:
             pdf=flatten_overlays(self.session.pdf,self.session.overlays) if self.session.overlays else self.session.pdf
         except EditorError as exc:
             self.error((exc.code,str(exc),()))
             return 0
-        progress=QProgressDialog("正在準備列印…","取消",0,len(pages),self)
+        progress=QProgressDialog("正在準備頁面…","取消",0,len(pages),self)
         progress.setWindowTitle("列印")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(400)
         def step(index,total):
             progress.setValue(index)
-            progress.setLabelText(f"正在列印第 {index+1} / {total} 頁…")
+            progress.setLabelText(f"正在處理第 {index+1} / {total} 頁…")
             QApplication.processEvents()
             return not progress.wasCanceled()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -1170,8 +1198,9 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
             progress.setValue(len(pages))
             progress.close()
-        self.statusBar().showMessage(f"已送出 {printed} 頁到印表機。" if printed==len(pages)
-            else f"列印已取消，已送出 {printed} 頁。")
+        if announce:
+            self.statusBar().showMessage(f"已送出 {printed} 頁到印表機。" if printed==len(pages)
+                else f"列印已取消，已送出 {printed} 頁。")
         return printed
 
     def sync_page_navigation(self,selected=None,selected_pages=None):

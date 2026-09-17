@@ -291,6 +291,11 @@ def glyph_icon(name, size=18):
     glyph = ICON_GLYPHS.get(name)
     if glyph is None:
         return QIcon()
+    return themed_glyph_icon(glyph, size)
+
+
+def themed_glyph_icon(glyph, size=18):
+    """依指定字碼繪製主題色圖示。"""
     icon = QIcon()
     for mode, color in ((QIcon.Mode.Normal, C["accent"]), (QIcon.Mode.Active, "#67e8f9"),
             (QIcon.Mode.Selected, "#67e8f9"), (QIcon.Mode.Disabled, C["text_disabled"])):
