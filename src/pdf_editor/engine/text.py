@@ -74,7 +74,10 @@ def overlaps(first, second, tolerance=0.5):
 def _text_extent(font, text, size):
     lines = text.split("\n")
     width = max(font.text_length(line, fontsize=size) for line in lines)
-    height = size if len(lines) == 1 else len(lines) * size * LINE_HEIGHT + 1
+    # 多行文字依字型的上下緣計算行高，與 insert_textbox 的排版一致。
+    line_height = max(size * LINE_HEIGHT, size * (font.ascender - font.descender))
+    # insert_textbox 在最後一行下方另保留下緣空間。
+    height = size if len(lines) == 1 else len(lines) * line_height - size * font.descender + 1
     return width, height
 
 

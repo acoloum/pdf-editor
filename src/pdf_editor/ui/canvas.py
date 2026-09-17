@@ -3,7 +3,8 @@ from PySide6.QtCore import Qt, Signal, QPointF, QTimer, QRectF
 from PySide6.QtGui import (QPixmap,QPen,QColor,QTransform,QPainter,QKeyEvent,QBrush,
     QPainterPath)
 from PySide6.QtWidgets import (QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,
-    QGraphicsItem,QLabel,QLineEdit)
+    QGraphicsItem,QLabel,QTextEdit,QFrame)
+from PySide6.QtGui import QTextOption
 from pdf_editor.engine.geometry import transformed_rect, transform_point, inverse_transform
 from pdf_editor.engine.overlay import transformed_image
 from pdf_editor.ui.style import COLORS
@@ -165,14 +166,69 @@ class LayerItem(QGraphicsPixmapItem):
             r=self.layer.rect
             self.canvas.layer_moved.emit(replace(self.layer,rect=(r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy)))
 
-class InlineTextEditor(QLineEdit):
+# QTextDocument 以 Unicode 段落與行分隔符號表示換行。
+PARAGRAPH_SEPARATOR="\u2029"
+LINE_SEPARATOR="\u2028"
+NEWLINE=chr(10)
+
+class InlineTextEditor(QTextEdit):
+    """頁面上的輸入框：Enter 套用、Shift+Enter 換行、Esc 取消。"""
     commit_requested=Signal(str)
     cancel_requested=Signal()
+    content_resized=Signal()
 
     def __init__(self,text,parent=None):
-        super().__init__(text,parent)
+        super().__init__(parent)
         self.finished=False
-        self.textEdited.connect(lambda _text:self.set_error(None))
+        self._alignment=Qt.AlignmentFlag.AlignLeft
+        self.setAcceptRichText(False)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.document().setDocumentMargin(1)
+        self.setPlainText(text)
+        self.textChanged.connect(self._text_changed)
+
+    def _text_changed(self):
+        if self.property("error"):
+            self.set_error(None)
+        self.content_resized.emit()
+
+    def text(self):
+        # toPlainText 會把不換行空格（U+00A0）換成一般空格，造成未修改的文字被誤判為變更；
+        # 改讀原始內容，並把段落分隔符號轉回換行。
+        raw=self.document().toRawText()
+        return raw.replace(PARAGRAPH_SEPARATOR,NEWLINE).replace(LINE_SEPARATOR,NEWLINE)
+
+    def setText(self,text):
+        self.setPlainText(text)
+        self.setAlignment(self._alignment)
+
+    def setAlignment(self,alignment):
+        # 對齊套用在整份內容，換行後的新段落也維持相同對齊。
+        self._alignment=alignment
+        option=QTextOption(alignment & Qt.AlignmentFlag.AlignHorizontal_Mask)
+        option.setWrapMode(QTextOption.WrapMode.NoWrap)
+        self.document().setDefaultTextOption(option)
+        cursor=self.textCursor()
+        cursor.select(cursor.SelectionType.Document)
+        block=cursor.blockFormat()
+        block.setAlignment(alignment & Qt.AlignmentFlag.AlignHorizontal_Mask)
+        cursor.mergeBlockFormat(block)
+
+    def alignment(self):
+        return self._alignment
+
+    def line_count(self):
+        return max(1,self.document().blockCount())
+
+    def sizeHint(self):
+        hint=super().sizeHint()
+        lines=self.line_count()
+        height=self.fontMetrics().lineSpacing()*lines+self.contentsMargins().top()+self.contentsMargins().bottom()+8
+        hint.setHeight(height)
+        return hint
 
     def set_error(self,message):
         """以紅框與提示顯示無法套用的原因，保留輸入內容讓使用者直接修正。"""
@@ -201,6 +257,10 @@ class InlineTextEditor(QLineEdit):
 
     def keyPressEvent(self,event):
         if event.key() in (Qt.Key.Key_Return,Qt.Key.Key_Enter):
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.textCursor().insertText("\n")
+                event.accept()
+                return
             self.commit()
             event.accept()
             return
@@ -622,7 +682,7 @@ class Canvas(QGraphicsView):
         horizontal=(Qt.AlignmentFlag.AlignHCenter if alignment in ("hcenter","center")
             else Qt.AlignmentFlag.AlignLeft)
         editor.setAlignment(horizontal | Qt.AlignmentFlag.AlignVCenter)
-        editor.setPlaceholderText("直接輸入文字")
+        editor.setPlaceholderText("直接輸入文字（Shift+Enter 換行）")
         editor.setObjectName("inlineEditor")
         # PDF 點數依目前縮放換算成螢幕像素，輸入時的字大小與頁面上一致；
         # 字型須寫在樣式表內，否則會被全域樣式表的字級覆蓋。
@@ -636,9 +696,12 @@ class Canvas(QGraphicsView):
             %(COLORS["accent_strong"],pixels,families,COLORS["danger"]))
         editor.commit_requested.connect(self._commit_inline_text)
         editor.cancel_requested.connect(self._cancel_inline_text)
+        editor.content_resized.connect(self._position_inline_editor)
         editor.error_label=self.inline_error
         self.inline_error.hide()
         self.inline_editor=editor
+        # 先套用樣式表（含字級）再計算尺寸，避免高度以預設字型估算。
+        editor.ensurePolished()
         self._position_inline_editor()
         editor.show()
         editor.raise_()
@@ -659,7 +722,7 @@ class Canvas(QGraphicsView):
         bottom_right=self.mapFromScene(QPointF(x1,y1))
         if self.inline_run is None:
             width=max(100,bottom_right.x()-top_left.x()+12)
-            height=max(30,bottom_right.y()-top_left.y()+8)
+            height=max(30,bottom_right.y()-top_left.y()+8,self.inline_editor.sizeHint().height())
             left=top_left.x()
             top=top_left.y()
         else:
@@ -718,6 +781,10 @@ class Canvas(QGraphicsView):
         self.inline_error.hide()
         if editor is not None:
             editor.finished=True
+            try:
+                editor.content_resized.disconnect(self._position_inline_editor)
+            except (RuntimeError,TypeError):
+                pass
             editor.hide()
             editor.deleteLater()
 

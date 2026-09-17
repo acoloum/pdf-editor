@@ -177,7 +177,6 @@ class MainWindow(QMainWindow):
         self.page_count=0
         self.page=0
         self.scale=1.25
-        self.preview=None
         self.run=None
         self.insertion_rect=None
         self.layer_id=None
@@ -452,9 +451,6 @@ class MainWindow(QMainWindow):
         self.info_panel=DocumentInfoPanel()
         self.panels.addWidget(self.info_panel)
         self.text_panel=TextPanel()
-        self.text_panel.preview_requested.connect(self.preview_from_panel)
-        self.text_panel.apply_requested.connect(self.apply_preview)
-        self.text_panel.cancel_requested.connect(self.cancel_preview)
         self.text_panel.format_requested.connect(self.apply_text_format)
         self.overlay_panel=OverlayPanel()
         self.overlay_panel.update_requested.connect(self.update_layer)
@@ -544,7 +540,7 @@ class MainWindow(QMainWindow):
     def update_side_panel(self):
         """沒有選取文字或圖章時，右側改顯示文件資訊。"""
         current=self.panels.currentWidget()
-        editing_text=self.run is not None or self.insertion_rect is not None or self.preview is not None
+        editing_text=self.run is not None or self.insertion_rect is not None
         layer_selected=self.session is not None and any(
             layer.id==self.layer_id for layer in self.session.overlays)
         if current is self.text_panel and editing_text:
@@ -706,7 +702,6 @@ class MainWindow(QMainWindow):
         self.actions["zoom_in"].setEnabled(active and self.scale<ZOOM_LEVELS[-1])
         self.search_input.setEnabled(active and not self.busy)
         self.thumbs.setEnabled(active and not self.busy)
-        self.text_panel.apply_button.setEnabled(edit and self.preview is not None)
         self.canvas.setEnabled(not self.busy)
         self.overlay_panel.setEnabled(edit)
         self.text_panel.setEnabled(edit and ((self.run is not None and self.run.editable) or
@@ -783,7 +778,6 @@ class MainWindow(QMainWindow):
         self.clear_search_results(True)
         self.session=session
         self.token+=1
-        self.preview=None
         self.run=None
         self.annotation=None
         self.insertion_rect=None
@@ -1075,7 +1069,7 @@ class MainWindow(QMainWindow):
             action=menu.addAction(f"複製「{preview}」")
             action.triggered.connect(lambda _checked=False,text=run.text:self.copy_to_clipboard(text))
         menu.addAction(self.actions["copy_page_text"])
-        edit=self.session is not None and self.session.access.can_edit and not self.busy and not self.preview
+        edit=self.session is not None and self.session.access.can_edit and not self.busy
         if point is not None and edit:
             menu.addSeparator()
             add_text=menu.addAction(glyph_icon("add_text"),"在此新增文字")
@@ -1256,7 +1250,6 @@ class MainWindow(QMainWindow):
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
         self.cancel_direct_crop()
-        self.preview=None
         self.run=None
         self.annotation=None
         self.insertion_rect=None
@@ -1711,7 +1704,7 @@ class MainWindow(QMainWindow):
         self.render_serial+=1
         serial,token=self.render_serial,self.token
         self.statusBar().showMessage("正在更新頁面…")
-        data=self.preview[1] if self.preview else self.session.pdf
+        data=self.session.pdf
         layers=self.session.overlays
         def done(result):
             if self.closed or token!=self.token or serial!=self.render_serial:
@@ -1748,15 +1741,14 @@ class MainWindow(QMainWindow):
             if completion_status is not None:
                 self.statusBar().showMessage(completion_status)
             else:
-                status=self.session.access.reason or ("預覽中，尚未套用" if self.preview else
-                    "有未儲存變更" if self.session.dirty else "可編輯")
+                status=self.session.access.reason or ("有未儲存變更" if self.session.dirty else "可編輯")
                 self.statusBar().showMessage(f"第 {self.page+1} / {self.page_count} 頁  ·  {status}")
             self.update_status_fields()
         pixel_ratio=float(self.canvas.devicePixelRatioF())
         self.jobs.submit(render_page,(data,self.page,self.scale,pixel_ratio),done,self.error)
 
     def select_run(self,run,open_editor=True):
-        if not self.session or not self.session.access.can_edit or self.preview:
+        if not self.session or not self.session.access.can_edit:
             return
         self.text_panel.cancel_pending_format()
         self.canvas.clear_conflicts()
@@ -1875,7 +1867,7 @@ class MainWindow(QMainWindow):
             editor_state=(run,text,target_rect))
 
     def apply_text_format(self):
-        if not self.session or self.busy or self.preview or not self.run:
+        if not self.session or self.busy or not self.run:
             return
         if self.canvas.inline_editor is not None:
             self.canvas.inline_editor.commit()
@@ -1890,25 +1882,8 @@ class MainWindow(QMainWindow):
         self.request_render()
         self.statusBar().showMessage("已取消文字編輯。")
 
-    def preview_from_panel(self):
-        if not self.session or self.busy:
-            return
-        p=self.text_panel
-        if self.insertion_rect is not None:
-            req=TextInsertion(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
-                p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),p.color,
-                p.alignment.currentData(), p.bold.isChecked())
-            self.preview_replacement(req,insert_text)
-            return
-        if not self.run:
-            return
-        req=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),
-            self.page,self.run.id,p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),
-            p.color, p.alignment.currentData(), p.bold.isChecked())
-        self.preview_replacement(req)
-
     def move_run(self,run):
-        if not self.session or not run.editable or self.busy or self.preview:
+        if not self.session or not run.editable or self.busy:
             return
         self.canvas.cancel_inline_editor()
         self.run=run
@@ -1922,12 +1897,6 @@ class MainWindow(QMainWindow):
     def start_text_insertion(self,checked=True):
         if not checked:
             self.cancel_text_insertion()
-            return
-        if self.preview:
-            self.actions["add_text"].setChecked(False)
-            message="請先按「套用預覽」或「取消預覽」，再新增文字。"
-            QMessageBox.information(self,"尚有文字預覽",message)
-            self.statusBar().showMessage(message)
             return
         if not self.session or self.busy:
             self.actions["add_text"].setChecked(False)
@@ -2111,7 +2080,7 @@ class MainWindow(QMainWindow):
         self.jobs.submit(operation,(self.session.pdf,*args),done,self.error)
 
     def begin_text_insertion(self,position):
-        if not self.session or self.busy or self.preview:
+        if not self.session or self.busy:
             return
         x,y=position
         self.actions["add_text"].setChecked(False)
@@ -2134,7 +2103,7 @@ class MainWindow(QMainWindow):
         self.refresh_actions()
 
     def delete_run(self,run):
-        if not self.session or not run.editable or self.busy or self.preview:
+        if not self.session or not run.editable or self.busy:
             return
         self.canvas.cancel_inline_editor()
         self.canvas.cancel_note_insertion()
@@ -2158,7 +2127,6 @@ class MainWindow(QMainWindow):
             if self.closed or token!=self.token or revision!=self.session.revision:
                 return
             self.session.apply_pdf(pdf)
-            self.preview=None
             self.run=None
             self.insertion_rect=insertion_rect
             self.text_panel.font_path=str(default_font())
@@ -2187,7 +2155,6 @@ class MainWindow(QMainWindow):
             if self.closed or token!=self.token or revision!=self.session.revision:
                 return
             self.session.apply_pdf(pdf)
-            self.preview=None
             self.run=None
             self.insertion_rect=None
             self.text_panel.setEnabled(False)
@@ -2257,46 +2224,9 @@ class MainWindow(QMainWindow):
         best=max(candidates,key=lambda run:(pymupdf.Rect(run.rect)&target).get_area())
         self.select_run(best,open_editor=False)
 
-    def preview_replacement(self,request,operation=replace_text):
-        if self.busy:
-            return
-        revision=self.session.revision
-        token=self.token
-        self.busy=True
-        self.refresh_actions()
-        self.statusBar().showMessage("正在建立文字預覽…")
-        def done(pdf):
-            self.busy=False
-            if self.closed or token!=self.token or revision!=self.session.revision:
-                return
-            self.preview=(revision,pdf)
-            self.refresh_actions()
-            self.request_render()
-        self.jobs.submit(operation,(self.session.pdf,request),done,self.error)
-
-    def cancel_preview(self):
-        self.preview=None
-        self.refresh_actions()
-        self.request_render()
-
-    def apply_preview(self):
-        if self.preview and self.preview[0]==self.session.revision:
-            self.canvas.cancel_inline_editor()
-            self.session.apply_pdf(self.preview[1])
-            self.preview=None
-            self.canvas.cancel_text_insertion()
-            self.actions["add_text"].setChecked(False)
-            self.insertion_rect=None
-            self.run=None
-            self.text_panel.setEnabled(False)
-            self.refresh_actions()
-            self.request_render()
-            self.queue_thumbnails((self.page,))
-
     def history_step(self,redo):
         if not self.session or self.busy:
             return
-        self.preview=None
         self.canvas.cancel_inline_editor()
         self.canvas.cancel_note_insertion()
         self.actions["text_note"].setChecked(False)
@@ -2314,9 +2244,6 @@ class MainWindow(QMainWindow):
 
     def save(self):
         if not self.session or self.busy:
-            return
-        if self.preview:
-            QMessageBox.information(self,"尚有預覽","請先套用或取消文字預覽，再另存新檔。")
             return
         if self.session.password_used:
             if QMessageBox.question(self,"輸出保護","另存的文件不保留密碼保護，是否繼續？")!=QMessageBox.StandardButton.Yes:
@@ -2348,8 +2275,7 @@ class MainWindow(QMainWindow):
 
     def convert_legacy_stamp(self):
         """掃描文件，讓使用者明確選取後將既有圖章抽離為工作層。"""
-        if (not self.session or self.busy or not self.session.access.can_edit
-                or self.preview):
+        if not self.session or self.busy or not self.session.access.can_edit:
             return
         token = self.token
         revision = self.session.revision
@@ -2444,7 +2370,7 @@ class MainWindow(QMainWindow):
             self.import_layer(path,dialog.collect.isChecked())
 
     def import_layer(self,path,persistent):
-        if not self.session or self.preview:
+        if not self.session:
             return
         try:
             store=self.assets if persistent else AssetStore(self.session.history.root/"assets")
@@ -2506,9 +2432,6 @@ class MainWindow(QMainWindow):
                 tuple(str(p) for p in dialog.paths)),self.export_done,self.error)
 
     def split(self):
-        if self.preview:
-            QMessageBox.information(self,"尚有預覽","請先套用或取消文字預覽。")
-            return
         dialog=SplitDialog(self.page_count,self)
         if dialog.exec():
             folder=QFileDialog.getExistingDirectory(self,"選擇輸出資料夾")

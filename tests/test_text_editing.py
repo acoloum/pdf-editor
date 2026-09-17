@@ -300,3 +300,52 @@ def test_inline_editor_font_follows_zoom(qtbot, source_path):
         assert window.canvas.inline_editor.font().pixelSize() > small
     finally:
         _close(window)
+
+
+def test_multiline_text_is_inserted_with_expanded_height(layout_pdf):
+    request = TextInsertion(hashlib.sha256(layout_pdf).hexdigest(), 0, "第一行\n第二行\n第三行",
+        (40, 150, 70, 164), str(default_font()), 12, (0, 0, 0), "left", False, "expand")
+    result = insert_text(layout_pdf, request)
+    with pymupdf.open(stream=result) as doc:
+        text = doc[0].get_text()
+    for line in ("第一行", "第二行", "第三行"):
+        assert line in text
+
+
+def test_inline_editor_supports_shift_enter_and_keeps_nbsp(qtbot):
+    from pdf_editor.ui.canvas import Canvas
+    canvas = Canvas()
+    qtbot.addWidget(canvas)
+    canvas.show()
+    committed = []
+    canvas.inline_text_committed.connect(committed.append)
+    original = "品質 ABC"
+    canvas.begin_inline_text((10, 10, 120, 30), original)
+    editor = canvas.inline_editor
+    # 不換行空格須原樣保留，未修改的文字才不會被誤判為變更。
+    assert editor.text() == original
+    editor.setText("第一行")
+    editor.moveCursor(editor.textCursor().MoveOperation.End)
+    first_height = editor.height()
+    qtbot.keyClick(editor, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+    # QTest.keyClicks 送出非 ASCII 字元會使程序崩潰，中文改以游標插入模擬輸入法結果。
+    editor.textCursor().insertText("第二行")
+    assert editor.text() == "第一行\n第二行"
+    assert canvas.inline_editor is editor
+    assert editor.height() > first_height
+    qtbot.keyClick(editor, Qt.Key.Key_Return)
+    assert committed and committed[0][1] == "第一行\n第二行"
+
+
+def test_text_panel_has_no_legacy_preview_controls(qtbot):
+    panel = TextPanel()
+    qtbot.addWidget(panel)
+    for name in ("preview_button", "apply_button", "cancel_button", "preview_requested"):
+        assert not hasattr(panel, name)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        for name in ("preview", "preview_replacement", "apply_preview", "cancel_preview"):
+            assert not hasattr(window, name)
+    finally:
+        _close(window)

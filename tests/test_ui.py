@@ -22,7 +22,6 @@ from pdf_editor.annotations import mark_text
 from pdf_editor.model import LegacyImageCandidate, Overlay
 from pdf_editor.ocr import OcrResult
 from pdf_editor.comparison import PageComparison, compare_pages
-from test_text import request_for
 
 
 def _legacy_candidate(page=0, xref=17, rect=(20, 30, 100, 70)):
@@ -43,27 +42,6 @@ def test_legacy_stamp_dialog_requires_explicit_candidate(qtbot):
     dialog.list.setCurrentRow(1)
     assert dialog.ok_button.isEnabled()
     assert dialog.selected_candidate == candidates[1]
-
-def test_reader_preview_apply_undo(qtbot, source_path, font_path):
-    window = MainWindow()
-    qtbot.addWidget(window)
-    window.open_document(source_path)
-    qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
-    assert window.page_count == 1
-    before = window.session.pdf
-    window.preview_replacement(request_for(before, font_path))
-    qtbot.waitUntil(lambda: window.preview is not None, timeout=30000)
-    assert not window.session.dirty
-    window.cancel_preview()
-    assert window.session.pdf == before
-    window.preview_replacement(request_for(before, font_path))
-    qtbot.waitUntil(lambda: window.preview is not None, timeout=30000)
-    window.apply_preview()
-    assert window.session.dirty
-    window.session.undo()
-    assert window.session.pdf == before
-    window.session.saved_fingerprint = window.session.history.current[2]
-    window.close()
 
 def test_blank_signature_cannot_accept(qtbot):
     dialog = SignatureDialog()
@@ -448,7 +426,6 @@ def test_window_dragged_text_is_applied_immediately(qtbot, source_path):
         window.move_run(moved)
         qtbot.waitUntil(lambda: not window.busy, timeout=30000)
         assert window.session.dirty
-        assert window.preview is None
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
@@ -524,29 +501,6 @@ def test_window_escape_cancels_visible_text_insertion_mode(qtbot, source_path):
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
 
-def test_window_add_text_explains_active_preview(qtbot, source_path, monkeypatch):
-    window = MainWindow()
-    qtbot.addWidget(window)
-    messages = []
-    monkeypatch.setattr("pdf_editor.ui.main_window.QMessageBox.information",
-        lambda parent, title, message: messages.append((title, message)))
-    try:
-        window.open_document(source_path)
-        qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
-        window.preview = (window.session.revision, window.session.pdf)
-
-        window.actions["add_text"].trigger()
-
-        assert messages
-        assert "套用預覽" in messages[0][1]
-        assert "取消預覽" in messages[0][1]
-        assert not window.canvas._text_insertion
-        assert not window.actions["add_text"].isChecked()
-    finally:
-        window.preview = None
-        window.session.saved_fingerprint = window.session.history.current[2]
-        window.close()
-
 def test_window_selected_text_opens_editor_on_page(qtbot, source_path):
     window = MainWindow()
     qtbot.addWidget(window)
@@ -561,9 +515,6 @@ def test_window_selected_text_opens_editor_on_page(qtbot, source_path):
         assert window.canvas.inline_editor is not None
         assert window.canvas.inline_editor.isVisible()
         assert window.canvas.inline_editor.text() == run.text
-        assert window.text_panel.preview_button.isHidden()
-        assert window.text_panel.apply_button.isHidden()
-        assert window.text_panel.cancel_button.isHidden()
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
@@ -582,7 +533,6 @@ def test_window_inline_edit_applies_on_enter(qtbot, source_path):
         qtbot.keyClick(window.canvas.inline_editor, Qt.Key.Key_Return)
 
         qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
-        assert window.preview is None
         assert "即時修改" in pymupdf.open(stream=window.session.pdf)[0].get_text()
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
@@ -645,7 +595,6 @@ def test_window_toolbar_add_text_edits_and_applies_on_page(qtbot, source_path):
         qtbot.keyClick(window.canvas.inline_editor, Qt.Key.Key_Return)
 
         qtbot.waitUntil(lambda: not window.busy and window.session.dirty, timeout=30000)
-        assert window.preview is None
         assert "直接新增" in pymupdf.open(stream=window.session.pdf)[0].get_text()
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]

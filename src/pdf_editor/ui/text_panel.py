@@ -7,9 +7,6 @@ import pymupdf
 from pdf_editor.engine.fonts import default_font, system_fonts
 
 class TextPanel(QWidget):
-    preview_requested=Signal()
-    apply_requested=Signal()
-    cancel_requested=Signal()
     format_requested=Signal()
 
     # 數值欄位停止調整後才套用，避免每按一次箭頭或每打一個數字就寫入文件。
@@ -85,21 +82,9 @@ class TextPanel(QWidget):
         color_button=QPushButton("文字顏色")
         color_button.clicked.connect(self.choose_color)
         layout.addWidget(color_button)
-        self.preview_button=QPushButton("預覽變更")
-        self.preview_button.setObjectName("primary")
-        self.preview_button.clicked.connect(self.preview_requested)
-        layout.addWidget(self.preview_button)
-        self.preview_button.hide()
-        self.apply_button=QPushButton("套用預覽")
-        self.apply_button.clicked.connect(self.apply_requested)
-        self.apply_button.setEnabled(False)
-        layout.addWidget(self.apply_button)
-        self.apply_button.hide()
-        self.cancel_button=QPushButton("取消預覽")
-        self.cancel_button.clicked.connect(self.cancel_requested)
-        layout.addWidget(self.cancel_button)
-        self.cancel_button.hide()
-        hint=QLabel("單位：PDF 點（72 點 = 1 英吋）\n文字過長時請擴大文字框或減小字級。")
+        hint=QLabel("單位：PDF 點（72 點 = 1 英吋）\n"
+            "文字變長時會自動加寬；表格內會自動縮小字級。\n"
+            "Shift+Enter 可換行。")
         hint.setObjectName("hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
