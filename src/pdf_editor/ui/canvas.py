@@ -220,6 +220,7 @@ class Canvas(QGraphicsView):
     page_step_requested=Signal(int)
     files_dropped=Signal(list)
     pointer_moved=Signal(object)
+    context_menu_requested=Signal(object,object,object)
 
     def __init__(self):
         super().__init__()
@@ -786,6 +787,15 @@ class Canvas(QGraphicsView):
         if rect.isEmpty() or not rect.contains(scene_pos):
             return None
         return transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
+
+    def contextMenuEvent(self,event):
+        """右鍵時回報螢幕位置、PDF 座標與游標下的文字。"""
+        if self.inline_editor is not None:
+            self.inline_editor.commit()
+        point=self.page_point_at(event.pos())
+        run=self._run_at(self.mapToScene(event.pos())) if point is not None else None
+        self.context_menu_requested.emit(event.globalPos(),point,run)
+        event.accept()
 
     def leaveEvent(self,event):
         self.pointer_moved.emit(None)

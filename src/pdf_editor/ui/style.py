@@ -56,6 +56,7 @@ ICON_GLYPHS = {
     "search_next": "\ue76c",
     "zoom_out": "\ue738",
     "zoom_in": "\ue710",
+    "print": "\ue749",
     "previous_page": "\ue70e",
     "next_page": "\ue70d",
     "first_page": "\ue892",
@@ -107,7 +108,9 @@ QToolButton:checked {{ background: {C['accent_hover']}; border-color: {C['accent
 QToolButton:disabled {{ color: {C['text_disabled']}; }}
 QToolButton::menu-indicator {{ subcontrol-position: right center; width: 0; image: none; }}
 QToolButton#qt_toolbar_ext_button {{ padding: 2px; }}
-QToolBar#mainToolbar QToolButton {{ padding: 4px 6px; font-size: 9pt; min-width: 52px; }}
+QToolBar#mainToolbar {{ spacing: 1px; padding: 5px 6px; }}
+QToolBar#mainToolbar::separator {{ margin: 8px 4px; }}
+QToolBar#mainToolbar QToolButton {{ padding: 4px 4px; font-size: 9pt; min-width: 48px; }}
 
 QPushButton {{ background: {C['surface_alt']}; border: 1px solid {C['border_strong']}; border-radius: 6px;
     padding: 7px 14px; color: {C['text']}; }}
@@ -213,6 +216,13 @@ QToolButton::menu-button:hover {{ background: {C['accent_soft']}; border-left-co
 QToolButton::menu-arrow {{ image: url("{ARROWS.get('down', '')}"); width: 8px; height: 6px; }}
 QToolButton::menu-arrow:disabled {{ image: url("{ARROWS.get('down_disabled', '')}"); }}
 
+QTabWidget#sideTabs::pane {{ border: 0; border-top: 1px solid {C['border']}; top: -1px; }}
+QTabWidget#sideTabs QTabBar::tab {{ min-width: 56px; }}
+QTreeWidget {{ background: {C['surface']}; border: 0; padding: 6px; }}
+QTreeWidget::item {{ padding: 5px 4px; border-radius: 4px; }}
+QTreeWidget::item:hover {{ background: {C['surface_alt']}; }}
+QTreeWidget::item:selected {{ background: {C['accent_soft']}; color: {C['accent']}; }}
+QTabWidget#sideTabs > QWidget {{ background: {C['surface']}; }}
 QFrame#searchBar {{ background: {C['elevated']}; border: 1px solid {C['accent']}; border-radius: 10px; }}
 QFrame#searchBar QLineEdit {{ background: {C['input']}; }}
 QFrame#searchBar QToolButton {{ padding: 4px; }}

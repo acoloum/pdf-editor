@@ -105,3 +105,21 @@ def test_describe_document_reports_paper_size(pdf_bytes):
     assert paper_name(595, 842) == "A4 直式"
     assert paper_name(842, 595) == "A4 橫式"
     assert paper_name(500, 400) == ""
+
+
+def test_toolbar_labels_fit_default_window_width(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        window.resize(1320, 850)
+        window.show()
+        qtbot.waitExposed(window)
+        buttons = [button for button in window.toolbar.findChildren(QToolButton)
+            if button.objectName() != "qt_toolbar_ext_button"]
+        extension = [button for button in window.toolbar.findChildren(QToolButton)
+            if button.objectName() == "qt_toolbar_ext_button" and button.isVisible()]
+        # 預設寬度下不得出現「»」溢出按鈕，文字也不能被省略。
+        assert not extension
+        assert all(button.width() >= button.sizeHint().width() for button in buttons if button.isVisible())
+    finally:
+        _close(window)

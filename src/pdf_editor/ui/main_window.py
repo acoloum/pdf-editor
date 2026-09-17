@@ -5,7 +5,7 @@ import uuid
 import pymupdf
 from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal,QPointF
 from PySide6.QtGui import QAction,QKeySequence,QIcon,QPixmap
-from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton,QAbstractItemView,QApplication,QHBoxLayout
+from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton,QAbstractItemView,QApplication,QHBoxLayout,QTabWidget,QTreeWidget,QTreeWidgetItem,QProgressDialog
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import write_pdf,publish_batch
 from pdf_editor.engine.render import render_page,thumbnail
@@ -48,6 +48,8 @@ from pdf_editor.ui.style import STYLE,apply_theme,apply_dark_title_bar,glyph_ico
 from pdf_editor.ui.settings import AppSettings
 from pdf_editor.ui.info_panel import DocumentInfoPanel,describe_document
 from pdf_editor.ui.search_bar import SearchBar
+from pdf_editor.ui.printing import print_pages
+from pdf_editor.outline import read_outline,page_text
 
 ZOOM_LEVELS=(0.25,0.5,0.75,1.0,1.25,1.5,1.75,2.0,2.5,3.0,4.0,5.0)
 
@@ -281,7 +283,13 @@ class MainWindow(QMainWindow):
                 ("Ctrl+End",),"最後一頁（Ctrl+End）"),
             ("search","搜尋",self.focus_search,("Ctrl+F",),"搜尋全文（Ctrl+F）"),
             ("search_previous","上一筆",lambda:self.next_search_result(-1),("Shift+F3",),"上一筆結果（Shift+F3）"),
-            ("search_next","下一筆",self.next_search_result,("F3",),"下一筆結果（F3）")]:
+            ("search_next","下一筆",self.next_search_result,("F3",),"下一筆結果（F3）"),
+            ("print","列印",self.print_document,("Ctrl+P",),"列印文件（Ctrl+P），圖章與簽名會一併印出"),
+            ("copy_text","複製文字",self.copy_selected_text,("Ctrl+C",),"複製選取的文字（Ctrl+C）"),
+            ("copy_page_text","複製本頁全部文字",self.copy_page_text,("Ctrl+Shift+C",),
+                "複製目前頁面的全部文字（Ctrl+Shift+C）"),
+            ("fit_page","適合頁面",lambda:self.zoom.setCurrentText("適合頁面"),(),"整頁顯示"),
+            ("fit_width","適合寬度",lambda:self.zoom.setCurrentText("適合寬度"),(),"頁面寬度填滿畫布")]:
             action=QAction(glyph_icon(name),label,self)
             action.triggered.connect(handler)
             action.setShortcuts([QKeySequence(key) for key in shortcuts])
@@ -304,7 +312,7 @@ class MainWindow(QMainWindow):
         self.markup_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         for button in (self.stamp_menu_button,self.page_menu_button,self.markup_menu_button):
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        layout=[("open","save"),("undo","redo"),
+        layout=[("open","save","print"),("undo","redo"),
             ("add_text",self.markup_menu_button,self.stamp_menu_button,"signature"),
             (self.page_menu_button,"merge","split","page_marks","header_footer"),
             ("ocr","compare","search")]
@@ -334,6 +342,7 @@ class MainWindow(QMainWindow):
             "split":"將文件拆分為多個檔案",
             "page_marks":"加入頁碼或文字／圖片浮水印",
             "header_footer":"套用頁首頁尾範本",
+            "print":"列印（Ctrl+P），圖章與簽名會一併印出",
         }
         for name,tip in tips.items():
             self.actions[name].setToolTip(tip)
@@ -371,7 +380,28 @@ class MainWindow(QMainWindow):
         self.thumbs.itemSelectionChanged.connect(self.thumbnail_selection_changed)
         self.thumbs.pages_dropped.connect(self.move_selected_pages_to)
         self.thumbs.files_dropped.connect(self.open_dropped_files)
-        splitter.addWidget(self.thumbs)
+        self.thumbs.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.thumbs.customContextMenuRequested.connect(self.show_thumbnail_menu)
+        self.outline_tree=QTreeWidget()
+        self.outline_tree.setHeaderHidden(True)
+        self.outline_tree.setObjectName("outlineTree")
+        self.outline_tree.itemActivated.connect(self.open_outline_item)
+        self.outline_tree.itemClicked.connect(self.open_outline_item)
+        self.outline_empty=QLabel("此文件沒有書籤。")
+        self.outline_empty.setObjectName("hint")
+        self.outline_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outline_page=QWidget()
+        outline_layout=QVBoxLayout(outline_page)
+        outline_layout.setContentsMargins(0,0,0,0)
+        outline_layout.addWidget(self.outline_tree)
+        outline_layout.addWidget(self.outline_empty)
+        self.side_tabs=QTabWidget()
+        self.side_tabs.setObjectName("sideTabs")
+        self.side_tabs.addTab(self.thumbs,"頁面")
+        self.side_tabs.addTab(outline_page,"書籤")
+        self.side_tabs.setMinimumWidth(170)
+        self.side_tabs.setMaximumWidth(260)
+        splitter.addWidget(self.side_tabs)
         self.canvas=Canvas()
         self.canvas.run_selected.connect(self.select_run)
         self.canvas.run_moved.connect(self.move_run)
@@ -392,6 +422,7 @@ class MainWindow(QMainWindow):
         self.canvas.page_step_requested.connect(self.step_page)
         self.canvas.files_dropped.connect(self.open_dropped_files)
         self.canvas.pointer_moved.connect(self.show_pointer_position)
+        self.canvas.context_menu_requested.connect(self.show_canvas_menu)
         self.search_bar=SearchBar(self.canvas,self.actions["search_previous"],self.actions["search_next"])
         self.search_input=self.search_bar.input
         self.search_count=self.search_bar.count
@@ -667,6 +698,11 @@ class MainWindow(QMainWindow):
         self.actions["last_page"].setEnabled(active and not self.busy and self.page<self.page_count-1)
         self.page_spin.setEnabled(active and not self.busy)
         self.zoom.setEnabled(active)
+        self.actions["print"].setEnabled(active and not self.busy)
+        self.actions["copy_page_text"].setEnabled(active)
+        self.actions["copy_text"].setEnabled(active)
+        self.actions["fit_page"].setEnabled(active)
+        self.actions["fit_width"].setEnabled(active)
         self.update_status_fields()
         self.update_side_panel()
 
@@ -753,6 +789,7 @@ class MainWindow(QMainWindow):
         self.refresh_actions()
         self.request_render()
         self.queue_thumbnail(0,self.token,session.revision)
+        self.refresh_outline()
         if session.open_notice:
             QMessageBox.warning(self, "圖章工作層", session.open_notice)
             self.statusBar().showMessage(session.open_notice)
@@ -913,6 +950,156 @@ class MainWindow(QMainWindow):
         self.refresh_actions()
         self.request_render()
 
+    def refresh_outline(self):
+        self.outline_tree.clear()
+        entries=[]
+        if self.session:
+            try:
+                entries=read_outline(self.session.pdf)
+            except Exception:
+                entries=[]
+        def add(parent,entry):
+            item=QTreeWidgetItem([entry.title])
+            item.setData(0,Qt.ItemDataRole.UserRole,entry.page)
+            if entry.page>=0:
+                item.setToolTip(0,f"{entry.title}（第 {entry.page+1} 頁）")
+            else:
+                item.setDisabled(True)
+            (parent.addChild(item) if parent is not None else self.outline_tree.addTopLevelItem(item))
+            for child in entry.children:
+                add(item,child)
+        for entry in entries:
+            add(None,entry)
+        self.outline_tree.expandToDepth(0)
+        self.outline_tree.setVisible(bool(entries))
+        self.outline_empty.setVisible(not entries)
+
+    def open_outline_item(self,item,_column=0):
+        page=item.data(0,Qt.ItemDataRole.UserRole)
+        if isinstance(page,int) and page>=0:
+            self.goto_page_with_scroll(page,"top")
+
+    def show_thumbnail_menu(self,position):
+        if not self.session:
+            return
+        item=self.thumbs.itemAt(position)
+        if item is not None and not item.isSelected():
+            self.thumbs.clearSelection()
+            item.setSelected(True)
+            self.thumbs.setCurrentItem(item)
+        self.page_menu.exec(self.thumbs.viewport().mapToGlobal(position))
+
+    def build_canvas_menu(self,point,run):
+        menu=QMenu(self)
+        if run is not None and run.text.strip():
+            preview=run.text.strip()
+            preview=preview if len(preview)<=16 else preview[:16]+"…"
+            action=menu.addAction(f"複製「{preview}」")
+            action.triggered.connect(lambda _checked=False,text=run.text:self.copy_to_clipboard(text))
+        menu.addAction(self.actions["copy_page_text"])
+        edit=self.session is not None and self.session.access.can_edit and not self.busy and not self.preview
+        if point is not None and edit:
+            menu.addSeparator()
+            add_text=menu.addAction(glyph_icon("add_text"),"在此新增文字")
+            add_text.triggered.connect(lambda _checked=False,position=point:self.begin_text_insertion(position))
+            note=menu.addAction("在此新增文字註解")
+            note.triggered.connect(lambda _checked=False,position=point:self.begin_text_note(position))
+        menu.addSeparator()
+        pages=menu.addMenu("頁面操作")
+        pages.addActions(self.page_menu.actions())
+        pages.setEnabled(self.page_menu_button.isEnabled())
+        menu.addSeparator()
+        for name in ("zoom_in","zoom_out","fit_page","fit_width"):
+            menu.addAction(self.actions[name])
+        menu.addSeparator()
+        menu.addAction(self.actions["print"])
+        return menu
+
+    def show_canvas_menu(self,global_position,point,run):
+        if not self.session:
+            return
+        self.build_canvas_menu(point,run).exec(global_position)
+
+    def copy_to_clipboard(self,text):
+        QApplication.clipboard().setText(text)
+        count=len(text)
+        self.statusBar().showMessage(f"已複製 {count} 個字元到剪貼簿。")
+
+    def copy_selected_text(self):
+        if not self.session:
+            return
+        run=self.canvas.selected_run or self.run
+        if run is None or not run.text:
+            self.statusBar().showMessage("請先點選要複製的文字，或按右鍵選擇「複製本頁全部文字」。")
+            return
+        self.copy_to_clipboard(run.text)
+
+    def copy_page_text(self):
+        if not self.session:
+            return
+        text=page_text(self.session.pdf,self.page)
+        if not text:
+            self.statusBar().showMessage("本頁沒有可複製的文字；掃描頁面請先執行 OCR 文字辨識。")
+            return
+        self.copy_to_clipboard(text)
+
+    def print_document(self):
+        if not self.session or self.busy:
+            return
+        from PySide6.QtPrintSupport import QPrinter,QPrintDialog
+        printer=QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setDocName(self.session.source.stem)
+        dialog=QPrintDialog(printer,self)
+        dialog.setWindowTitle("列印")
+        dialog.setMinMax(1,self.page_count)
+        dialog.setOption(QPrintDialog.PrintDialogOption.PrintPageRange,True)
+        dialog.setOption(QPrintDialog.PrintDialogOption.PrintCurrentPage,True)
+        if dialog.exec()!=QPrintDialog.DialogCode.Accepted:
+            return
+        pages=self.print_page_indices(printer)
+        self.print_to(printer,pages)
+
+    def print_page_indices(self,printer):
+        from PySide6.QtPrintSupport import QPrinter
+        mode=printer.printRange()
+        if mode==QPrinter.PrintRange.CurrentPage:
+            return [self.page]
+        if mode==QPrinter.PrintRange.PageRange:
+            first=max(1,printer.fromPage())
+            last=min(self.page_count,printer.toPage() or self.page_count)
+            return list(range(first-1,last))
+        return list(range(self.page_count))
+
+    def print_to(self,printer,pages):
+        """合併工作層後逐頁列印，並顯示可取消的進度。"""
+        try:
+            pdf=flatten_overlays(self.session.pdf,self.session.overlays) if self.session.overlays else self.session.pdf
+        except EditorError as exc:
+            self.error((exc.code,str(exc),()))
+            return 0
+        progress=QProgressDialog("正在準備列印…","取消",0,len(pages),self)
+        progress.setWindowTitle("列印")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(400)
+        def step(index,total):
+            progress.setValue(index)
+            progress.setLabelText(f"正在列印第 {index+1} / {total} 頁…")
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            printed=print_pages(printer,pdf,pages,step)
+        except Exception as exc:
+            self.error(("PRINT",f"列印失敗：{exc}",()))
+            return 0
+        finally:
+            QApplication.restoreOverrideCursor()
+            progress.setValue(len(pages))
+            progress.close()
+        self.statusBar().showMessage(f"已送出 {printed} 頁到印表機。" if printed==len(pages)
+            else f"列印已取消，已送出 {printed} 頁。")
+        return printed
+
     def sync_page_navigation(self,selected=None,selected_pages=None):
         with pymupdf.open(stream=self.session.pdf,filetype="pdf") as doc:
             self.page_count=doc.page_count
@@ -937,6 +1124,7 @@ class MainWindow(QMainWindow):
         self.refresh_actions()
         self.request_render()
         self.queue_thumbnail(0,self.token,self.session.revision)
+        self.refresh_outline()
 
     def submit_page_operation(self,operation,pages,target,status,selected,selected_pages=None):
         content_operations={"crop","page_number","text_watermark","image_watermark",
