@@ -56,6 +56,8 @@ ICON_GLYPHS = {
     "search_next": "\ue76c",
     "zoom_out": "\ue738",
     "zoom_in": "\ue710",
+    "previous_page": "\ue70e",
+    "next_page": "\ue70d",
 }
 
 C = COLORS

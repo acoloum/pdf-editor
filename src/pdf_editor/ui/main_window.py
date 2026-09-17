@@ -45,6 +45,7 @@ from pdf_editor.ui.legacy_stamp_dialog import LegacyStampDialog
 from pdf_editor.ui.page_dialogs import (MergeDialog,SplitDialog,CropPagesDialog,
     PageDecorationDialog,HeaderFooterTemplatesDialog)
 from pdf_editor.ui.style import STYLE,apply_theme,apply_dark_title_bar,glyph_icon,thumbnail_icon
+from pdf_editor.ui.settings import AppSettings
 
 ZOOM_LEVELS=(0.25,0.5,0.75,1.0,1.25,1.5,1.75,2.0,2.5,3.0,4.0,5.0)
 
@@ -108,8 +109,27 @@ def edit_page_document(pdf,layers,operation,pages,target=None):
 
 class ThumbnailList(QListWidget):
     pages_dropped=Signal(tuple,int)
+    files_dropped=Signal(list)
+
+    def dragEnterEvent(self,event):
+        if event.source() is not self and Canvas.dropped_pdf_paths(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self,event):
+        if event.source() is not self and Canvas.dropped_pdf_paths(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
 
     def dropEvent(self,event):
+        paths=Canvas.dropped_pdf_paths(event.mimeData()) if event.source() is not self else []
+        if paths:
+            # 從檔案總管拖入 PDF 時改為開啟文件，不影響頁面排序拖曳。
+            event.acceptProposedAction()
+            self.files_dropped.emit(paths)
+            return
         if event.source() is not self:
             super().dropEvent(event)
             return
@@ -159,6 +179,9 @@ class MainWindow(QMainWindow):
         self.comparison_revision=None
         self.comparison_token=None
         self.closed=False
+        self.settings=AppSettings()
+        self._scroll_after_render=None
+        self._fit_after_render=None
         self.jobs=Jobs(self)
         self.asset_root=Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))/"assets"
         self.assets=AssetStore(self.asset_root)
@@ -173,7 +196,7 @@ class MainWindow(QMainWindow):
         self.actions={}
         for name,label,handler,key in [
             ("open","開啟 PDF",self.choose_open,"Ctrl+O"),
-            ("save","另存新檔",self.save,"Ctrl+Shift+S"),
+            ("save","另存新檔",self.save,"Ctrl+S"),
             ("undo","復原",lambda:self.history_step(False),"Ctrl+Z"),
             ("redo","重做",lambda:self.history_step(True),"Ctrl+Y"),
             ("add_text","新增文字",self.start_text_insertion,"Ctrl+T"),
@@ -195,6 +218,13 @@ class MainWindow(QMainWindow):
                 action.setCheckable(True)
             toolbar.addAction(action)
             self.actions[name]=action
+        # 另存新檔同時支援 Ctrl+S 與 Ctrl+Shift+S，避免習慣按 Ctrl+S 時沒有反應。
+        self.actions["save"].setShortcuts([QKeySequence("Ctrl+S"),QKeySequence("Ctrl+Shift+S")])
+        self.recent_menu=QMenu("最近開啟的檔案",self)
+        self.recent_menu.aboutToShow.connect(self.rebuild_recent_menu)
+        self.actions["open"].setMenu(self.recent_menu)
+        toolbar.widgetForAction(self.actions["open"]).setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         page_menu=QMenu(self)
         for name,label,handler,key in [
             ("page_up","選取頁面上移",lambda:self.move_current_page(-1),"Alt+Up"),
@@ -261,6 +291,17 @@ class MainWindow(QMainWindow):
             action.setShortcuts([QKeySequence(key) for key in shortcuts])
             action.setToolTip(tip)
             self.actions[name]=action
+        for name,label,handler,shortcuts,tip in [
+            ("previous_page","上一頁",lambda:self.step_page(-1),("PgUp",),"上一頁（PageUp）"),
+            ("next_page","下一頁",lambda:self.step_page(1),("PgDown",),"下一頁（PageDown）"),
+            ("first_page","第一頁",lambda:self.goto_page_with_scroll(0,"top"),("Ctrl+Home",),"第一頁（Ctrl+Home）"),
+            ("last_page","最後一頁",lambda:self.goto_page_with_scroll(self.page_count-1,"top"),
+                ("Ctrl+End",),"最後一頁（Ctrl+End）")]:
+            action=QAction(glyph_icon(name),label,self)
+            action.triggered.connect(handler)
+            action.setShortcuts([QKeySequence(key) for key in shortcuts])
+            action.setToolTip(tip)
+            self.actions[name]=action
         self.zoom=QComboBox()
         self.zoom.addItems(["適合頁面","適合寬度"]+
             [f"{round(level*100)}%" for level in ZOOM_LEVELS])
@@ -295,7 +336,9 @@ class MainWindow(QMainWindow):
         self.search_count=QLabel("0 / 0")
         search_toolbar.addWidget(self.search_count)
         search_toolbar.addSeparator()
+        search_toolbar.addAction(self.actions["previous_page"])
         search_toolbar.addWidget(self.page_spin)
+        search_toolbar.addAction(self.actions["next_page"])
         search_toolbar.addAction(self.actions["zoom_out"])
         search_toolbar.addWidget(self.zoom)
         search_toolbar.addAction(self.actions["zoom_in"])
@@ -319,6 +362,7 @@ class MainWindow(QMainWindow):
         self.thumbs.currentRowChanged.connect(self.goto_page)
         self.thumbs.itemSelectionChanged.connect(self.thumbnail_selection_changed)
         self.thumbs.pages_dropped.connect(self.move_selected_pages_to)
+        self.thumbs.files_dropped.connect(self.open_dropped_files)
         splitter.addWidget(self.thumbs)
         self.canvas=Canvas()
         self.canvas.run_selected.connect(self.select_run)
@@ -336,6 +380,9 @@ class MainWindow(QMainWindow):
         self.canvas.layer_moved.connect(self.move_layer)
         self.canvas.crop_requested.connect(self.apply_direct_crop)
         self.canvas.crop_cancelled.connect(self.cancel_direct_crop)
+        self.canvas.zoom_step_requested.connect(self.zoom_by)
+        self.canvas.page_step_requested.connect(self.step_page)
+        self.canvas.files_dropped.connect(self.open_dropped_files)
         splitter.addWidget(self.canvas)
         self.panels=QStackedWidget()
         self.text_panel=TextPanel()
@@ -358,8 +405,106 @@ class MainWindow(QMainWindow):
         splitter.addWidget(panel_scroll)
         splitter.setSizes([170,820,310])
         self.setCentralWidget(splitter)
-        self.statusBar().showMessage("開啟 PDF 開始編輯。文件全程在本機處理。")
+        self.splitter=splitter
+        # 快捷鍵掛在主視窗上，收進選單的動作也能以鍵盤觸發。
+        for action in self.actions.values():
+            if action.shortcuts():
+                self.addAction(action)
+        self.setAcceptDrops(True)
+        self.restore_window_state()
+        self.statusBar().showMessage("開啟 PDF 開始編輯；也可以直接把 PDF 拖進視窗。文件全程在本機處理。")
         self.refresh_actions()
+
+    def restore_window_state(self):
+        """還原上次的視窗大小、面板寬度與縮放模式。"""
+        geometry=self.settings.bytes_value("window/geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        splitter=self.settings.bytes_value("window/splitter")
+        if splitter is not None:
+            self.splitter.restoreState(splitter)
+        zoom=str(self.settings.value("view/zoom","") or "")
+        if zoom and self.zoom.findText(zoom)>=0:
+            self.zoom.blockSignals(True)
+            self.zoom.setCurrentText(zoom)
+            self.zoom.blockSignals(False)
+            if zoom.endswith("%"):
+                self.scale=float(zoom.rstrip("%"))/100
+
+    def save_window_state(self):
+        self.settings.set_value("window/geometry",self.saveGeometry())
+        self.settings.set_value("window/splitter",self.splitter.saveState())
+        self.settings.set_value("view/zoom",self.zoom.currentText())
+        self.settings.sync()
+
+    def rebuild_recent_menu(self):
+        self.recent_menu.clear()
+        files=self.settings.recent_files()
+        if not files:
+            empty=self.recent_menu.addAction("（沒有最近開啟的檔案）")
+            empty.setEnabled(False)
+            return
+        for index,path in enumerate(files):
+            label=f"&{index+1}  {Path(path).name}" if index<9 else Path(path).name
+            action=self.recent_menu.addAction(label)
+            action.setToolTip(path)
+            action.setStatusTip(path)
+            action.triggered.connect(lambda _checked=False,target=path:self.open_path(target))
+        self.recent_menu.addSeparator()
+        self.recent_menu.addAction("清除清單",self.settings.clear_recent_files)
+
+    def open_path(self,path):
+        """由最近檔案、拖放或命令列開啟指定 PDF。"""
+        if self.busy:
+            return False
+        path=Path(path)
+        if not path.is_file():
+            self.settings.remove_recent_file(path)
+            QMessageBox.warning(self,"找不到檔案",f"檔案已不存在或無法存取：\n{path}")
+            return False
+        if not self.confirm_leave():
+            return False
+        try:
+            self.open_document(path)
+        except Exception as exc:
+            self.error((getattr(exc,"code","OPEN"),str(exc),()))
+            return False
+        return True
+
+    def open_dropped_files(self,paths):
+        if not paths:
+            return
+        if len(paths)>1:
+            self.statusBar().showMessage("一次只能開啟一份 PDF，已開啟第一個檔案。")
+        self.open_path(paths[0])
+
+    def dragEnterEvent(self,event):
+        if Canvas.dropped_pdf_paths(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self,event):
+        paths=Canvas.dropped_pdf_paths(event.mimeData())
+        if paths:
+            event.acceptProposedAction()
+            self.open_dropped_files(paths)
+            return
+        super().dropEvent(event)
+
+    def step_page(self,offset):
+        if not self.session or self.busy:
+            return
+        target=self.page+offset
+        if not 0<=target<self.page_count:
+            return
+        self.goto_page_with_scroll(target,"top" if offset>0 else "bottom")
+
+    def goto_page_with_scroll(self,page,position):
+        if not self.session or not 0<=page<self.page_count or page==self.page:
+            return
+        self._scroll_after_render=position
+        self.goto_page(page)
 
     def refresh_actions(self):
         active=self.session is not None
@@ -435,7 +580,7 @@ class MainWindow(QMainWindow):
     def choose_open(self):
         if not self.confirm_leave():
             return
-        name,_=QFileDialog.getOpenFileName(self,"開啟 PDF","","PDF (*.pdf)")
+        name,_=QFileDialog.getOpenFileName(self,"開啟 PDF",self.settings.last_directory(),"PDF (*.pdf)")
         if name:
             try:
                 self.open_document(Path(name))
@@ -486,6 +631,11 @@ class MainWindow(QMainWindow):
         self.thumbs.setCurrentRow(0)
         self.thumbs.blockSignals(False)
         self.setWindowTitle(f"{session.source.name} — 墨頁 PDF")
+        self.settings.add_recent_file(session.source)
+        self.settings.set_last_directory(session.source)
+        self._scroll_after_render="top"
+        if self.zoom.currentText() in ("適合頁面","適合寬度"):
+            self._fit_after_render="page" if self.zoom.currentText()=="適合頁面" else "width"
         self.refresh_actions()
         self.request_render()
         self.queue_thumbnail(0,self.token,session.revision)
@@ -496,7 +646,7 @@ class MainWindow(QMainWindow):
     def choose_comparison_pdf(self):
         if not self.session or self.busy:
             return
-        name,_=QFileDialog.getOpenFileName(self,"選擇比較 PDF","","PDF (*.pdf)")
+        name,_=QFileDialog.getOpenFileName(self,"選擇比較 PDF",self.settings.last_directory(),"PDF (*.pdf)")
         if not name:
             return
         try:
@@ -827,7 +977,7 @@ class MainWindow(QMainWindow):
     def insert_pdf_pages(self):
         if not self.session or self.busy:
             return
-        name,_=QFileDialog.getOpenFileName(self,"插入另一份 PDF","","PDF (*.pdf)")
+        name,_=QFileDialog.getOpenFileName(self,"插入另一份 PDF",self.settings.last_directory(),"PDF (*.pdf)")
         if not name:
             return
         try:
@@ -1149,6 +1299,14 @@ class MainWindow(QMainWindow):
             self.page_data=result
             try:
                 self.canvas.display(result,layers,self.layer_id)
+                if self._fit_after_render:
+                    mode,self._fit_after_render=self._fit_after_render,None
+                    self.fit_zoom(mode)
+                    return
+                if self._scroll_after_render:
+                    position,self._scroll_after_render=self._scroll_after_render,None
+                    bar=self.canvas.verticalScrollBar()
+                    bar.setValue(bar.minimum() if position=="top" else bar.maximum())
                 if view_center is not None:
                     x,y=transform_point(result["matrix"],*view_center)
                     self.canvas.centerOn(QPointF(x,y))
@@ -1852,6 +2010,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self.closed=True
+        self.save_window_state()
         self.close_comparison()
         self.jobs.close()
         if self.session:

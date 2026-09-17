@@ -158,11 +158,8 @@ def main(argv=None):
 
         QTimer.singleShot(50,finish_acceptance)
     elif args and args[0].lower().endswith(".pdf"):
-        from pathlib import Path
-        try:
-            window.open_document(Path(args[0]))
-        except Exception as exc:
-            window.error((getattr(exc,"code","OPEN"),str(exc),()))
+        # 檔案總管「開啟方式」或拖曳到捷徑時傳入路徑，視窗顯示後再開啟。
+        QTimer.singleShot(0,lambda:window.open_path(args[0]))
     return app.exec()
 
 if __name__=="__main__":

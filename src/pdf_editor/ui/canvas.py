@@ -216,6 +216,10 @@ class Canvas(QGraphicsView):
     layer_moved=Signal(object)
     crop_requested=Signal(object)
     crop_cancelled=Signal()
+    zoom_step_requested=Signal(int)
+    page_step_requested=Signal(int)
+    files_dropped=Signal(list)
+    pointer_moved=Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -256,6 +260,9 @@ class Canvas(QGraphicsView):
         self.insertion_hint.hide()
         self.setMinimumWidth(400)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAcceptDrops(True)
+        self.viewport().setMouseTracking(True)
+        self._wheel_page_delta=0
 
     def drawBackground(self,painter,rect):
         """繪製深色畫布與細點網格，營造工作區的科技感。"""
@@ -720,7 +727,72 @@ class Canvas(QGraphicsView):
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         super().mousePressEvent(event)
 
+    @staticmethod
+    def dropped_pdf_paths(mime):
+        """取出拖放資料中的本機 PDF 路徑。"""
+        if not mime.hasUrls():
+            return []
+        return [url.toLocalFile() for url in mime.urls()
+            if url.isLocalFile() and url.toLocalFile().lower().endswith(".pdf")]
+
+    def dragEnterEvent(self,event):
+        if self.dropped_pdf_paths(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self,event):
+        if self.dropped_pdf_paths(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self,event):
+        paths=self.dropped_pdf_paths(event.mimeData())
+        if paths:
+            event.acceptProposedAction()
+            self.files_dropped.emit(paths)
+            return
+        super().dropEvent(event)
+
+    def wheelEvent(self,event):
+        delta=event.angleDelta().y()
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            # Ctrl + 滾輪：依滾動方向逐級縮放。
+            if delta:
+                self.zoom_step_requested.emit(1 if delta>0 else -1)
+            event.accept()
+            return
+        bar=self.verticalScrollBar()
+        at_bottom=bar.value()>=bar.maximum()
+        at_top=bar.value()<=bar.minimum()
+        if delta and ((delta<0 and at_bottom) or (delta>0 and at_top)):
+            # 已捲到頁面邊緣時累積滾動量，滿一格才翻頁，避免誤觸。
+            if (self._wheel_page_delta<0)!=(delta<0):
+                self._wheel_page_delta=0
+            self._wheel_page_delta+=delta
+            if abs(self._wheel_page_delta)>=120:
+                self._wheel_page_delta=0
+                self.page_step_requested.emit(1 if delta<0 else -1)
+            event.accept()
+            return
+        self._wheel_page_delta=0
+        super().wheelEvent(event)
+
+    def page_point_at(self,view_pos):
+        """將視窗座標換算為 PDF 頁面座標；不在頁面內時回傳 None。"""
+        rect=self.sceneRect()
+        scene_pos=self.mapToScene(view_pos)
+        if rect.isEmpty() or not rect.contains(scene_pos):
+            return None
+        return transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
+
+    def leaveEvent(self,event):
+        self.pointer_moved.emit(None)
+        super().leaveEvent(event)
+
     def mouseMoveEvent(self,event):
+        self.pointer_moved.emit(self.page_point_at(event.position().toPoint()))
         if self._crop_mode and self._crop_drag_handle:
             self._drag_crop(self.mapToScene(event.position().toPoint()))
             event.accept()

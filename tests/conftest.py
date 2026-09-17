@@ -44,3 +44,12 @@ def multi_page_path(tmp_path):
     path.write_bytes(doc.tobytes())
     doc.close()
     return path
+
+
+@pytest.fixture(autouse=True)
+def isolated_settings(tmp_path_factory):
+    """每項測試使用獨立設定檔，避免讀寫使用者真實偏好。"""
+    from PySide6.QtCore import QSettings
+    folder = tmp_path_factory.mktemp("settings")
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(folder))
+    yield folder
