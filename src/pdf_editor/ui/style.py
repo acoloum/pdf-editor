@@ -225,6 +225,8 @@ QTreeWidget::item {{ padding: 5px 4px; border-radius: 4px; }}
 QTreeWidget::item:hover {{ background: {C['surface_alt']}; }}
 QTreeWidget::item:selected {{ background: {C['accent_soft']}; color: {C['accent']}; }}
 QTabWidget#sideTabs > QWidget {{ background: {C['surface']}; }}
+QLabel#inlineError {{ background: #3b1219; color: #fecaca; border: 1px solid {C['danger']};
+    border-radius: 6px; padding: 6px 10px; }}
 QFrame#searchBar {{ background: {C['elevated']}; border: 1px solid {C['accent']}; border-radius: 10px; }}
 QFrame#searchBar QLineEdit {{ background: {C['input']}; }}
 QFrame#searchBar QToolButton {{ padding: 4px; }}

@@ -13,6 +13,7 @@ class TextRun:
     editable: bool
     reason: str | None
     color: Color = (0, 0, 0)
+    bold: bool = False
 
 @dataclass(frozen=True)
 class TextReplacement:
@@ -26,6 +27,8 @@ class TextReplacement:
     color: Color
     alignment: str = "left"
     bold: bool = False
+    # 文字放不下時的處理：none 直接回報、expand 自動加寬、shrink 自動縮小字級。
+    fit: str = "none"
 
 @dataclass(frozen=True)
 class TextInsertion:
@@ -38,6 +41,7 @@ class TextInsertion:
     color: Color
     alignment: str = "left"
     bold: bool = False
+    fit: str = "none"
 
 @dataclass(frozen=True)
 class DocumentAccess:

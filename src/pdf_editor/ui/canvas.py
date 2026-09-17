@@ -172,6 +172,20 @@ class InlineTextEditor(QLineEdit):
     def __init__(self,text,parent=None):
         super().__init__(text,parent)
         self.finished=False
+        self.textEdited.connect(lambda _text:self.set_error(None))
+
+    def set_error(self,message):
+        """以紅框與提示顯示無法套用的原因，保留輸入內容讓使用者直接修正。"""
+        self.setProperty("error",bool(message))
+        self.style().unpolish(self)
+        self.style().polish(self)
+        label=getattr(self,"error_label",None)
+        if label is not None:
+            label.setVisible(bool(message))
+            if message:
+                label.setText(message)
+                label.adjustSize()
+                label.raise_()
 
     def commit(self):
         if self.finished:
@@ -253,6 +267,13 @@ class Canvas(QGraphicsView):
         self.inline_editor=None
         self.inline_run=None
         self.inline_rect=None
+        self.inline_error=QLabel(self.viewport())
+        self.inline_error.setObjectName("inlineError")
+        self.inline_error.setWordWrap(True)
+        self.inline_error.setMaximumWidth(360)
+        self.inline_error.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.inline_error.hide()
+        self.conflict_items=[]
         self.insertion_hint=QLabel("新增文字模式：請在頁面中點選位置（Esc 取消）",self.viewport())
         self.insertion_hint.setStyleSheet(
             "background:rgba(10,18,32,230);color:%s;padding:10px 18px;border-radius:8px;"
@@ -282,6 +303,7 @@ class Canvas(QGraphicsView):
         painter.restore()
 
     def display(self,data,layers=(),selected_layer_id=None):
+        self.conflict_items=[]
         self._clear_crop_items()
         self._crop_mode=False
         self.scene().clear()
@@ -579,13 +601,17 @@ class Canvas(QGraphicsView):
         editor.setAlignment(horizontal | Qt.AlignmentFlag.AlignVCenter)
         editor.setPlaceholderText("直接輸入文字")
         editor.setStyleSheet(
-            "background:rgba(255,255,255,240);color:#0b1220;border:2px solid %s;"%COLORS["accent_strong"]+
-            "border-radius:3px;padding:2px 5px;")
+            "QLineEdit{background:rgba(255,255,255,240);color:#0b1220;border:2px solid %s;"
+            "border-radius:3px;padding:2px 5px;}"
+            "QLineEdit[error=\"true\"]{border:2px solid %s;background:#fff5f5;}"
+            %(COLORS["accent_strong"],COLORS["danger"]))
         font=editor.font()
         font.setPointSizeF(max(6,float(size)))
         editor.setFont(font)
         editor.commit_requested.connect(self._commit_inline_text)
         editor.cancel_requested.connect(self._cancel_inline_text)
+        editor.error_label=self.inline_error
+        self.inline_error.hide()
         self.inline_editor=editor
         self._position_inline_editor()
         editor.show()
@@ -621,12 +647,49 @@ class Canvas(QGraphicsView):
         left=max(6,min(round(left),self.viewport().width()-width-6))
         top=max(6,min(round(top),self.viewport().height()-height-6))
         self.inline_editor.setGeometry(round(left),round(top),round(width),round(height))
+        if self.inline_error.isVisible():
+            below=round(top+height+4)
+            if below+self.inline_error.height()>self.viewport().height():
+                below=max(4,round(top-self.inline_error.height()-4))
+            self.inline_error.move(max(4,min(round(left),self.viewport().width()-self.inline_error.width()-4)),below)
+
+    def show_inline_error(self,message):
+        if self.inline_editor is None:
+            return
+        self.inline_editor.set_error(message)
+        self._position_inline_editor()
+
+    def show_conflicts(self,rects):
+        """以紅色虛線框標出與文字框衝突的既有文字。"""
+        self.clear_conflicts()
+        pen=QPen(QColor(COLORS["danger"]),2,Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        for rect in rects:
+            r=transformed_rect(self.matrix,rect)
+            item=self.scene().addRect(r[0],r[1],r[2]-r[0],r[3]-r[1],pen,QBrush(QColor(248,113,113,40)))
+            item.setZValue(6)
+            self.conflict_items.append(item)
+
+    def clear_conflicts(self):
+        for item in self.conflict_items:
+            try:
+                if item.scene() is self.scene():
+                    self.scene().removeItem(item)
+            except RuntimeError:
+                pass
+        self.conflict_items=[]
+
+    def highlight_run(self,run):
+        """選取文字但不開啟輸入框；按 Enter 或再點一次即可編輯。"""
+        self.selected_run=run
+        self._show_highlight(run.rect)
 
     def _finish_inline_editor(self):
         editor=self.inline_editor
         self.inline_editor=None
         self.inline_run=None
         self.inline_rect=None
+        self.inline_error.hide()
         if editor is not None:
             editor.finished=True
             editor.hide()
@@ -869,6 +932,11 @@ class Canvas(QGraphicsView):
             return
         if event.key()==Qt.Key.Key_Delete and self.selected_annotation is not None:
             self.annotation_delete_requested.emit(self.selected_annotation)
+            event.accept()
+            return
+        if (event.key() in (Qt.Key.Key_Return,Qt.Key.Key_Enter,Qt.Key.Key_F2)
+                and self.selected_run is not None and self.inline_editor is None):
+            self.run_selected.emit(self.selected_run)
             event.accept()
             return
         if event.key()==Qt.Key.Key_Delete and self.selected_run is not None:

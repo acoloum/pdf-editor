@@ -1,4 +1,4 @@
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, QTimer
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QLabel,
     QTextEdit, QDoubleSpinBox, QPushButton, QFileDialog, QColorDialog,
     QComboBox, QCheckBox)
@@ -12,10 +12,17 @@ class TextPanel(QWidget):
     cancel_requested=Signal()
     format_requested=Signal()
 
+    # 數值欄位停止調整後才套用，避免每按一次箭頭或每打一個數字就寫入文件。
+    NUMERIC_DELAY_MS=400
+
     def __init__(self):
         super().__init__()
         self._loading=False
         self.modified=False
+        self._format_timer=QTimer(self)
+        self._format_timer.setSingleShot(True)
+        self._format_timer.setInterval(self.NUMERIC_DELAY_MS)
+        self._format_timer.timeout.connect(self.format_requested)
         layout=QVBoxLayout(self)
         heading=QLabel("文字編輯")
         heading.setObjectName("heading")
@@ -43,10 +50,11 @@ class TextPanel(QWidget):
             spin.setDecimals(2)
             form.addRow(name,spin)
             self.box.append(spin)
-        self.size.valueChanged.connect(self.mark_modified)
+        for spin in [self.size,*self.box]:
+            # 鍵盤輸入時不逐字觸發，按 Enter 或離開欄位才更新數值。
+            spin.setKeyboardTracking(False)
+            spin.valueChanged.connect(self.mark_numeric_modified)
         self.alignment.currentIndexChanged.connect(self.mark_modified)
-        for spin in self.box:
-            spin.valueChanged.connect(self.mark_modified)
         layout.addLayout(form)
         self._font_path = str(default_font())
         self.font_combo = QComboBox()
@@ -172,7 +180,23 @@ class TextPanel(QWidget):
         if self._loading:
             return
         self.modified=True
+        self._format_timer.stop()
         self.format_requested.emit()
+
+    def mark_numeric_modified(self,*args):
+        if self._loading:
+            return
+        self.modified=True
+        self._format_timer.start()
+
+    def flush_pending_format(self):
+        """立即送出尚在等待中的數值變更。"""
+        if self._format_timer.isActive():
+            self._format_timer.stop()
+            self.format_requested.emit()
+
+    def cancel_pending_format(self):
+        self._format_timer.stop()
 
     def set_run(self,run):
         self._loading=True
@@ -182,9 +206,10 @@ class TextPanel(QWidget):
         self.size.setValue(run.size)
         self.color=run.color
         self.alignment.setCurrentIndex(0)
-        x0,y0,x1,y1=run.rect
-        self.set_rect((x0,y0,x1+10,y1+run.size*0.5))
-        self.bold.setChecked(False)
+        # 文字框貼齊原文字；文字變長時由引擎自動加寬，不再預留會碰到鄰行的空間。
+        self.set_rect(run.rect)
+        self.bold.setChecked(bool(getattr(run,"bold",False)))
+        self._format_timer.stop()
         self._loading=False
         self.modified=False
 

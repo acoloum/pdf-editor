@@ -69,6 +69,72 @@ def find_table_cell(pdf: bytes, page: int, rect) -> tuple[float, float, float, f
         inset = min(2.0, cell.width / 10, cell.height / 10)
         return (cell.x0 + inset, cell.y0 + inset, cell.x1 - inset, cell.y1 - inset)
 
+FITS = ("none", "expand", "shrink")
+MIN_SHRINK_RATIO = 0.7
+LINE_HEIGHT = 1.25
+
+
+def overlaps(first, second, tolerance=0.5):
+    """兩矩形重疊超過容許值才算重疊；僅相鄰或邊界相碰的文字不視為衝突。"""
+    a, b = pymupdf.Rect(first), pymupdf.Rect(second)
+    return (min(a.x1, b.x1) - max(a.x0, b.x0) > tolerance
+        and min(a.y1, b.y1) - max(a.y0, b.y0) > tolerance)
+
+
+def _text_extent(font, text, size):
+    lines = text.split("\n")
+    width = max(font.text_length(line, fontsize=size) for line in lines)
+    height = size if len(lines) == 1 else len(lines) * size * LINE_HEIGHT + 1
+    return width, height
+
+
+def fit_text_box(rect, text, font, size, fit, alignment, obstacles, bounds):
+    """依 fit 設定調整文字框或字級，回傳（文字框, 字級）。
+
+    expand：向右（置中時向兩側）加寬、向下加高，但不跨越其他文字與頁面邊界；
+    shrink：維持文字框，字級最多縮小到原本的 70%。
+    """
+    box = pymupdf.Rect(rect)
+    width, height = _text_extent(font, text, size)
+    fits = width <= box.width + 0.01 and height <= box.height + 0.01
+    if fits or fit == "none" or not text:
+        return tuple(box), size
+    if fit == "shrink":
+        ratio = min(box.width / width if width else 1, box.height / height if height else 1)
+        new_size = math.floor(size * ratio * 10) / 10
+        if new_size >= size * MIN_SHRINK_RATIO:
+            return tuple(box), new_size
+        raise EditorError("TEXT_OVERFLOW",
+            f"文字太長，縮小到 {size * MIN_SHRINK_RATIO:.1f} 點仍放不進儲存格，請縮短文字。")
+    margin = 2.0
+    need_width = max(box.width, width + 1.0)
+    need_height = max(box.height, height + 0.5)
+    band = [pymupdf.Rect(o) for o in obstacles
+        if min(o[3], box.y0 + need_height) - max(o[1], box.y0) > 0.5]
+    right = min([o.x0 for o in band if o.x0 >= box.x1 - 0.5] + [bounds.x1 - margin])
+    left = max([o.x1 for o in band if o.x1 <= box.x0 + 0.5] + [bounds.x0 + margin])
+    if alignment in ("hcenter", "center"):
+        center = (box.x0 + box.x1) / 2
+        half = min(center - left, right - center)
+        available = half * 2
+        x0, x1 = center - need_width / 2, center + need_width / 2
+    else:
+        available = right - box.x0
+        x0, x1 = box.x0, box.x0 + need_width
+    if need_width > available + 0.01:
+        raise EditorError("TEXT_OVERFLOW",
+            f"文字太長：需要 {need_width:.0f} 點寬，右側只剩 {max(0, available):.0f} 點。"
+            "請縮短文字、減小字級或手動調整文字框。")
+    column = [pymupdf.Rect(o) for o in obstacles
+        if min(o[2], x1) - max(o[0], x0) > 0.5 and o[1] >= box.y1 - 0.5]
+    bottom = min([o.y0 for o in column] + [bounds.y1 - margin])
+    if box.y0 + need_height > bottom + 0.01:
+        raise EditorError("TEXT_OVERFLOW",
+            f"文字行數太多：需要 {need_height:.0f} 點高，下方只剩 {max(0, bottom - box.y0):.0f} 點。"
+            "請減少行數或減小字級。")
+    return (x0, box.y0, x1, box.y0 + need_height), size
+
+
 def _vertical_centered_rect(rect, text, size):
     box = pymupdf.Rect(rect)
     lines = max(1, text.count("\n") + 1)
@@ -136,24 +202,29 @@ def insert_text(pdf: bytes, request: TextInsertion) -> bytes:
         raise EditorError("TEXT_OVERFLOW", "文字過長，請縮短內容。")
     if request.alignment not in ALIGNMENTS:
         raise EditorError("ALIGNMENT", "文字對齊方式無效。")
+    if request.fit not in FITS:
+        raise EditorError("GEOMETRY", "文字框調整方式無效。")
     if not all(math.isfinite(v) for v in request.rect + request.color):
         raise EditorError("GEOMETRY", "位置或色彩數值無效。")
     rect = pymupdf.Rect(request.rect)
     if rect.is_empty:
         raise EditorError("GEOMETRY", "文字框不可為空。")
-    for run in extract_runs(pdf, request.page):
-        if rect.intersects(run.rect):
-            raise EditorError("OVERLAP", "文字框與其他文字重疊，請縮小範圍。")
+    others = [run.rect for run in extract_runs(pdf, request.page)]
     font_path, fake_bold = _resolve_bold(request)
     font = checked_font(font_path, request.text)
     embed_path = subset_font(font_path, request.text)
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         page = doc[request.page]
         bounds = pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
+        fitted, size = fit_text_box(rect, request.text, font, request.size, request.fit,
+            request.alignment, others, bounds)
+        rect = pymupdf.Rect(fitted)
+        if any(overlaps(rect, other) for other in others):
+            raise EditorError("OVERLAP", "文字框與其他文字重疊，請移動或縮小文字框。")
         if not bounds.contains(rect):
             raise EditorError("GEOMETRY", "文字框必須位於頁面內。")
         shape = _new_text_shape(page, rect, request.text, embed_path, font,
-            request.size, request.color, request.alignment,
+            size, request.color, request.alignment,
             _font_resource_name("insertion", font_path, request.text), fake_bold)
         shape.commit()
         # 已以預子集字型嵌入，無需再對整份文件做全表子集化；
@@ -161,6 +232,14 @@ def insert_text(pdf: bytes, request: TextInsertion) -> bytes:
         if embed_path == font_path:
             doc.subset_fonts(fallback=True)
         return doc.tobytes(garbage=4, deflate=True)
+
+BOLD_NAME_HINTS = ("bold", "black", "heavy", "semibold", "demibold", "粗")
+
+
+def _span_is_bold(span):
+    name = str(span.get("font", "")).lower()
+    return bool(span.get("flags", 0) & pymupdf.TEXT_FONT_BOLD) or any(hint in name for hint in BOLD_NAME_HINTS)
+
 
 def extract_runs(pdf: bytes, page: int) -> list[TextRun]:
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
@@ -176,10 +255,13 @@ def extract_runs(pdf: bytes, page: int) -> list[TextRun]:
                     rect |= pymupdf.Rect(span["bbox"])
                 editable = line["dir"] == (1.0, 0.0) and "\ufffd" not in text
                 color = spans[0]["color"]
+                # 過半文字為粗體（字型旗標或字型名稱）時視為粗體段落。
+                bold_chars = sum(len(span["text"]) for span in spans if _span_is_bold(span))
                 result.append(TextRun(f"{bi}:{li}", text, tuple(rect),
                     spans[0]["font"], max(span["size"] for span in spans), editable,
                     None if editable else "此區段方向或文字編碼不支援修改。",
-                    (((color >> 16) & 255) / 255, ((color >> 8) & 255) / 255, (color & 255) / 255)))
+                    (((color >> 16) & 255) / 255, ((color >> 8) & 255) / 255, (color & 255) / 255),
+                    bold_chars * 2 > len(text)))
         return result
 
 def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
@@ -191,6 +273,8 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
         raise EditorError("TEXT_OVERFLOW", "文字過長，請縮短內容。")
     if request.alignment not in ALIGNMENTS:
         raise EditorError("ALIGNMENT", "文字對齊方式無效。")
+    if request.fit not in FITS:
+        raise EditorError("GEOMETRY", "文字框調整方式無效。")
     if not all(math.isfinite(v) for v in request.rect + request.color):
         raise EditorError("GEOMETRY", "位置或色彩數值無效。")
     runs = extract_runs(pdf, request.page)
@@ -201,9 +285,9 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
     old_rect = pymupdf.Rect(run.rect)
     if rect.is_empty:
         raise EditorError("GEOMETRY", "文字框不可為空。")
-    for other in runs:
-        if other.id != run.id and (old_rect.intersects(other.rect) or rect.intersects(other.rect)):
-            raise EditorError("OVERLAP", "文字框與其他文字重疊，請縮小範圍。")
+    others = [other.rect for other in runs if other.id != run.id]
+    if any(overlaps(old_rect, other) for other in others):
+        raise EditorError("OVERLAP", "原文字與其他文字重疊，無法安全修改。")
     font_path, fake_bold = _resolve_bold(request)
     font = checked_font(font_path, request.text) if request.text else None
     # 以 fontTools 預先子集化：嵌入僅含本次文字字元的小字型，
@@ -215,12 +299,19 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
             if any(a.type[0] == pymupdf.PDF_ANNOT_REDACT for a in page.annots()):
                 raise EditorError("REDACTIONS", "此頁有尚未套用的遮蔽標記，無法修改。")
         bounds = pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
+        size = request.size
+        if request.text:
+            fitted, size = fit_text_box(rect, request.text, font, request.size, request.fit,
+                request.alignment, others, bounds)
+            rect = pymupdf.Rect(fitted)
+        if any(overlaps(rect, other) for other in others):
+            raise EditorError("OVERLAP", "文字框與其他文字重疊，請移動或縮小文字框。")
         if not bounds.contains(rect):
             raise EditorError("GEOMETRY", "文字框必須位於頁面內。")
         if request.text:
             resource_name = _font_resource_name("replacement", font_path, request.text)
             _new_text_shape(page, rect, request.text, embed_path, font,
-                request.size, request.color, request.alignment, resource_name, fake_bold)
+                size, request.color, request.alignment, resource_name, fake_bold)
         page.add_redact_annot(old_rect, fill=False, cross_out=False)
         page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
             graphics=pymupdf.PDF_REDACT_LINE_ART_NONE, text=pymupdf.PDF_REDACT_TEXT_REMOVE)
@@ -228,7 +319,7 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
             return doc.tobytes(garbage=4, deflate=True)
         # 移除後重新建立形狀，避免使用已失效的頁面資源。
         shape = _new_text_shape(page, rect, request.text, embed_path, font,
-            request.size, request.color, request.alignment, resource_name, fake_bold)
+            size, request.color, request.alignment, resource_name, fake_bold)
         shape.commit()
         # 已以預子集字型嵌入，無需再對整份文件做全表子集化；
         # 唯有子集化失敗（embed_path 退回原字型）時保留原流程。

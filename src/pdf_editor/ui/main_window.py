@@ -12,6 +12,7 @@ from pdf_editor.engine.render import render_page,thumbnail
 from pdf_editor.engine.geometry import transform_point,inverse_transform
 from pdf_editor.engine.inspection import unlock_pdf
 from pdf_editor.engine.text import replace_text, insert_text, find_table_cell
+from pdf_editor.engine.text import overlaps as text_overlaps
 from pdf_editor.engine.overlay import flatten_overlays
 from pdf_editor.engine.fonts import default_font,embedded_font,checked_font
 from pdf_editor.model import TextReplacement,TextInsertion,Overlay
@@ -198,6 +199,7 @@ class MainWindow(QMainWindow):
         self.settings=AppSettings()
         self._scroll_after_render=None
         self._fit_after_render=None
+        self._reselect_after_render=None
         self.jobs=Jobs(self)
         self._thumb_queue=[]
         self._thumb_token=None
@@ -1730,6 +1732,8 @@ class MainWindow(QMainWindow):
                 if (self.search_results and self.search_revision==self.session.revision and
                         self.search_results[self.search_index].page==self.page):
                     self.canvas.show_search_result(self.search_results[self.search_index].rect)
+                if self._reselect_after_render:
+                    self.reselect_text_after_render(result)
                 if self.annotation is not None:
                     selected=next((item for item in result.get("annotations",())
                         if item.xref==self.annotation.xref),None)
@@ -1749,9 +1753,11 @@ class MainWindow(QMainWindow):
         pixel_ratio=float(self.canvas.devicePixelRatioF())
         self.jobs.submit(render_page,(data,self.page,self.scale,pixel_ratio),done,self.error)
 
-    def select_run(self,run):
+    def select_run(self,run,open_editor=True):
         if not self.session or not self.session.access.can_edit or self.preview:
             return
+        self.text_panel.cancel_pending_format()
+        self.canvas.clear_conflicts()
         self.canvas.cancel_inline_editor()
         self.canvas.cancel_text_insertion()
         self.actions["add_text"].setChecked(False)
@@ -1779,6 +1785,11 @@ class MainWindow(QMainWindow):
         if cell:
             self.text_panel.set_rect(cell)
             self.text_panel.set_alignment(2)
+        if not open_editor:
+            self.canvas.highlight_run(run)
+            self.text_panel.info.setText("已套用。右側可繼續調整格式；按 Enter、F2 或再點一次文字可修改內容。")
+            self.refresh_actions()
+            return
         self.text_panel.info.setText("請直接在頁面文字框輸入；Enter 或點到別處套用，Esc 取消。")
         self.canvas.begin_inline_text(self.text_panel.rect(),run.text,run,run.size,
             self.text_panel.alignment.currentData())
@@ -1791,14 +1802,21 @@ class MainWindow(QMainWindow):
         p=self.text_panel
         p.text.setPlainText(text)
         target_rect=tuple(rect or p.rect())
+        self.canvas.clear_conflicts()
         # 表格文字：提交時以儲存格重新解析，確保改字後仍位於表格正中央；
         # 若使用者已手動移動文字框（差異超過 2 點）則尊重其設定。
+        in_cell=False
         if run is not None and p.alignment.currentData()=="center":
             cell=find_table_cell(self.session.pdf,self.page,run.rect)
             manual=tuple(p.rect())
             if cell and (not p.modified or abs(manual[0]-cell[0])+abs(manual[1]-cell[1])
                     +abs(manual[2]-cell[2])+abs(manual[3]-cell[3])<2.0):
                 target_rect=cell
+                in_cell=True
+        elif run is None and self.insertion_rect is not None:
+            in_cell=find_table_cell(self.session.pdf,self.page,target_rect)==tuple(target_rect)
+        # 儲存格內縮小字級；一般文字自動加寬文字框。
+        fit="shrink" if in_cell else "expand"
         if run is not None and text==run.text and not p.modified:
             self.refresh_actions()
             self.statusBar().showMessage("文字維持不變，可繼續使用標記或格式工具。")
@@ -1825,13 +1843,15 @@ class MainWindow(QMainWindow):
                 return
             request=TextInsertion(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
                 text,target_rect,font_path,p.size.value(),p.color,p.alignment.currentData(),
-                p.bold.isChecked())
-            self.apply_text_immediately(request,"正在新增文字…",insert_text)
+                p.bold.isChecked(),fit)
+            self.apply_text_immediately(request,"正在新增文字…",insert_text,
+                editor_state=(None,text,target_rect))
             return
         request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
             run.id,text,target_rect,font_path,p.size.value(),p.color,p.alignment.currentData(),
-            p.bold.isChecked())
-        self.apply_text_immediately(request,"正在更新文字…")
+            p.bold.isChecked(),fit)
+        self.apply_text_immediately(request,"正在更新文字…",
+            editor_state=(run,text,target_rect))
 
     def apply_text_format(self):
         if not self.session or self.busy or self.preview or not self.run:
@@ -1871,12 +1891,11 @@ class MainWindow(QMainWindow):
             return
         self.canvas.cancel_inline_editor()
         self.run=run
-        x0,y0,x1,y1=run.rect
-        self.text_panel.set_rect((x0,y0,x1+10,y1+run.size*0.5))
+        self.text_panel.set_rect(run.rect)
         p=self.text_panel
         request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
             run.id,p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),p.color,
-            p.alignment.currentData(), p.bold.isChecked())
+            p.alignment.currentData(), p.bold.isChecked(),"expand")
         self.apply_text_immediately(request,"正在移動文字…")
 
     def start_text_insertion(self,checked=True):
@@ -2130,11 +2149,15 @@ class MainWindow(QMainWindow):
                 self.text_panel.alignment.currentData())
         self.jobs.submit(replace_text,(self.session.pdf,request),done,self.error)
 
-    def apply_text_immediately(self,request,status,operation=replace_text):
+    RECOVERABLE_TEXT_ERRORS=("TEXT_OVERFLOW","OVERLAP","GEOMETRY","FONT_MISSING_GLYPH",
+        "FONT_INVALID","TEXT_EMPTY","SIZE")
+
+    def apply_text_immediately(self,request,status,operation=replace_text,editor_state=None):
         if self.busy:
             return
         revision=self.session.revision
         token=self.token
+        previous_run,previous_insertion=self.run,self.insertion_rect
         self.busy=True
         self.refresh_actions()
         self.statusBar().showMessage(status)
@@ -2147,10 +2170,58 @@ class MainWindow(QMainWindow):
             self.run=None
             self.insertion_rect=None
             self.text_panel.setEnabled(False)
+            if request.text.strip():
+                self._reselect_after_render=(request.page,tuple(request.rect),request.text)
             self.refresh_actions()
             self.request_render()
             self.queue_thumbnails((request.page,))
-        self.jobs.submit(operation,(self.session.pdf,request),done,self.error)
+        def failed(error):
+            code,message,_completed=error
+            if (editor_state is None or code not in self.RECOVERABLE_TEXT_ERRORS or self.closed
+                    or token!=self.token or revision!=self.session.revision):
+                self.error(error)
+                return
+            self.busy=False
+            self.run,self.insertion_rect=previous_run,previous_insertion
+            self.refresh_actions()
+            self.reopen_text_editor(editor_state,request,message,code)
+        self.jobs.submit(operation,(self.session.pdf,request),done,failed)
+
+    def reopen_text_editor(self,editor_state,request,message,code):
+        """套用失敗時重新開啟輸入框並保留內容，直接在旁邊說明原因。"""
+        run,text,rect=editor_state
+        if self.page!=request.page or not self.page_data:
+            self.error((code,message,()))
+            return
+        self.panels.setCurrentWidget(self.text_panel)
+        self.canvas.begin_inline_text(rect,text,run,self.text_panel.size.value(),
+            self.text_panel.alignment.currentData())
+        self.canvas.show_inline_error(message)
+        if code=="OVERLAP":
+            own=run.id if run is not None else None
+            conflicts=[item.rect for item in self.page_data.get("runs",())
+                if item.id!=own and (text_overlaps(item.rect,request.rect)
+                    or (run is not None and text_overlaps(item.rect,run.rect)))]
+            self.canvas.show_conflicts(conflicts)
+        self.statusBar().showMessage(message.split("\n")[0])
+
+    def reselect_text_after_render(self,result):
+        """套用後自動選回剛修改的文字，方便連續調整格式。"""
+        pending,self._reselect_after_render=self._reselect_after_render,None
+        if not pending or not self.session or not self.session.access.can_edit:
+            return
+        page,rect,text=pending
+        if result.get("page")!=page:
+            return
+        target=pymupdf.Rect(rect)+(-3,-3,3,3)
+        wanted=text.replace("\n","").replace(" ","")
+        candidates=[run for run in result.get("runs",()) if run.editable
+            and pymupdf.Rect(run.rect).intersects(target)
+            and run.text.replace(" ","") and run.text.replace(" ","") in wanted]
+        if not candidates:
+            return
+        best=max(candidates,key=lambda run:(pymupdf.Rect(run.rect)&target).get_area())
+        self.select_run(best,open_editor=False)
 
     def preview_replacement(self,request,operation=replace_text):
         if self.busy:
