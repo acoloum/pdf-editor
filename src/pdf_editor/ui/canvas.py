@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,
     QGraphicsItem,QLabel,QLineEdit)
 from pdf_editor.engine.geometry import transformed_rect, transform_point, inverse_transform
 from pdf_editor.engine.overlay import transformed_image
+from pdf_editor.ui.style import COLORS
 
 class LayerItem(QGraphicsPixmapItem):
     HANDLE_RADIUS=6
@@ -89,7 +90,7 @@ class LayerItem(QGraphicsPixmapItem):
         if not self.isSelected():
             return
         painter.save()
-        pen=QPen(QColor("#24765b"),2)
+        pen=QPen(QColor(COLORS["accent"]),2)
         pen.setCosmetic(True)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -219,7 +220,7 @@ class Canvas(QGraphicsView):
     def __init__(self):
         super().__init__()
         self.setScene(QGraphicsScene(self))
-        self.setBackgroundBrush(QColor("#d9dfdb"))
+        self.setBackgroundBrush(QColor(COLORS["canvas"]))
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform,True)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.matrix=(1,0,0,1,0,0)
@@ -249,11 +250,28 @@ class Canvas(QGraphicsView):
         self.inline_rect=None
         self.insertion_hint=QLabel("新增文字模式：請在頁面中點選位置（Esc 取消）",self.viewport())
         self.insertion_hint.setStyleSheet(
-            "background:#1f5f4a;color:white;padding:10px 16px;border-radius:6px;font-weight:600;")
+            "background:rgba(10,18,32,230);color:%s;padding:10px 18px;border-radius:8px;"
+            "border:1px solid %s;font-weight:600;"%(COLORS["accent"],COLORS["accent"]))
         self.insertion_hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.insertion_hint.hide()
         self.setMinimumWidth(400)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def drawBackground(self,painter,rect):
+        """繪製深色畫布與細點網格，營造工作區的科技感。"""
+        super().drawBackground(painter,rect)
+        spacing=28
+        painter.save()
+        pen=QPen(QColor(COLORS["canvas_grid"]),2)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        left=int(rect.left())-int(rect.left())%spacing
+        top=int(rect.top())-int(rect.top())%spacing
+        points=[QPointF(x,y) for x in range(left,int(rect.right())+1,spacing)
+            for y in range(top,int(rect.bottom())+1,spacing)]
+        if points:
+            painter.drawPoints(points)
+        painter.restore()
 
     def display(self,data,layers=(),selected_layer_id=None):
         self._clear_crop_items()
@@ -274,6 +292,11 @@ class Canvas(QGraphicsView):
         self.scene().addPixmap(pix)
         width,height=data.get("display_size",(pix.width(),pix.height()))
         self.scene().setSceneRect(0,0,width,height)
+        # 頁面外框加上淡青色光暈，讓白色頁面在深色畫布上有層次。
+        for grow,alpha in ((6,18),(3,40),(1,90)):
+            frame=self.scene().addRect(QRectF(-grow,-grow,width+grow*2,height+grow*2),
+                QPen(QColor(34,211,238,alpha),1),QBrush(Qt.BrushStyle.NoBrush))
+            frame.setZValue(-1)
         for layer in layers:
             if layer.page!=data["page"]:
                 continue
@@ -322,7 +345,7 @@ class Canvas(QGraphicsView):
     def show_search_result(self,rect):
         self.clear_search_result()
         transformed=transformed_rect(self.matrix,rect)
-        pen=QPen(QColor("#c58a00"),2)
+        pen=QPen(QColor(COLORS["search"]),2)
         pen.setCosmetic(True)
         self.search_highlight=self.scene().addRect(transformed[0],transformed[1],
             transformed[2]-transformed[0],transformed[3]-transformed[1],pen,
@@ -338,7 +361,7 @@ class Canvas(QGraphicsView):
         self.clear_annotation_selection()
         self.selected_annotation=item
         r=transformed_rect(self.matrix,item.rect)
-        pen=QPen(QColor("#7b3fc6"),3,Qt.PenStyle.DashLine)
+        pen=QPen(QColor(COLORS["annotation"]),3,Qt.PenStyle.DashLine)
         self.annotation_highlight=self.scene().addRect(
             r[0],r[1],r[2]-r[0],r[3]-r[1],pen)
         self.annotation_highlight.setZValue(4)
@@ -423,15 +446,15 @@ class Canvas(QGraphicsView):
         self.insertion_hint.raise_()
 
     def _create_crop_items(self):
-        pen=QPen(QColor("#16a36f"),3,Qt.PenStyle.SolidLine)
+        pen=QPen(QColor(COLORS["accent"]),2,Qt.PenStyle.SolidLine)
         pen.setCosmetic(True)
         self._crop_frame=self.scene().addRect(self._crop_rect,pen,
-            QBrush(QColor(22,163,111,24)))
+            QBrush(QColor(34,211,238,28)))
         self._crop_frame.setZValue(20)
         self._crop_handles=[]
         for _ in range(8):
-            handle=self.scene().addRect(QRectF(),QPen(QColor("#0f6d4c"),1),
-                QBrush(QColor("white")))
+            handle=self.scene().addRect(QRectF(),QPen(QColor(COLORS["accent"]),1),
+                QBrush(QColor(COLORS["surface"])))
             handle.setZValue(21)
             self._crop_handles.append(handle)
         self._update_crop_items()
@@ -548,7 +571,7 @@ class Canvas(QGraphicsView):
         editor.setAlignment(horizontal | Qt.AlignmentFlag.AlignVCenter)
         editor.setPlaceholderText("直接輸入文字")
         editor.setStyleSheet(
-            "background:rgba(255,255,255,235);color:#17231f;border:2px solid #24765b;"
+            "background:rgba(255,255,255,240);color:#0b1220;border:2px solid %s;"%COLORS["accent_strong"]+
             "border-radius:3px;padding:2px 5px;")
         font=editor.font()
         font.setPointSizeF(max(6,float(size)))
@@ -627,7 +650,7 @@ class Canvas(QGraphicsView):
             self.scene().removeItem(self.highlight)
         r=transformed_rect(self.matrix,rect)
         self.highlight=self.scene().addRect(r[0],r[1],r[2]-r[0],r[3]-r[1],
-            QPen(QColor("#246b55"),2))
+            QPen(QColor(COLORS["accent"]),2))
         self.highlight.setZValue(2)
 
     def mousePressEvent(self,event):

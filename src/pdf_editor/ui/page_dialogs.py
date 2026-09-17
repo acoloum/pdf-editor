@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QPushButton,QLabe
     QComboBox,QTabWidget,QWidget)
 from pdf_editor.engine.inspection import unlock_pdf
 from pdf_editor.engine.render import thumbnail
+from pdf_editor.ui.style import thumbnail_icon
 from pdf_editor.pages import parse_group,fixed_groups
 from pdf_editor.errors import EditorError
 
@@ -65,7 +66,7 @@ class MergeDialog(QDialog):
                             if self.isVisible():
                                 pix=QPixmap()
                                 pix.loadFromData(png)
-                                item.setIcon(QIcon(pix))
+                                item.setIcon(thumbnail_icon(pix))
                         self.parent().jobs.submit(thumbnail,(data,pi),done,lambda err:None)
             except Exception as exc:
                 QMessageBox.warning(self,"無法加入",str(exc))

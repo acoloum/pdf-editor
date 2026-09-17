@@ -5,7 +5,7 @@ import uuid
 import pymupdf
 from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal,QPointF
 from PySide6.QtGui import QAction,QKeySequence,QIcon,QPixmap
-from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton,QAbstractItemView
+from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton,QAbstractItemView,QApplication
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.document.save import write_pdf,publish_batch
 from pdf_editor.engine.render import render_page,thumbnail
@@ -44,7 +44,7 @@ from pdf_editor.ui.comparison_dialog import ComparisonDialog
 from pdf_editor.ui.legacy_stamp_dialog import LegacyStampDialog
 from pdf_editor.ui.page_dialogs import (MergeDialog,SplitDialog,CropPagesDialog,
     PageDecorationDialog,HeaderFooterTemplatesDialog)
-from pdf_editor.ui.style import STYLE
+from pdf_editor.ui.style import STYLE,apply_theme,apply_dark_title_bar,glyph_icon,thumbnail_icon
 
 ZOOM_LEVELS=(0.25,0.5,0.75,1.0,1.25,1.5,1.75,2.0,2.5,3.0,4.0,5.0)
 
@@ -132,6 +132,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("墨頁 PDF")
         self.resize(1320,850)
+        apply_theme(QApplication.instance())
         self.setStyleSheet(STYLE)
         self.session=None
         self.page_data=None
@@ -165,6 +166,9 @@ class MainWindow(QMainWindow):
             self.asset_root.parent/"header-footer-templates.json")
         toolbar=QToolBar("文件工具",self)
         toolbar.setMovable(False)
+        toolbar.setObjectName("mainToolbar")
+        toolbar.setIconSize(QSize(20,20))
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.addToolBar(toolbar)
         self.actions={}
         for name,label,handler,key in [
@@ -183,7 +187,7 @@ class MainWindow(QMainWindow):
             ("split","拆分",self.split,None),
             ("page_marks","頁碼／浮水印",self.show_page_decoration_dialog,None),
             ("header_footer","頁首頁尾範本",self.show_header_footer_dialog,None)]:
-            action=QAction(label,self)
+            action=QAction(glyph_icon(name),label,self)
             action.triggered.connect(handler)
             if key:
                 action.setShortcut(QKeySequence(key))
@@ -214,6 +218,8 @@ class MainWindow(QMainWindow):
             self.actions[name]=action
         self.page_menu_button=QToolButton()
         self.page_menu_button.setText("頁面操作")
+        self.page_menu_button.setIcon(glyph_icon("page_menu"))
+        self.page_menu_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.page_menu_button.setMenu(page_menu)
         self.page_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         toolbar.addWidget(self.page_menu_button)
@@ -236,6 +242,8 @@ class MainWindow(QMainWindow):
             self.actions[name]=action
         self.markup_menu_button=QToolButton()
         self.markup_menu_button.setText("標記註解")
+        self.markup_menu_button.setIcon(glyph_icon("markup_menu"))
+        self.markup_menu_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.markup_menu_button.setMenu(markup_menu)
         self.markup_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         toolbar.addWidget(self.markup_menu_button)
@@ -248,7 +256,7 @@ class MainWindow(QMainWindow):
         for name,label,handler,shortcuts,tip in [
             ("zoom_out","－",lambda:self.zoom_by(-1),("Ctrl+-",),"縮小頁面（Ctrl+-）"),
             ("zoom_in","＋",lambda:self.zoom_by(1),("Ctrl++","Ctrl+="),"放大頁面（Ctrl++）")]:
-            action=QAction(label,self)
+            action=QAction(glyph_icon(name),label,self)
             action.triggered.connect(handler)
             action.setShortcuts([QKeySequence(key) for key in shortcuts])
             action.setToolTip(tip)
@@ -261,8 +269,10 @@ class MainWindow(QMainWindow):
         self.addToolBarBreak()
         search_toolbar=QToolBar("文件搜尋",self)
         search_toolbar.setMovable(False)
+        search_toolbar.setIconSize(QSize(16,16))
+        search_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.addToolBar(search_toolbar)
-        search_action=QAction("搜尋",self)
+        search_action=QAction(glyph_icon("search"),"搜尋",self)
         search_action.setShortcut(QKeySequence("Ctrl+F"))
         search_action.triggered.connect(self.focus_search)
         search_toolbar.addAction(search_action)
@@ -272,12 +282,12 @@ class MainWindow(QMainWindow):
         self.search_input.setMaximumWidth(360)
         self.search_input.returnPressed.connect(lambda:self.perform_search())
         search_toolbar.addWidget(self.search_input)
-        previous=QAction("上一筆",self)
+        previous=QAction(glyph_icon("search_previous"),"上一筆",self)
         previous.setShortcut(QKeySequence("Shift+F3"))
         previous.triggered.connect(lambda:self.next_search_result(-1))
         search_toolbar.addAction(previous)
         self.actions["search_previous"]=previous
-        next_result=QAction("下一筆",self)
+        next_result=QAction(glyph_icon("search_next"),"下一筆",self)
         next_result.setShortcut(QKeySequence("F3"))
         next_result.triggered.connect(self.next_search_result)
         search_toolbar.addAction(next_result)
@@ -289,6 +299,10 @@ class MainWindow(QMainWindow):
         search_toolbar.addAction(self.actions["zoom_out"])
         search_toolbar.addWidget(self.zoom)
         search_toolbar.addAction(self.actions["zoom_in"])
+        for name in ("zoom_out","zoom_in"):
+            # 縮放按鈕僅顯示圖示，文字說明保留在提示中。
+            search_toolbar.widgetForAction(self.actions[name]).setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonIconOnly)
         splitter=QSplitter()
         self.thumbs=ThumbnailList()
         self.thumbs.setIconSize(QSize(110,140))
@@ -605,7 +619,7 @@ class MainWindow(QMainWindow):
             pix.loadFromData(png)
             item=self.thumbs.item(index)
             if item:
-                item.setIcon(QIcon(pix))
+                item.setIcon(thumbnail_icon(pix))
             self.queue_thumbnail(index+1,token,revision)
         self.jobs.submit(thumbnail,(self.session.pdf,index),done,lambda err:None)
 
@@ -1826,6 +1840,10 @@ class MainWindow(QMainWindow):
         self.busy=False
         self.refresh_actions()
         self.statusBar().showMessage("輸出完成："+(result if isinstance(result,str) else f"{len(result)} 份 PDF"))
+
+    def showEvent(self,event):
+        super().showEvent(event)
+        apply_dark_title_bar(self)
 
     def closeEvent(self,event):
         self.canvas.cancel_inline_editor()

@@ -131,7 +131,7 @@ def test_canvas_displays_high_resolution_page_at_logical_size(qtbot, pdf_bytes):
 
     canvas.display(data)
 
-    page_item = canvas.scene().items()[-1]
+    page_item = next(item for item in canvas.scene().items() if hasattr(item, "pixmap"))
     assert page_item.pixmap().devicePixelRatio() == 2.0
     assert canvas.scene().sceneRect().width() == pytest.approx(625)
     assert canvas.scene().sceneRect().height() == pytest.approx(500)
