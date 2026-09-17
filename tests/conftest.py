@@ -1,5 +1,10 @@
 from pathlib import Path
 import io
+import os
+import tempfile
+
+# 測試期間的錯誤紀錄寫入暫存資料夾；背景工作程序會繼承此環境變數。
+os.environ["PDF_EDITOR_LOG_DIR"] = tempfile.mkdtemp(prefix="pdf-editor-logs-")
 import pytest
 import pymupdf
 from PIL import Image

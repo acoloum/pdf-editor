@@ -50,8 +50,19 @@ from pdf_editor.ui.info_panel import DocumentInfoPanel,describe_document
 from pdf_editor.ui.search_bar import SearchBar
 from pdf_editor.ui.printing import print_pages
 from pdf_editor.outline import read_outline,page_text
+from pdf_editor.logs import get_logger,log_path
 
 ZOOM_LEVELS=(0.25,0.5,0.75,1.0,1.25,1.5,1.75,2.0,2.5,3.0,4.0,5.0)
+
+# 依錯誤代碼顯示較明確的視窗標題；未列出的沿用「無法完成操作」。
+ERROR_TITLES={
+    "OPEN":"無法開啟文件",
+    "PASSWORD":"密碼錯誤",
+    "PRINT":"列印失敗",
+    "WORKER":"背景工作中斷",
+    "ERROR":"發生未預期的錯誤",
+}
+UNEXPECTED_ERRORS=("ERROR","WORKER")
 
 def export_document(pdf,layers,target,source,overwrite):
     data=embed_workspace(pdf,layers) if layers else pdf
@@ -187,6 +198,9 @@ class MainWindow(QMainWindow):
         self._scroll_after_render=None
         self._fit_after_render=None
         self.jobs=Jobs(self)
+        self._thumb_queue=[]
+        self._thumb_token=None
+        self._thumb_running=False
         self.asset_root=Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))/"assets"
         self.assets=AssetStore(self.asset_root)
         self.header_footer_templates=HeaderFooterTemplateStore(
@@ -380,6 +394,7 @@ class MainWindow(QMainWindow):
         self.thumbs.itemSelectionChanged.connect(self.thumbnail_selection_changed)
         self.thumbs.pages_dropped.connect(self.move_selected_pages_to)
         self.thumbs.files_dropped.connect(self.open_dropped_files)
+        self.thumbs.verticalScrollBar().valueChanged.connect(lambda _value:self.reprioritize_thumbnails())
         self.thumbs.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.thumbs.customContextMenuRequested.connect(self.show_thumbnail_menu)
         self.outline_tree=QTreeWidget()
@@ -710,9 +725,12 @@ class MainWindow(QMainWindow):
         self.busy=False
         self.refresh_actions()
         code,message,completed=error
+        get_logger().warning("操作失敗：%s %s 已完成=%s",code,message,list(completed))
         if completed:
             message+="\n已完成：\n"+"\n".join(completed)
-        QMessageBox.warning(self,"無法完成操作",message)
+        if code in UNEXPECTED_ERRORS:
+            message+=f"\n\n若問題持續發生，請提供紀錄檔：\n{log_path()}"
+        QMessageBox.warning(self,ERROR_TITLES.get(code,"無法完成操作"),message)
         self.statusBar().showMessage(message.split("\n")[0])
 
     def confirm_leave(self):
@@ -788,7 +806,7 @@ class MainWindow(QMainWindow):
             self._fit_after_render="page" if self.zoom.currentText()=="適合頁面" else "width"
         self.refresh_actions()
         self.request_render()
-        self.queue_thumbnail(0,self.token,session.revision)
+        self.queue_thumbnails()
         self.refresh_outline()
         if session.open_notice:
             QMessageBox.warning(self, "圖章工作層", session.open_notice)
@@ -910,19 +928,75 @@ class MainWindow(QMainWindow):
         self.clear_comparison(dialog)
         dialog.close()
 
-    def queue_thumbnail(self,index,token,revision):
-        if self.closed or not self.session or token!=self.token or revision!=self.session.revision or index>=self.page_count:
+    def queue_thumbnails(self,pages=None):
+        """排入需要重畫的縮圖；pages 為 None 代表全部頁面。
+
+        尚未完成的頁面會保留並與新的頁面合併，畫面上看得到的縮圖優先處理。
+        """
+        if self.closed or not self.session:
             return
+        targets=range(self.page_count) if pages is None else pages
+        if self._thumb_token!=self.token:
+            self._thumb_queue=[]
+            self._thumb_token=self.token
+        merged=set(self._thumb_queue)|{page for page in targets if 0<=page<self.page_count}
+        self._thumb_queue=self.prioritized_thumbnails(merged)
+        self._pump_thumbnails()
+
+    def visible_thumbnail_rows(self):
+        viewport=self.thumbs.viewport().rect()
+        rows=[self.thumbs.row(self.thumbs.itemAt(point)) for point in
+            (viewport.topLeft(),viewport.center(),viewport.bottomLeft())
+            if self.thumbs.itemAt(point) is not None]
+        if not rows:
+            return range(0)
+        # 上下各多留一列，捲動時不會馬上看到空白縮圖。
+        return range(max(0,min(rows)-1),min(self.page_count,max(rows)+2))
+
+    def prioritized_thumbnails(self,pages):
+        visible=set(self.visible_thumbnail_rows())
+        return sorted((page for page in pages if 0<=page<self.page_count),
+            key=lambda page:(page not in visible,abs(page-self.page),page))
+
+    def reprioritize_thumbnails(self):
+        if self._thumb_queue:
+            self._thumb_queue=self.prioritized_thumbnails(self._thumb_queue)
+
+    def _pump_thumbnails(self):
+        if self._thumb_running or not self._thumb_queue or self.closed or not self.session:
+            return
+        index=self._thumb_queue.pop(0)
+        token,revision=self.token,self.session.revision
+        self._thumb_running=True
+        def current():
+            return (not self.closed and self.session is not None and token==self.token
+                and revision==self.session.revision and index<self.page_count)
+        def finish():
+            self._thumb_running=False
+            self._pump_thumbnails()
         def done(png):
-            if self.closed or token!=self.token or not self.session or revision!=self.session.revision:
-                return
-            pix=QPixmap()
-            pix.loadFromData(png)
-            item=self.thumbs.item(index)
-            if item:
-                item.setIcon(thumbnail_icon(pix))
-            self.queue_thumbnail(index+1,token,revision)
-        self.jobs.submit(thumbnail,(self.session.pdf,index),done,lambda err:None)
+            if current():
+                pix=QPixmap()
+                pix.loadFromData(png)
+                item=self.thumbs.item(index)
+                if item:
+                    item.setIcon(thumbnail_icon(pix))
+                    item.setToolTip("")
+            elif (not self.closed and self.session is not None and token==self.token
+                    and index<self.page_count):
+                # 產生期間文件已變更，結果過期，重新排入。
+                self._thumb_queue=self.prioritized_thumbnails(set(self._thumb_queue)|{index})
+            finish()
+        def failed(error):
+            if current():
+                item=self.thumbs.item(index)
+                if item:
+                    item.setIcon(glyph_icon("thumbnail_error",48))
+                    item.setToolTip("縮圖產生失敗："+error[1])
+                get_logger().warning("第 %s 頁縮圖產生失敗：%s",index+1,error[1])
+                self.statusBar().showMessage(f"第 {index+1} 頁縮圖產生失敗，頁面內容仍可正常檢視。")
+            finish()
+        self.jobs.submit(thumbnail,(self.session.pdf,index),done,failed)
 
     def goto_page(self,page):
         if not self.session or not 0<=page<self.page_count or page==self.page:
@@ -1109,9 +1183,10 @@ class MainWindow(QMainWindow):
         self.page_spin.setValue(self.page+1)
         self.page_spin.blockSignals(False)
         self.thumbs.blockSignals(True)
-        self.thumbs.clear()
-        for index in range(self.page_count):
-            self.thumbs.addItem(QListWidgetItem(f"第 {index+1} 頁"))
+        if self.thumbs.count()!=self.page_count:
+            self.thumbs.clear()
+            for index in range(self.page_count):
+                self.thumbs.addItem(QListWidgetItem(f"第 {index+1} 頁"))
         self.thumbs.setCurrentRow(self.page)
         if selected_pages:
             self.thumbs.clearSelection()
@@ -1123,7 +1198,7 @@ class MainWindow(QMainWindow):
         self.page_data=None
         self.refresh_actions()
         self.request_render()
-        self.queue_thumbnail(0,self.token,self.session.revision)
+        self.queue_thumbnails()
         self.refresh_outline()
 
     def submit_page_operation(self,operation,pages,target,status,selected,selected_pages=None):
@@ -1201,7 +1276,7 @@ class MainWindow(QMainWindow):
                 summary=(f"OCR 完成：辨識 {len(result.processed_pages)} 頁，跳過 "
                     f"{len(result.skipped_pages)} 頁，共 {result.word_count} 個文字區段。")
                 self.request_render(summary)
-                self.queue_thumbnail(0,self.token,self.session.revision)
+                self.queue_thumbnails(result.processed_pages)
             else:
                 self.refresh_actions()
                 self.statusBar().showMessage(
@@ -1934,6 +2009,7 @@ class MainWindow(QMainWindow):
     def submit_annotation(self,operation,args,status):
         if not self.session or self.busy:
             return
+        page=self.page
         revision=self.session.revision
         token=self.token
         self.busy=True
@@ -1954,7 +2030,7 @@ class MainWindow(QMainWindow):
             self.page_data=None
             self.refresh_actions()
             self.request_render()
-            self.queue_thumbnail(0,self.token,self.session.revision)
+            self.queue_thumbnails((page,))
         self.jobs.submit(operation,(self.session.pdf,*args),done,self.error)
 
     def begin_text_insertion(self,position):
@@ -2036,7 +2112,7 @@ class MainWindow(QMainWindow):
             self.text_panel.setEnabled(False)
             self.refresh_actions()
             self.request_render()
-            self.queue_thumbnail(0,self.token,self.session.revision)
+            self.queue_thumbnails((request.page,))
         self.jobs.submit(operation,(self.session.pdf,request),done,self.error)
 
     def preview_replacement(self,request,operation=replace_text):
@@ -2073,7 +2149,7 @@ class MainWindow(QMainWindow):
             self.text_panel.setEnabled(False)
             self.refresh_actions()
             self.request_render()
-            self.queue_thumbnail(0,self.token,self.session.revision)
+            self.queue_thumbnails((self.page,))
 
     def history_step(self,redo):
         if not self.session or self.busy:
@@ -2194,7 +2270,7 @@ class MainWindow(QMainWindow):
             self.select_layer(layer.id)
             self.refresh_actions()
             self.request_render("已轉換為可編輯圖章。")
-            self.queue_thumbnail(layer.page, self.token, self.session.revision)
+            self.queue_thumbnails((layer.page,))
         except Exception as exc:
             self.error((getattr(exc, "code", "STAMP_CONVERSION"), str(exc), ()))
 

@@ -60,6 +60,22 @@ def _finish_acceptance(window, app, exit_code):
     app.exit(exit_code)
 
 
+def _install_exception_hook(app):
+    """介面事件中未處理的例外寫入紀錄檔並提示使用者，避免程式默默失效。"""
+    from pdf_editor.logs import get_logger, log_path
+
+    def hook(kind, value, trace):
+        get_logger().error("未處理的例外", exc_info=(kind, value, trace))
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(app.activeWindow(), "發生未預期的錯誤",
+                f"{value}\n\n目前文件未被覆蓋，建議先另存新檔。\n紀錄檔：{log_path()}")
+        except Exception:
+            pass
+
+    sys.excepthook = hook
+
+
 def main(argv=None):
     multiprocessing.freeze_support()
     args=list(sys.argv[1:] if argv is None else argv)
@@ -71,6 +87,7 @@ def main(argv=None):
     app.setOrganizationName("LocalPDFEditor")
     app.setApplicationName("墨頁 PDF")
     cleanup_stale()
+    _install_exception_hook(app)
     window=MainWindow()
     window.show()
     if args and args[0]=="--smoke-test":

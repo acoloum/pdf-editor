@@ -57,6 +57,7 @@ ICON_GLYPHS = {
     "zoom_out": "\ue738",
     "zoom_in": "\ue710",
     "print": "\ue749",
+    "thumbnail_error": "\ue783",
     "previous_page": "\ue70e",
     "next_page": "\ue70d",
     "first_page": "\ue892",

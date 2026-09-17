@@ -6,7 +6,14 @@ def _invoke(fn, args):
     try:
         return True, fn(*args)
     except Exception as exc:
-        return False, (getattr(exc,"code","ERROR"), str(exc),
+        from pdf_editor.logs import get_logger
+        code=getattr(exc,"code",None)
+        if code is None:
+            # 非預期例外保留完整堆疊，方便日後排查。
+            get_logger().exception("背景工作 %s 發生未預期錯誤",getattr(fn,"__name__",fn))
+        else:
+            get_logger().warning("背景工作 %s 失敗：%s %s",getattr(fn,"__name__",fn),code,exc)
+        return False, (code or "ERROR", str(exc),
             tuple(str(p) for p in getattr(exc,"completed",())))
 
 class Jobs(QObject):
@@ -30,6 +37,8 @@ class Jobs(QObject):
             try:
                 ok,value=future.result()
             except Exception:
+                from pdf_editor.logs import get_logger
+                get_logger().exception("背景工作程序中斷")
                 failure(("WORKER","背景工作中斷，請重試。",()))
                 continue
             if ok:
