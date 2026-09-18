@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QAbstractItemView,QDialog,QToolBar
 from PySide6.QtTest import QSignalSpy
 from pdf_editor.ui.main_window import MainWindow
 import pdf_editor.ui.main_window as main_window
+import pdf_editor.ui.stamp_actions as stamp_actions
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.engine.render import render_page
 from pdf_editor.engine.geometry import transform_point, inverse_transform
@@ -1585,9 +1586,9 @@ def test_window_commits_ocr_as_one_undoable_change(qtbot, source_path, tmp_path,
         return OcrResult(_pdf_with_ocr_marker(pdf), pages, (), 1)
 
     monkeypatch.setattr("pdf_editor.ui.main_window.Jobs.submit", _submit_synchronously)
-    monkeypatch.setattr("pdf_editor.ui.main_window.ocr_pages", fake_ocr_pages,
+    monkeypatch.setattr("pdf_editor.ui.page_actions.ocr_pages", fake_ocr_pages,
         raising=False)
-    monkeypatch.setattr("pdf_editor.ui.main_window.validate_ocr_assets", lambda: tmp_path,
+    monkeypatch.setattr("pdf_editor.ui.page_actions.validate_ocr_assets", lambda: tmp_path,
         raising=False)
     window = MainWindow()
     qtbot.addWidget(window)
@@ -1625,8 +1626,8 @@ def test_window_keeps_ocr_summary_after_delayed_page_render(
     def fake_ocr_pages(pdf, pages, tessdata):
         return OcrResult(_pdf_with_ocr_marker(pdf), pages, (), 1)
 
-    monkeypatch.setattr("pdf_editor.ui.main_window.ocr_pages", fake_ocr_pages)
-    monkeypatch.setattr("pdf_editor.ui.main_window.validate_ocr_assets", lambda: tmp_path)
+    monkeypatch.setattr("pdf_editor.ui.page_actions.ocr_pages", fake_ocr_pages)
+    monkeypatch.setattr("pdf_editor.ui.page_actions.validate_ocr_assets", lambda: tmp_path)
     window = MainWindow()
     qtbot.addWidget(window)
     try:
@@ -1650,9 +1651,9 @@ def test_window_keeps_history_unchanged_when_ocr_skips_all_pages(
         return OcrResult(pdf, (), pages, 0)
 
     monkeypatch.setattr("pdf_editor.ui.main_window.Jobs.submit", _submit_synchronously)
-    monkeypatch.setattr("pdf_editor.ui.main_window.ocr_pages", fake_ocr_pages,
+    monkeypatch.setattr("pdf_editor.ui.page_actions.ocr_pages", fake_ocr_pages,
         raising=False)
-    monkeypatch.setattr("pdf_editor.ui.main_window.validate_ocr_assets", lambda: tmp_path,
+    monkeypatch.setattr("pdf_editor.ui.page_actions.validate_ocr_assets", lambda: tmp_path,
         raising=False)
     window = MainWindow()
     qtbot.addWidget(window)
@@ -2035,9 +2036,9 @@ def test_window_converts_selected_legacy_stamp_into_layer(
         return pdf, converted_layer
 
     monkeypatch.setattr(main_window.Jobs, "submit", _submit_synchronously)
-    monkeypatch.setattr(main_window, "find_convertible_images", lambda pdf: (candidate,))
-    monkeypatch.setattr(main_window, "convert_legacy_image", fake_convert)
-    monkeypatch.setattr(main_window.LegacyStampDialog, "exec",
+    monkeypatch.setattr(stamp_actions, "find_convertible_images", lambda pdf: (candidate,))
+    monkeypatch.setattr(stamp_actions, "convert_legacy_image", fake_convert)
+    monkeypatch.setattr(stamp_actions.LegacyStampDialog, "exec",
         _accept_first_legacy_candidate)
     window = _open_window_for_legacy_stamp(qtbot, source_path)
     try:
@@ -2087,7 +2088,7 @@ def test_window_save_reopens_stamp_as_editable_overlay(
 def test_window_reports_when_no_legacy_stamp_candidate_exists(
         qtbot, source_path, monkeypatch):
     monkeypatch.setattr(main_window.Jobs, "submit", _submit_synchronously)
-    monkeypatch.setattr(main_window, "find_convertible_images", lambda pdf: ())
+    monkeypatch.setattr(stamp_actions, "find_convertible_images", lambda pdf: ())
     window = _open_window_for_legacy_stamp(qtbot, source_path)
     try:
         before = window.session.history.index
@@ -2107,10 +2108,10 @@ def test_window_cancelled_legacy_stamp_conversion_keeps_document_unchanged(
         qtbot, source_path, monkeypatch):
     candidate = _legacy_candidate()
     monkeypatch.setattr(main_window.Jobs, "submit", _submit_synchronously)
-    monkeypatch.setattr(main_window, "find_convertible_images", lambda pdf: (candidate,))
-    monkeypatch.setattr(main_window.LegacyStampDialog, "exec",
+    monkeypatch.setattr(stamp_actions, "find_convertible_images", lambda pdf: (candidate,))
+    monkeypatch.setattr(stamp_actions.LegacyStampDialog, "exec",
         lambda dialog: QDialog.DialogCode.Rejected)
-    monkeypatch.setattr(main_window, "convert_legacy_image",
+    monkeypatch.setattr(stamp_actions, "convert_legacy_image",
         lambda *args: pytest.fail("取消後不應執行轉換"))
     window = _open_window_for_legacy_stamp(qtbot, source_path)
     try:
@@ -2130,7 +2131,7 @@ def test_window_ignores_stale_legacy_stamp_scan_result(
         qtbot, source_path, monkeypatch):
     candidate = _legacy_candidate()
     opened_dialogs = []
-    monkeypatch.setattr(main_window.LegacyStampDialog, "__init__",
+    monkeypatch.setattr(stamp_actions.LegacyStampDialog, "__init__",
         lambda self, candidates, parent=None: opened_dialogs.append(tuple(candidates)))
     window = _open_window_for_legacy_stamp(qtbot, source_path)
     try:
@@ -2154,7 +2155,7 @@ def test_window_ignores_legacy_stamp_conversion_after_revision_changes(
     asset_path.write_bytes(candidate.png)
     converted_layer = Overlay(
         "stale-stamp", candidate.page, str(asset_path), candidate.rect, 0)
-    monkeypatch.setattr(main_window.LegacyStampDialog, "exec",
+    monkeypatch.setattr(stamp_actions.LegacyStampDialog, "exec",
         _accept_first_legacy_candidate)
     window = _open_window_for_legacy_stamp(qtbot, source_path)
     try:

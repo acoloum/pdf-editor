@@ -1,57 +1,57 @@
 from pathlib import Path
-from dataclasses import replace
-import hashlib
-import uuid
 import pymupdf
 from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal,QPointF,QTimer
-from PySide6.QtGui import QAction,QKeySequence,QIcon,QPixmap
-from PySide6.QtWidgets import QMainWindow,QWidget,QVBoxLayout,QLabel,QSplitter,QListWidget,QListWidgetItem,QToolBar,QFileDialog,QMessageBox,QInputDialog,QLineEdit,QStackedWidget,QComboBox,QSpinBox,QScrollArea,QListView,QMenu,QToolButton,QAbstractItemView,QApplication,QHBoxLayout,QTabWidget,QTreeWidget,QTreeWidgetItem,QProgressDialog
+from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtWidgets import (
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QSplitter,
+    QListWidget,
+    QListWidgetItem,
+    QToolBar,
+    QFileDialog,
+    QMessageBox,
+    QInputDialog,
+    QLineEdit,
+    QStackedWidget,
+    QComboBox,
+    QSpinBox,
+    QScrollArea,
+    QListView,
+    QMenu,
+    QToolButton,
+    QAbstractItemView,
+    QApplication,
+    QHBoxLayout,
+    QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem)
 from pdf_editor.document.session import DocumentSession
-from pdf_editor.document.save import write_pdf,publish_batch
-from pdf_editor.engine.render import render_page,thumbnail
+from pdf_editor.engine.render import render_page
 from pdf_editor.engine.geometry import transform_point,inverse_transform
 from pdf_editor.engine.inspection import unlock_pdf
-from pdf_editor.engine.text import replace_text, insert_text, find_table_cell
-from pdf_editor.engine.text import overlaps as text_overlaps
 from pdf_editor.engine.overlay import flatten_overlays
-from pdf_editor.engine.fonts import default_font,embedded_font,checked_font,similar_font
-from pdf_editor.engine.text import page_cell_index
-from pdf_editor.model import TextReplacement,TextInsertion,Overlay
 from pdf_editor.errors import EditorError
 from pdf_editor.workers import Jobs
 from pdf_editor.assets import AssetStore
 from pdf_editor.templates import HeaderFooterTemplateStore
 from pdf_editor.search import find_text
-from pdf_editor.ocr import ocr_pages
 from pdf_editor.comparison import compare_pages
-from pdf_editor.legacy_overlay_conversion import (
-    convert_legacy_image,
-    find_convertible_images,
-)
-from pdf_editor.persistent_overlays import embed_workspace
-from pdf_editor.ocr_assets import validate_ocr_assets
-from pdf_editor.page_images import export_pages_as_png
-from pdf_editor.pages import (merge_pages,split_pages,move_pages,move_pages_to,rotate_pages,
-    delete_pages,duplicate_pages,page_order_after_move,page_order_after_drop,insert_pages,
-    insert_blank_page,extract_pages)
-from pdf_editor.page_decorations import (crop_pages,add_page_numbers,
-    add_text_watermark,add_image_watermark,add_header_footer)
-from pdf_editor.annotations import (mark_text,add_text_note,delete_annotation,
-    set_highlight_color)
 from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.ui.overlay_panel import OverlayPanel
-from pdf_editor.ui.signature_dialog import SignatureDialog
 from pdf_editor.ui.comparison_dialog import ComparisonDialog
-from pdf_editor.ui.legacy_stamp_dialog import LegacyStampDialog
-from pdf_editor.ui.page_dialogs import (MergeDialog,SplitDialog,CropPagesDialog,
-    PageDecorationDialog,HeaderFooterTemplatesDialog)
-from pdf_editor.ui.style import (STYLE,apply_theme,apply_dark_title_bar,glyph_icon,thumbnail_icon,
-    themed_glyph_icon)
+from pdf_editor.ui.style import STYLE, apply_theme, apply_dark_title_bar, glyph_icon
 from pdf_editor.ui.settings import AppSettings
+from pdf_editor.ui.background_jobs import export_document
+from pdf_editor.ui.page_actions import PageActionsMixin
+from pdf_editor.ui.text_actions import TextActionsMixin
+from pdf_editor.ui.stamp_actions import StampActionsMixin
+from pdf_editor.ui.print_actions import PrintActionsMixin
 from pdf_editor.ui.info_panel import DocumentInfoPanel,describe_document
 from pdf_editor.ui.search_bar import SearchBar
-from pdf_editor.ui.printing import print_pages
 from pdf_editor.outline import read_outline,page_text
 from pdf_editor.logs import get_logger,log_path
 
@@ -67,62 +67,13 @@ ERROR_TITLES={
 }
 UNEXPECTED_ERRORS=("ERROR","WORKER")
 
-def export_document(pdf,layers,target,source,overwrite):
-    data=embed_workspace(pdf,layers) if layers else pdf
-    return str(write_pdf(data,Path(target),overwrite,(Path(source),)))
-
-def export_merge(sources,order,target,paths):
-    return str(write_pdf(merge_pages(sources,order),Path(target),False,tuple(Path(p) for p in paths)))
-
-def export_split(pdf,layers,groups,folder,source):
-    data=flatten_overlays(pdf,layers) if layers else pdf
-    documents=split_pages(data,groups)
-    targets=tuple(Path(folder)/f"拆分_{i+1:03}.pdf" for i in range(len(groups)))
-    return tuple(str(p) for p in publish_batch(documents,targets,(Path(source),)))
 
 
-def export_extract(pdf,layers,pages,target,source):
-    data=flatten_overlays(pdf,layers) if layers else pdf
-    extracted=extract_pages(data,pages)
-    return str(write_pdf(extracted,Path(target),False,(Path(source),)))
 
 
-def export_page_images(pdf,layers,pages,folder,stem,dpi):
-    data=flatten_overlays(pdf,layers) if layers else pdf
-    return tuple(str(path) for path in export_pages_as_png(
-        data,pages,Path(folder),stem,dpi))
 
-def edit_page_document(pdf,layers,operation,pages,target=None):
-    data=flatten_overlays(pdf,layers) if layers else pdf
-    if operation=="move":
-        return move_pages(data,pages,target)
-    if operation=="move_to":
-        return move_pages_to(data,pages,target)
-    if operation=="rotate":
-        return rotate_pages(data,pages,target)
-    if operation=="delete":
-        return delete_pages(data,pages)
-    if operation=="duplicate":
-        return duplicate_pages(data,pages)
-    if operation=="blank":
-        return insert_blank_page(data,pages[0])
-    if operation=="insert":
-        return insert_pages(data,target,pages[0])
-    if operation=="crop":
-        return crop_pages(data,pages,target)
-    if operation=="page_number":
-        return add_page_numbers(data,pages,target["start"],target["prefix"],
-            target["suffix"],target["position"],target["font_size"],target["font_path"])
-    if operation=="text_watermark":
-        return add_text_watermark(data,pages,target["text"],target["font_size"],
-            target["opacity"],target["angle"],target["font_path"])
-    if operation=="image_watermark":
-        return add_image_watermark(data,pages,target["image_path"],
-            target["width_percent"],target["opacity"],target["angle"])
-    if operation=="header_footer":
-        return add_header_footer(data,pages,target["text"],target["position"],
-            target["font_size"],target["font_path"])
-    raise EditorError("PAGE_OPERATION","頁面操作無效。")
+
+
 
 
 class ThumbnailList(QListWidget):
@@ -165,7 +116,7 @@ class ThumbnailList(QListWidget):
         event.accept()
         self.pages_dropped.emit(pages,destination)
 
-class MainWindow(QMainWindow):
+class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintActionsMixin,QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("墨頁 PDF")
@@ -578,6 +529,26 @@ class MainWindow(QMainWindow):
         for target,name in pending:
             target.setIcon(glyph_icon(name))
 
+    def cancel_editing_modes(self,crop=True):
+        """取消頁面上的輸入框與所有進行中的模式（新增文字、註解、選取註解、裁切）。"""
+        self.canvas.cancel_inline_editor()
+        self.canvas.cancel_note_insertion()
+        self.actions["text_note"].setChecked(False)
+        self.canvas.cancel_annotation_selection()
+        self.actions["select_annotation"].setChecked(False)
+        self.canvas.cancel_text_insertion()
+        self.actions["add_text"].setChecked(False)
+        if crop:
+            self.cancel_direct_crop()
+
+    def clear_selection_state(self,disable_panel=False):
+        """清除目前選取的文字、註解與新增位置。"""
+        self.run=None
+        self.annotation=None
+        self.insertion_rect=None
+        if disable_panel:
+            self.text_panel.setEnabled(False)
+
     def restore_window_state(self):
         """還原上次的視窗大小、面板寬度與縮放模式。"""
         geometry=self.settings.bytes_value("window/geometry")
@@ -778,14 +749,7 @@ class MainWindow(QMainWindow):
         self.close_comparison()
         if self.session:
             self.session.close()
-        self.canvas.cancel_inline_editor()
-        self.canvas.cancel_note_insertion()
-        self.actions["text_note"].setChecked(False)
-        self.canvas.cancel_annotation_selection()
-        self.actions["select_annotation"].setChecked(False)
-        self.canvas.cancel_text_insertion()
-        self.actions["add_text"].setChecked(False)
-        self.cancel_direct_crop()
+        self.cancel_editing_modes()
         self.clear_search_results(True)
         self.session=session
         self.token+=1
@@ -937,75 +901,10 @@ class MainWindow(QMainWindow):
         self.clear_comparison(dialog)
         dialog.close()
 
-    def queue_thumbnails(self,pages=None):
-        """排入需要重畫的縮圖；pages 為 None 代表全部頁面。
 
-        尚未完成的頁面會保留並與新的頁面合併，畫面上看得到的縮圖優先處理。
-        """
-        if self.closed or not self.session:
-            return
-        targets=range(self.page_count) if pages is None else pages
-        if self._thumb_token!=self.token:
-            self._thumb_queue=[]
-            self._thumb_token=self.token
-        merged=set(self._thumb_queue)|{page for page in targets if 0<=page<self.page_count}
-        self._thumb_queue=self.prioritized_thumbnails(merged)
-        self._pump_thumbnails()
 
-    def visible_thumbnail_rows(self):
-        viewport=self.thumbs.viewport().rect()
-        rows=[self.thumbs.row(self.thumbs.itemAt(point)) for point in
-            (viewport.topLeft(),viewport.center(),viewport.bottomLeft())
-            if self.thumbs.itemAt(point) is not None]
-        if not rows:
-            return range(0)
-        # 上下各多留一列，捲動時不會馬上看到空白縮圖。
-        return range(max(0,min(rows)-1),min(self.page_count,max(rows)+2))
 
-    def prioritized_thumbnails(self,pages):
-        visible=set(self.visible_thumbnail_rows())
-        return sorted((page for page in pages if 0<=page<self.page_count),
-            key=lambda page:(page not in visible,abs(page-self.page),page))
 
-    def reprioritize_thumbnails(self):
-        if self._thumb_queue:
-            self._thumb_queue=self.prioritized_thumbnails(self._thumb_queue)
-
-    def _pump_thumbnails(self):
-        if self._thumb_running or not self._thumb_queue or self.closed or not self.session:
-            return
-        index=self._thumb_queue.pop(0)
-        token,revision=self.token,self.session.revision
-        self._thumb_running=True
-        def current():
-            return (not self.closed and self.session is not None and token==self.token
-                and revision==self.session.revision and index<self.page_count)
-        def finish():
-            self._thumb_running=False
-            self._pump_thumbnails()
-        def done(png):
-            if current():
-                pix=QPixmap()
-                pix.loadFromData(png)
-                item=self.thumbs.item(index)
-                if item:
-                    item.setIcon(thumbnail_icon(pix))
-                    item.setToolTip("")
-            elif (not self.closed and self.session is not None and token==self.token
-                    and index<self.page_count):
-                # 產生期間文件已變更，結果過期，重新排入。
-                self._thumb_queue=self.prioritized_thumbnails(set(self._thumb_queue)|{index})
-            finish()
-        def failed(error):
-            if current():
-                item=self.thumbs.item(index)
-                if item:
-                    item.setIcon(glyph_icon("thumbnail_error",48))
-                    item.setToolTip("縮圖產生失敗："+error[1])
-                get_logger().warning("第 %s 頁縮圖產生失敗：%s",index+1,error[1])
-                self.statusBar().showMessage(f"第 {index+1} 頁縮圖產生失敗，頁面內容仍可正常檢視。")
-            finish()
-        self.jobs.submit(thumbnail,(str(self.session.pdf_path),index),done,failed)
 
     def goto_page(self,page):
         if not self.session or not 0<=page<self.page_count or page==self.page:
@@ -1015,18 +914,8 @@ class MainWindow(QMainWindow):
             self.thumbs.blockSignals(True)
             self.thumbs.setCurrentRow(page)
             self.thumbs.blockSignals(False)
-        self.canvas.cancel_inline_editor()
-        self.canvas.cancel_note_insertion()
-        self.actions["text_note"].setChecked(False)
-        self.canvas.cancel_annotation_selection()
-        self.actions["select_annotation"].setChecked(False)
-        self.canvas.cancel_text_insertion()
-        self.actions["add_text"].setChecked(False)
-        self.cancel_direct_crop()
-        self.run=None
-        self.annotation=None
-        self.insertion_rect=None
-        self.text_panel.setEnabled(False)
+        self.cancel_editing_modes()
+        self.clear_selection_state(disable_panel=True)
         self.page_spin.blockSignals(True)
         self.page_spin.setValue(page+1)
         self.page_spin.blockSignals(False)
@@ -1126,468 +1015,38 @@ class MainWindow(QMainWindow):
             return
         self.copy_to_clipboard(text)
 
-    def print_document(self):
-        """先開啟程式內的預覽列印；Windows 列印對話框無法替桌面程式顯示預覽。"""
-        if not self.session or self.busy:
-            return
-        from PySide6.QtPrintSupport import QPrinter,QPrintPreviewDialog
-        printer=QPrinter(QPrinter.PrinterMode.HighResolution)
-        printer.setDocName(self.session.source.stem)
-        preview=QPrintPreviewDialog(printer,self)
-        preview.setWindowTitle(f"預覽列印 — {self.session.source.name}")
-        preview.resize(max(900,int(self.width()*0.8)),max(700,int(self.height()*0.9)))
-        self.style_print_preview(preview)
-        result={"printed":None}
-        def paint(target):
-            result["printed"]=self.print_to(target,self.print_page_indices(target),announce=False)
-        preview.paintRequested.connect(paint)
-        if preview.exec()==QPrintPreviewDialog.DialogCode.Accepted and result["printed"] is not None:
-            self.statusBar().showMessage(f"已送出 {result['printed']} 頁到印表機。")
-        else:
-            self.statusBar().showMessage("已關閉預覽列印。")
 
-    def style_print_preview(self,preview):
-        """預覽工具列的內建圖示在深色主題下看不清楚，改用主題圖示。"""
-        from PySide6.QtCore import QCoreApplication
-        from PySide6.QtGui import QColor,QIcon,QTransform
-        from PySide6.QtWidgets import QGraphicsView,QToolBar
-        from pdf_editor.ui.style import COLORS
-        # 以 Qt 原始按鈕名稱（含翻譯後名稱）對應圖示，不依賴按鈕排列順序。
-        glyphs={"Fit width":"\ue740","Fit page":"\ue9a6","Zoom in":"\ue8a3","Zoom out":"\ue71f",
-            "Portrait":"\ue7c3","Landscape":"\ue7c3","First page":"\ue892","Previous page":"\ue76b",
-            "Next page":"\ue76c","Last page":"\ue893","Show single page":"\ue7c3",
-            "Show facing pages":"\ue736","Show overview of all pages":"\ue80a",
-            "Page setup":"\ue713","Print":"\ue749"}
-        lookup={}
-        for source,glyph in glyphs.items():
-            lookup[source]=(source,glyph)
-            lookup[QCoreApplication.translate("QPrintPreviewDialog",source)]=(source,glyph)
-        for toolbar in preview.findChildren(QToolBar):
-            toolbar.setIconSize(QSize(20,20))
-            for action in toolbar.actions():
-                match=lookup.get(action.text())
-                if match is None:
-                    continue
-                source,glyph=match
-                icon=themed_glyph_icon(glyph,20)
-                if source=="Landscape":
-                    # 橫印圖示以直印圖示旋轉 90 度表示。
-                    icon=QIcon(icon.pixmap(QSize(40,40)).transformed(QTransform().rotate(90)))
-                action.setIcon(icon)
-        for view in preview.findChildren(QGraphicsView):
-            view.setBackgroundBrush(QColor(COLORS["canvas"]))
 
-    def print_page_indices(self,printer):
-        from PySide6.QtPrintSupport import QPrinter
-        mode=printer.printRange()
-        if mode==QPrinter.PrintRange.CurrentPage:
-            return [self.page]
-        if mode==QPrinter.PrintRange.PageRange:
-            first=max(1,printer.fromPage())
-            last=min(self.page_count,printer.toPage() or self.page_count)
-            return list(range(first-1,last))
-        return list(range(self.page_count))
 
-    def print_to(self,printer,pages,announce=True):
-        """合併工作層後逐頁列印，並顯示可取消的進度。"""
-        try:
-            pdf=flatten_overlays(self.session.pdf,self.session.overlays) if self.session.overlays else self.session.pdf
-        except EditorError as exc:
-            self.error((exc.code,str(exc),()))
-            return 0
-        progress=QProgressDialog("正在準備頁面…","取消",0,len(pages),self)
-        progress.setWindowTitle("列印")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(400)
-        def step(index,total):
-            progress.setValue(index)
-            progress.setLabelText(f"正在處理第 {index+1} / {total} 頁…")
-            QApplication.processEvents()
-            return not progress.wasCanceled()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            printed=print_pages(printer,pdf,pages,step)
-        except Exception as exc:
-            self.error(("PRINT",f"列印失敗：{exc}",()))
-            return 0
-        finally:
-            QApplication.restoreOverrideCursor()
-            progress.setValue(len(pages))
-            progress.close()
-        if announce:
-            self.statusBar().showMessage(f"已送出 {printed} 頁到印表機。" if printed==len(pages)
-                else f"列印已取消，已送出 {printed} 頁。")
-        return printed
 
-    def sync_page_navigation(self,selected=None,selected_pages=None):
-        with pymupdf.open(stream=self.session.pdf,filetype="pdf") as doc:
-            self.page_count=doc.page_count
-        self.page=max(0,min(self.page if selected is None else selected,self.page_count-1))
-        self.page_spin.blockSignals(True)
-        self.page_spin.setRange(1,self.page_count)
-        self.page_spin.setValue(self.page+1)
-        self.page_spin.blockSignals(False)
-        self.thumbs.blockSignals(True)
-        if self.thumbs.count()!=self.page_count:
-            self.thumbs.clear()
-            for index in range(self.page_count):
-                self.thumbs.addItem(QListWidgetItem(f"第 {index+1} 頁"))
-        self.thumbs.setCurrentRow(self.page)
-        if selected_pages:
-            self.thumbs.clearSelection()
-            for page in selected_pages:
-                if 0<=page<self.page_count:
-                    self.thumbs.item(page).setSelected(True)
-        self.thumbs.blockSignals(False)
-        self.thumbnail_selection_changed()
-        self.page_data=None
-        self.refresh_actions()
-        self.request_render()
-        self.queue_thumbnails()
-        self.refresh_outline()
 
-    def submit_page_operation(self,operation,pages,target,status,selected,selected_pages=None):
-        content_operations={"crop","page_number","text_watermark","image_watermark",
-            "header_footer"}
-        allowed=(self.session.access.can_edit if self.session and operation in content_operations
-            else self.session.access.can_reorganize if self.session else False)
-        if not self.session or self.busy or not allowed:
-            return
-        self.canvas.cancel_inline_editor()
-        self.canvas.cancel_note_insertion()
-        self.actions["text_note"].setChecked(False)
-        self.canvas.cancel_annotation_selection()
-        self.actions["select_annotation"].setChecked(False)
-        self.canvas.cancel_text_insertion()
-        self.actions["add_text"].setChecked(False)
-        self.cancel_direct_crop()
-        self.run=None
-        self.annotation=None
-        self.insertion_rect=None
-        revision=self.session.revision
-        token=self.token
-        self.busy=True
-        self.refresh_actions()
-        self.statusBar().showMessage(status)
-        def done(pdf):
-            self.busy=False
-            if self.closed or token!=self.token or revision!=self.session.revision:
-                return
-            self.session.apply_state(pdf,())
-            self.text_panel.setEnabled(False)
-            self.sync_page_navigation(selected,selected_pages)
-        self.jobs.submit(edit_page_document,
-            (self.session.pdf,self.session.overlays,operation,pages,target),done,self.error)
 
-    def selected_thumbnail_indices(self):
-        return tuple(sorted(self.thumbs.row(item) for item in self.thumbs.selectedItems()))
 
-    def selected_page_indices(self):
-        selected=self.selected_thumbnail_indices()
-        if selected:
-            return selected
-        return (self.page,) if self.session and 0<=self.page<self.page_count else ()
 
-    def run_ocr(self):
-        pages=self.selected_thumbnail_indices()
-        if not pages:
-            return
-        self.apply_ocr_to_pages(pages)
 
-    def apply_ocr_to_pages(self,pages):
-        pages=tuple(pages)
-        if (not self.session or self.busy or not self.session.access.can_edit or not pages):
-            return
-        try:
-            pdf=flatten_overlays(self.session.pdf,self.session.overlays) if self.session.overlays else self.session.pdf
-            tessdata=validate_ocr_assets()
-        except EditorError as exc:
-            self.error((exc.code,str(exc),()))
-            return
-        revision=self.session.revision
-        token=self.token
-        self.busy=True
-        self.refresh_actions()
-        self.statusBar().showMessage(f"正在辨識 {len(pages)} 頁…")
-        def done(result):
-            self.busy=False
-            if self.closed or token!=self.token or revision!=self.session.revision:
-                return
-            if result.processed_pages:
-                self.session.apply_state(result.pdf,())
-                self.clear_search_results()
-                self.page_data=None
-                summary=(f"OCR 完成：辨識 {len(result.processed_pages)} 頁，跳過 "
-                    f"{len(result.skipped_pages)} 頁，共 {result.word_count} 個文字區段。")
-                self.request_render(summary)
-                self.queue_thumbnails(result.processed_pages)
-            else:
-                self.refresh_actions()
-                self.statusBar().showMessage(
-                    f"OCR 完成：全部 {len(result.skipped_pages)} 頁已有文字，未建立變更。")
-        self.jobs.submit(ocr_pages,(pdf,pages,tessdata),done,self.error)
 
-    def thumbnail_selection_changed(self):
-        selected=self.selected_page_indices()
-        self.thumbs.setDragEnabled(bool(selected))
-        self.refresh_actions()
-        if len(selected)>1 and not self.busy:
-            self.statusBar().showMessage(f"已選取 {len(selected)} 頁，可整組拖曳或使用頁面操作。")
 
-    def move_current_page(self,offset):
-        pages=self.selected_page_indices()
-        if not pages:
-            return
-        order,moved=page_order_after_move(self.page_count,pages,offset)
-        if order==tuple(range(self.page_count)):
-            return
-        current=order.index(self.page)
-        direction="上移" if offset<0 else "下移"
-        self.submit_page_operation("move",pages,offset,
-            f"正在{direction} {len(pages)} 頁…",current,moved)
 
-    def move_selected_pages_to(self,pages,destination):
-        if not pages:
-            return
-        order,moved=page_order_after_drop(self.page_count,pages,destination)
-        if order==tuple(range(self.page_count)):
-            return
-        current=order.index(self.page)
-        self.submit_page_operation("move_to",pages,destination,
-            f"正在拖曳移動 {len(pages)} 頁…",current,moved)
 
-    def rotate_current_page(self,degrees):
-        if degrees not in (-90,90):
-            return
-        direction="逆時針" if degrees<0 else "順時針"
-        pages=self.selected_page_indices()
-        self.submit_page_operation("rotate",pages,degrees,
-            f"正在將 {len(pages)} 頁{direction}旋轉…",self.page,pages)
 
-    def delete_current_page(self):
-        pages=self.selected_page_indices()
-        if not pages or len(pages)>=self.page_count:
-            return
-        remaining=[page for page in range(self.page_count) if page not in set(pages)]
-        if self.page in remaining:
-            selected=remaining.index(self.page)
-        else:
-            selected=min(sum(page<self.page for page in remaining),len(remaining)-1)
-        self.submit_page_operation("delete",pages,None,
-            f"正在刪除 {len(pages)} 頁…",selected,(selected,))
 
-    def duplicate_selected_pages(self):
-        pages=self.selected_page_indices()
-        if not pages:
-            return
-        first=pages[-1]+1
-        copies=tuple(range(first,first+len(pages)))
-        current=first+pages.index(self.page) if self.page in pages else first
-        self.submit_page_operation("duplicate",pages,None,
-            f"正在複製 {len(pages)} 頁…",current,copies)
 
-    def add_blank_page(self):
-        pages=self.selected_page_indices()
-        if not pages:
-            return
-        after=pages[-1]
-        inserted=after+1
-        self.submit_page_operation("blank",(after,),None,
-            "正在新增空白頁…",inserted,(inserted,))
 
-    def insert_pdf_pages(self):
-        if not self.session or self.busy:
-            return
-        name,_=QFileDialog.getOpenFileName(self,"插入另一份 PDF",self.settings.last_directory(),"PDF (*.pdf)")
-        if not name:
-            return
-        try:
-            raw=Path(name).read_bytes()
-            try:
-                data,access=unlock_pdf(raw)
-            except EditorError as exc:
-                if exc.code!="PASSWORD":
-                    raise
-                password,ok=QInputDialog.getText(self,"PDF 密碼",Path(name).name,
-                    QLineEdit.EchoMode.Password)
-                if not ok:
-                    return
-                data,access=unlock_pdf(raw,password)
-            if not access.can_reorganize:
-                raise EditorError("READ_ONLY",access.reason)
-            self.apply_insert_pages(data)
-        except Exception as exc:
-            self.error((getattr(exc,"code","OPEN"),str(exc),()))
 
-    def apply_insert_pages(self,source_pdf):
-        pages=self.selected_page_indices()
-        if not pages:
-            return
-        with pymupdf.open(stream=source_pdf,filetype="pdf") as source:
-            count=source.page_count
-        after=pages[-1]
-        inserted=tuple(range(after+1,after+1+count))
-        self.submit_page_operation("insert",(after,),source_pdf,
-            f"正在插入 {count} 頁…",after+1,inserted)
 
-    def extract_selected_pages(self):
-        if not self.session or self.busy:
-            return
-        pages=self.selected_page_indices()
-        if not pages:
-            return
-        suggested=self.session.source.with_name(self.session.source.stem+"-抽取.pdf")
-        name,_=QFileDialog.getSaveFileName(self,"抽取選取頁面",str(suggested),"PDF (*.pdf)")
-        if not name:
-            return
-        target=Path(name)
-        if target.suffix.lower()!=".pdf":
-            target=target.with_suffix(".pdf")
-        self.extract_selected_to(target,pages)
 
-    def extract_selected_to(self,target,pages=None):
-        pages=tuple(pages) if pages is not None else self.selected_page_indices()
-        if not self.session or self.busy or not pages:
-            return
-        revision=self.session.revision
-        token=self.token
-        self.busy=True
-        self.refresh_actions()
-        self.statusBar().showMessage(f"正在抽取 {len(pages)} 頁…")
-        def done(path):
-            self.busy=False
-            if self.closed or token!=self.token or revision!=self.session.revision:
-                return
-            self.refresh_actions()
-            self.statusBar().showMessage("已抽取頁面："+path)
-        self.jobs.submit(export_extract,(self.session.pdf,self.session.overlays,pages,
-            str(target),str(self.session.source)),done,self.error)
 
-    def export_selected_pages_png(self):
-        if not self.session or self.busy:
-            return
-        folder=QFileDialog.getExistingDirectory(self,"選擇 PNG 輸出資料夾",
-            str(self.session.source.parent))
-        if not folder:
-            return
-        dpi,ok=QInputDialog.getInt(self,"PNG 解析度","DPI：",150,72,600,1)
-        if ok:
-            self.export_selected_png_to(Path(folder),dpi)
 
-    def export_selected_png_to(self,folder,dpi,pages=None):
-        pages=tuple(pages) if pages is not None else self.selected_page_indices()
-        if not self.session or self.busy or not pages:
-            return
-        revision=self.session.revision
-        token=self.token
-        self.busy=True
-        self.refresh_actions()
-        self.statusBar().showMessage(f"正在將 {len(pages)} 頁輸出為 PNG…")
-        def done(paths):
-            self.busy=False
-            if self.closed or token!=self.token or revision!=self.session.revision:
-                return
-            self.refresh_actions()
-            self.statusBar().showMessage(f"已輸出 {len(paths)} 張 PNG 至：{folder}")
-        self.jobs.submit(export_page_images,(self.session.pdf,self.session.overlays,pages,
-            str(folder),self.session.source.stem,dpi),done,self.error)
 
-    def show_crop_dialog(self):
-        pages=self.selected_page_indices()
-        if not pages:
-            return
-        dialog=CropPagesDialog(len(pages),self)
-        if dialog.exec():
-            self.apply_page_crop(dialog.margins())
 
-    def apply_page_crop(self,margins,pages=None):
-        pages=tuple(pages) if pages is not None else self.selected_page_indices()
-        if not pages:
-            return
-        self.submit_page_operation("crop",pages,margins,
-            f"正在裁切 {len(pages)} 頁…",self.page,pages)
 
-    def toggle_direct_crop(self,checked):
-        if checked:
-            self.start_direct_crop()
-        else:
-            self.canvas.cancel_crop()
-            self.cancel_direct_crop()
 
-    def start_direct_crop(self):
-        if not self.page_data or not self.session or self.busy:
-            self.actions["direct_crop"].setChecked(False)
-            return
-        pages=self.selected_page_indices()
-        if not pages:
-            self.actions["direct_crop"].setChecked(False)
-            return
-        self.canvas.cancel_text_insertion()
-        self.actions["add_text"].setChecked(False)
-        self.canvas.cancel_note_insertion()
-        self.actions["text_note"].setChecked(False)
-        self.canvas.cancel_annotation_selection()
-        self.actions["select_annotation"].setChecked(False)
-        self.crop_pages=pages
-        self.actions["direct_crop"].setChecked(True)
-        self.canvas.start_crop(self.page_data["bounds"])
-        self.statusBar().showMessage(
-            f"拖曳綠色裁切框的邊線或四角；放開後套用到 {len(pages)} 個選取頁面。")
 
-    def cancel_direct_crop(self):
-        if self.canvas._crop_mode:
-            self.canvas.cancel_crop()
-        self.crop_pages=()
-        self.actions["direct_crop"].setChecked(False)
 
-    def apply_direct_crop(self,rect):
-        pages=self.crop_pages
-        if not pages or not self.page_data:
-            self.cancel_direct_crop()
-            return
-        x0,y0,x1,y1=(float(value) for value in rect)
-        bx0,by0,bx1,by1=self.page_data["bounds"]
-        margins=(max(0,x0-bx0),max(0,y0-by0),max(0,bx1-x1),max(0,by1-y1))
-        self.cancel_direct_crop()
-        self.apply_page_crop(margins,pages)
 
-    def show_page_decoration_dialog(self):
-        pages=self.selected_page_indices()
-        if not pages:
-            return
-        dialog=PageDecorationDialog(len(pages),self)
-        if dialog.exec():
-            operation,options=dialog.selection()
-            self.apply_page_decoration(operation,options)
 
-    def apply_page_decoration(self,operation,options):
-        pages=self.selected_page_indices()
-        if not pages or operation not in ("page_number","text_watermark","image_watermark"):
-            return
-        target=dict(options)
-        if operation in ("page_number","text_watermark"):
-            target["font_path"]=str(default_font())
-        labels={"page_number":"頁碼","text_watermark":"文字浮水印",
-            "image_watermark":"圖片浮水印"}
-        self.submit_page_operation(operation,pages,target,
-            f"正在加入{labels[operation]}至 {len(pages)} 頁…",self.page,pages)
 
-    def show_header_footer_dialog(self):
-        pages=self.selected_page_indices()
-        if not pages:
-            return
-        dialog=HeaderFooterTemplatesDialog(self.header_footer_templates,len(pages),self)
-        if dialog.exec():
-            self.apply_header_footer(dialog.selection())
 
-    def apply_header_footer(self,options):
-        pages=self.selected_page_indices()
-        if not pages:
-            return
-        target=dict(options)
-        target["font_path"]=str(default_font())
-        self.submit_page_operation("header_footer",pages,target,
-            f"正在加入頁首頁尾至 {len(pages)} 頁…",self.page,pages)
 
     def change_zoom(self,text):
         if text=="適合頁面":
@@ -1758,499 +1217,38 @@ class MainWindow(QMainWindow):
         pixel_ratio=float(self.canvas.devicePixelRatioF())
         self.jobs.submit(render_page,(data,self.page,self.scale,pixel_ratio),done,self.error)
 
-    def select_run(self,run,open_editor=True):
-        if not self.session or not self.session.access.can_edit:
-            return
-        self.text_panel.cancel_pending_format()
-        self.canvas.clear_conflicts()
-        self.canvas.cancel_inline_editor()
-        self.canvas.cancel_text_insertion()
-        self.actions["add_text"].setChecked(False)
-        self.canvas.cancel_annotation_selection()
-        self.actions["select_annotation"].setChecked(False)
-        self.canvas.clear_annotation_selection()
-        self.annotation=None
-        self.run=run
-        self.insertion_rect=None
-        self.panels.setCurrentWidget(self.text_panel)
-        self.text_panel.set_run(run)
-        self.text_panel.font_path=str(default_font())
-        self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
-        if not run.editable:
-            message="此文字無法安全修改，但仍可加入螢光標記或底線。"
-            self.text_panel.info.setText(message)
-            self.refresh_actions()
-            self.statusBar().showMessage(message)
-            return
-        original=embedded_font(self.session.pdf,self.page,run,self.session.history.root)
-        if original:
-            self.text_panel.font_path=str(original)
-            self.text_panel.font_label.setText("原字型："+run.font_name+"；缺字時會改用相近字型。")
-        else:
-            similar=similar_font(run.font_name,run.text)
-            if similar:
-                self.text_panel.font_path=similar[1]
-                self.text_panel.font_label.setText(
-                    f"原字型 {run.font_name} 無法直接使用，改用相近字型：{similar[0]}")
-        cell=find_table_cell(self.session.pdf,self.page,run.rect,self.session.document_key)
-        if cell:
-            self.text_panel.set_rect(cell)
-            self.text_panel.set_alignment(2)
-        elif self.page_data and self.is_page_centered(run.rect):
-            # 標題等置中文字：改字後維持以原中心點置中。
-            self.text_panel.set_alignment(1)
-        if not open_editor:
-            self.canvas.highlight_run(run)
-            self.text_panel.info.setText("已套用。右側可繼續調整格式；按 Enter、F2 或再點一次文字可修改內容。")
-            self.refresh_actions()
-            return
-        self.text_panel.info.setText("請直接在頁面文字框輸入；Enter 或點到別處套用，Esc 取消。")
-        self.canvas.begin_inline_text(self.text_panel.rect(),run.text,run,run.size,
-            self.text_panel.alignment.currentData(),self.text_panel.font_path)
-        self.refresh_actions()
 
-    def is_page_centered(self,rect,tolerance=3.0):
-        width=self.page_data["bounds"][2]
-        center=(rect[0]+rect[2])/2
-        return abs(center-width/2)<=tolerance and rect[2]-rect[0]<=width*0.9
 
-    def commit_inline_text(self,payload):
-        if not self.session or self.busy:
-            return
-        run,text,rect=payload
-        p=self.text_panel
-        p.text.setPlainText(text)
-        target_rect=tuple(rect or p.rect())
-        self.canvas.clear_conflicts()
-        # 表格文字：提交時以儲存格重新解析，確保改字後仍位於表格正中央；
-        # 若使用者已手動移動文字框（差異超過 2 點）則尊重其設定。
-        in_cell=False
-        if run is not None and p.alignment.currentData()=="center":
-            cell=find_table_cell(self.session.pdf,self.page,run.rect,self.session.document_key)
-            manual=tuple(p.rect())
-            if cell and (not p.modified or abs(manual[0]-cell[0])+abs(manual[1]-cell[1])
-                    +abs(manual[2]-cell[2])+abs(manual[3]-cell[3])<2.0):
-                target_rect=cell
-                in_cell=True
-        elif run is None and self.insertion_rect is not None:
-            in_cell=find_table_cell(self.session.pdf,self.page,target_rect,
-                self.session.document_key)==tuple(target_rect)
-        # 儲存格內縮小字級；一般文字自動加寬文字框。
-        fit="shrink" if in_cell else "expand"
-        if run is not None and text==run.text and not p.modified:
-            self.refresh_actions()
-            self.statusBar().showMessage("文字維持不變，可繼續使用標記或格式工具。")
-            return
-        font_path=p.font_path
-        if text:
-            try:
-                checked_font(font_path,text)
-            except EditorError as exc:
-                if exc.code!="FONT_MISSING_GLYPH":
-                    self.error((exc.code,str(exc),()))
-                    return
-                similar=similar_font(run.font_name if run is not None else "",text)
-                if similar:
-                    font_path=similar[1]
-                    p.font_label.setText(f"原字型缺少部分字元，已改用相近字型：{similar[0]}")
-                else:
-                    font_path=str(default_font())
-                    p.font_label.setText("已自動改用內建中文字型，以完整顯示新文字。")
-                p.font_path=font_path
-        if run is None:
-            if not text:
-                self.run=None
-                self.insertion_rect=None
-                self.text_panel.setEnabled(False)
-                self.refresh_actions()
-                self.request_render()
-                self.statusBar().showMessage("已取消新增文字。")
-                return
-            request=TextInsertion(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
-                text,target_rect,font_path,p.size.value(),p.color,p.alignment.currentData(),
-                p.bold.isChecked(),fit)
-            self.apply_text_immediately(request,"正在新增文字…",insert_text,
-                editor_state=(None,text,target_rect))
-            return
-        request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
-            run.id,text,target_rect,font_path,p.size.value(),p.color,p.alignment.currentData(),
-            p.bold.isChecked(),fit)
-        self.apply_text_immediately(request,"正在更新文字…",
-            editor_state=(run,text,target_rect))
 
-    def apply_text_format(self):
-        if not self.session or self.busy or not self.run:
-            return
-        if self.canvas.inline_editor is not None:
-            self.canvas.inline_editor.commit()
-            return
-        self.commit_inline_text((self.run,self.text_panel.text.toPlainText(),self.text_panel.rect()))
 
-    def cancel_inline_text(self):
-        self.run=None
-        self.insertion_rect=None
-        self.text_panel.setEnabled(False)
-        self.refresh_actions()
-        self.request_render()
-        self.statusBar().showMessage("已取消文字編輯。")
 
-    def move_run(self,run):
-        if not self.session or not run.editable or self.busy:
-            return
-        self.canvas.cancel_inline_editor()
-        self.run=run
-        self.text_panel.set_rect(run.rect)
-        p=self.text_panel
-        request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),self.page,
-            run.id,p.text.toPlainText(),p.rect(),p.font_path,p.size.value(),p.color,
-            p.alignment.currentData(), p.bold.isChecked(),"expand")
-        self.apply_text_immediately(request,"正在移動文字…")
 
-    def start_text_insertion(self,checked=True):
-        if not checked:
-            self.cancel_text_insertion()
-            return
-        if not self.session or self.busy:
-            self.actions["add_text"].setChecked(False)
-            return
-        self.canvas.cancel_inline_editor()
-        self.canvas.cancel_note_insertion()
-        self.actions["text_note"].setChecked(False)
-        self.canvas.cancel_annotation_selection()
-        self.actions["select_annotation"].setChecked(False)
-        self.canvas.clear_annotation_selection()
-        self.annotation=None
-        self.run=None
-        self.insertion_rect=None
-        self.canvas.start_text_insertion()
-        self.text_panel.setEnabled(False)
-        self.statusBar().showMessage("請在頁面空白處或空白儲存格中點一下。")
 
-    def cancel_text_insertion(self):
-        self.canvas.cancel_text_insertion()
-        self.actions["add_text"].setChecked(False)
-        self.statusBar().showMessage("已取消新增文字。")
 
-    def start_text_note(self,checked=True):
-        if not checked:
-            self.cancel_text_note()
-            return
-        if not self.session or self.busy or not self.session.access.can_edit:
-            self.actions["text_note"].setChecked(False)
-            return
-        self.canvas.cancel_inline_editor()
-        self.canvas.cancel_text_insertion()
-        self.actions["add_text"].setChecked(False)
-        self.canvas.cancel_annotation_selection()
-        self.actions["select_annotation"].setChecked(False)
-        self.canvas.clear_annotation_selection()
-        self.annotation=None
-        self.run=None
-        self.insertion_rect=None
-        self.text_panel.setEnabled(False)
-        self.canvas.start_note_insertion()
-        self.refresh_actions()
-        self.statusBar().showMessage("請在頁面上點選文字註解的位置。")
 
-    def cancel_text_note(self):
-        self.canvas.cancel_note_insertion()
-        self.actions["text_note"].setChecked(False)
-        self.statusBar().showMessage("已取消文字註解。")
 
-    def begin_text_note(self,position):
-        self.actions["text_note"].setChecked(False)
-        text,ok=QInputDialog.getMultiLineText(self,"新增文字註解","註解內容：")
-        if not ok or not text.strip():
-            self.statusBar().showMessage("已取消文字註解。")
-            return
-        self.submit_annotation(add_text_note,(self.page,position,text),"正在新增文字註解…")
 
-    def start_annotation_selection(self,checked=True):
-        if not checked:
-            self.canvas.cancel_annotation_selection()
-            self.statusBar().showMessage("已取消選取註解。")
-            return
-        if not self.session or self.busy or not self.session.access.can_edit:
-            self.actions["select_annotation"].setChecked(False)
-            return
-        self.canvas.cancel_inline_editor()
-        self.canvas.cancel_text_insertion()
-        self.actions["add_text"].setChecked(False)
-        self.canvas.cancel_note_insertion()
-        self.actions["text_note"].setChecked(False)
-        self.annotation=None
-        self.run=None
-        self.insertion_rect=None
-        self.text_panel.setEnabled(False)
-        self.canvas.start_annotation_selection()
-        self.refresh_actions()
-        self.statusBar().showMessage("請直接點選頁面上的螢光、底線或文字註解。")
 
-    def select_annotation(self,item):
-        self.canvas.cancel_annotation_selection()
-        self.actions["select_annotation"].setChecked(False)
-        self.canvas.cancel_inline_editor()
-        self.canvas.clear_text_selection()
-        self.canvas.select_annotation(item)
-        self.annotation=item
-        self.run=None
-        self.insertion_rect=None
-        self.text_panel.setEnabled(False)
-        self.refresh_actions()
-        names={"Highlight":"螢光標記","Underline":"底線","Text":"文字註解"}
-        self.statusBar().showMessage(
-            f"已選取{names.get(item.kind,'註解')}；按 Delete 可直接刪除。")
 
-    def _guide_annotation_selection(self,message):
-        if not self.session or self.busy or not self.session.access.can_edit:
-            return
-        self.actions["select_annotation"].setChecked(True)
-        self.start_annotation_selection(True)
-        self.statusBar().showMessage(message)
 
-    def _guide_markup_selection(self,label):
-        if not self.session or self.busy or not self.session.access.can_edit:
-            return
-        self.canvas.cancel_inline_editor()
-        self.canvas.cancel_text_insertion()
-        self.actions["add_text"].setChecked(False)
-        self.canvas.cancel_note_insertion()
-        self.actions["text_note"].setChecked(False)
-        self.canvas.cancel_annotation_selection()
-        self.actions["select_annotation"].setChecked(False)
-        self.canvas.clear_annotation_selection()
-        self.cancel_direct_crop()
-        self.annotation=None
-        self.run=None
-        self.insertion_rect=None
-        self.text_panel.setEnabled(False)
-        self.canvas.clear_text_selection()
-        self.canvas.setFocus()
-        self.statusBar().showMessage(
-            f"請先點選要加入{label}的文字；選取後請再次選擇{label}。")
 
-    def delete_selected_annotation(self,item=None):
-        if hasattr(item,"xref"):
-            self.annotation=item
-        if self.busy:
-            return
-        if not self.annotation:
-            self._guide_annotation_selection("請點選要刪除的註解；選取後按 Delete。")
-            return
-        selected=self.annotation
-        self.submit_annotation(delete_annotation,(self.page,selected.xref),"正在刪除註解…")
 
-    def change_highlight_color(self,color):
-        if self.busy:
-            return
-        if not self.annotation:
-            self._guide_annotation_selection(
-                "請先點選要變更顏色的螢光標記；選取後請再次選擇顏色。")
-            return
-        if self.annotation.kind!="Highlight":
-            self.statusBar().showMessage("只有螢光標記可以變更顏色。")
-            return
-        self.submit_annotation(set_highlight_color,
-            (self.page,self.annotation.xref,color),"正在變更螢光標記顏色…")
 
-    def apply_selected_markup(self,kind):
-        label="螢光標記" if kind=="highlight" else "底線"
-        if self.busy:
-            return
-        if not self.run:
-            self._guide_markup_selection(label)
-            return
-        run=self.run
-        self.canvas.cancel_inline_editor()
-        self.submit_annotation(mark_text,(self.page,run.rect,kind),f"正在加入{label}…")
 
-    def submit_annotation(self,operation,args,status):
-        if not self.session or self.busy:
-            return
-        page=self.page
-        revision=self.session.revision
-        token=self.token
-        self.busy=True
-        self.refresh_actions()
-        self.statusBar().showMessage(status)
-        def done(pdf):
-            self.busy=False
-            if self.closed or token!=self.token or revision!=self.session.revision:
-                return
-            self.session.apply_pdf(pdf)
-            self.run=None
-            self.annotation=None
-            self.canvas.clear_text_selection()
-            self.canvas.clear_annotation_selection()
-            self.canvas.cancel_annotation_selection()
-            self.actions["select_annotation"].setChecked(False)
-            self.text_panel.setEnabled(False)
-            self.page_data=None
-            self.refresh_actions()
-            self.request_render()
-            self.queue_thumbnails((page,))
-        self.jobs.submit(operation,(self.session.pdf,*args),done,self.error)
 
-    def begin_text_insertion(self,position):
-        if not self.session or self.busy:
-            return
-        x,y=position
-        self.actions["add_text"].setChecked(False)
-        cell=find_table_cell(self.session.pdf,self.page,(x,y,x,y),self.session.document_key)
-        if cell:
-            rect=cell
-        else:
-            width,height=self.page_data["bounds"][2:]
-            x=max(0,min(x,width-160))
-            y=max(0,min(y,height-40))
-            rect=(x,y,min(width,x+160),min(height,y+40))
-        self.run=None
-        self.insertion_rect=rect
-        self.panels.setCurrentWidget(self.text_panel)
-        self.text_panel.font_path=str(default_font())
-        self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
-        self.text_panel.set_insertion(rect,centered=cell is not None)
-        self.canvas.begin_inline_text(rect,"",None,self.text_panel.size.value(),
-            self.text_panel.alignment.currentData(),self.text_panel.font_path)
-        self.refresh_actions()
 
-    def delete_run(self,run):
-        if not self.session or not run.editable or self.busy:
-            return
-        self.canvas.cancel_inline_editor()
-        self.canvas.cancel_note_insertion()
-        self.actions["text_note"].setChecked(False)
-        self.canvas.cancel_text_insertion()
-        self.actions["add_text"].setChecked(False)
-        self.run=run
-        p=self.text_panel
-        cell=find_table_cell(self.session.pdf,self.page,run.rect,self.session.document_key)
-        x0,y0,x1,y1=run.rect
-        insertion_rect=cell or (x0,y0,x1+40,y1+run.size)
-        request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),
-            self.page,run.id,"",run.rect,p.font_path,run.size,run.color,"left",False)
-        revision=self.session.revision
-        token=self.token
-        self.busy=True
-        self.refresh_actions()
-        self.statusBar().showMessage("正在刪除文字…")
-        def done(pdf):
-            self.busy=False
-            if self.closed or token!=self.token or revision!=self.session.revision:
-                return
-            self.session.apply_pdf(pdf)
-            self.run=None
-            self.insertion_rect=insertion_rect
-            self.text_panel.font_path=str(default_font())
-            self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
-            self.text_panel.set_insertion(insertion_rect,run.size,cell is not None)
-            self.refresh_actions()
-            self.request_render()
-            self.canvas.begin_inline_text(insertion_rect,"",None,run.size,
-                self.text_panel.alignment.currentData(),self.text_panel.font_path)
-        self.jobs.submit(replace_text,(self.session.pdf,request),done,self.error)
 
-    RECOVERABLE_TEXT_ERRORS=("TEXT_OVERFLOW","OVERLAP","GEOMETRY","FONT_MISSING_GLYPH",
-        "FONT_INVALID","TEXT_EMPTY","SIZE")
 
-    def apply_text_immediately(self,request,status,operation=replace_text,editor_state=None):
-        if self.busy:
-            return
-        revision=self.session.revision
-        token=self.token
-        previous_run,previous_insertion=self.run,self.insertion_rect
-        self.busy=True
-        self.refresh_actions()
-        self.statusBar().showMessage(status)
-        def done(pdf):
-            self.busy=False
-            if self.closed or token!=self.token or revision!=self.session.revision:
-                return
-            self.session.apply_pdf(pdf)
-            self.run=None
-            self.insertion_rect=None
-            self.text_panel.setEnabled(False)
-            if request.text.strip():
-                self._reselect_after_render=(request.page,tuple(request.rect),request.text)
-            self.refresh_actions()
-            self.request_render()
-            self.queue_thumbnails((request.page,))
-        def failed(error):
-            code,message,_completed=error
-            if (editor_state is None or code not in self.RECOVERABLE_TEXT_ERRORS or self.closed
-                    or token!=self.token or revision!=self.session.revision):
-                self.error(error)
-                return
-            self.busy=False
-            self.run,self.insertion_rect=previous_run,previous_insertion
-            self.refresh_actions()
-            self.reopen_text_editor(editor_state,request,message,code)
-        self.jobs.submit(operation,(self.session.pdf,request),done,failed)
 
-    def reopen_text_editor(self,editor_state,request,message,code):
-        """套用失敗時重新開啟輸入框並保留內容，直接在旁邊說明原因。"""
-        run,text,rect=editor_state
-        if self.page!=request.page or not self.page_data:
-            self.error((code,message,()))
-            return
-        self.panels.setCurrentWidget(self.text_panel)
-        self.canvas.begin_inline_text(rect,text,run,self.text_panel.size.value(),
-            self.text_panel.alignment.currentData(),self.text_panel.font_path)
-        self.canvas.show_inline_error(message)
-        if code=="OVERLAP":
-            own=run.id if run is not None else None
-            conflicts=[item.rect for item in self.page_data.get("runs",())
-                if item.id!=own and (text_overlaps(item.rect,request.rect)
-                    or (run is not None and text_overlaps(item.rect,run.rect)))]
-            self.canvas.show_conflicts(conflicts)
-        self.statusBar().showMessage(message.split("\n")[0])
 
-    def schedule_cell_analysis(self):
-        """頁面顯示後稍候預先分析表格，點選文字時不必再等待。"""
-        if not self.session or not self.session.access.can_edit:
-            return
-        pdf,page,key=self.session.pdf,self.page,self.session.document_key
-        def analyse():
-            if (self.session is not None and self.session.document_key==key
-                    and self.page==page and not self.busy):
-                try:
-                    page_cell_index(pdf,page,key)
-                except Exception:
-                    pass
-        QTimer.singleShot(200,analyse)
 
-    def reselect_text_after_render(self,result):
-        """套用後自動選回剛修改的文字，方便連續調整格式。"""
-        pending,self._reselect_after_render=self._reselect_after_render,None
-        if not pending or not self.session or not self.session.access.can_edit:
-            return
-        page,rect,text=pending
-        if result.get("page")!=page:
-            return
-        target=pymupdf.Rect(rect)+(-3,-3,3,3)
-        wanted=text.replace("\n","").replace(" ","")
-        candidates=[run for run in result.get("runs",()) if run.editable
-            and pymupdf.Rect(run.rect).intersects(target)
-            and run.text.replace(" ","") and run.text.replace(" ","") in wanted]
-        if not candidates:
-            return
-        best=max(candidates,key=lambda run:(pymupdf.Rect(run.rect)&target).get_area())
-        self.select_run(best,open_editor=False)
 
     def history_step(self,redo):
         if not self.session or self.busy:
             return
-        self.canvas.cancel_inline_editor()
-        self.canvas.cancel_note_insertion()
-        self.actions["text_note"].setChecked(False)
-        self.canvas.cancel_annotation_selection()
-        self.actions["select_annotation"].setChecked(False)
+        self.cancel_editing_modes(crop=False)
         self.canvas.clear_annotation_selection()
-        self.canvas.cancel_text_insertion()
-        self.actions["add_text"].setChecked(False)
-        self.insertion_rect=None
-        self.run=None
-        self.annotation=None
+        self.clear_selection_state()
         self.session.redo() if redo else self.session.undo()
         self.text_panel.setEnabled(False)
         self.sync_page_navigation()
@@ -2281,183 +1279,22 @@ class MainWindow(QMainWindow):
         self.jobs.submit(export_document,(self.session.pdf,self.session.overlays,str(target),
             str(self.session.source),target.exists()),done,self.error)
 
-    def add_stamp(self):
-        name,_=QFileDialog.getOpenFileName(self,"匯入圖章或簽名","","PNG (*.png)")
-        if name:
-            self.import_layer(Path(name),True)
 
-    def convert_legacy_stamp(self):
-        """掃描文件，讓使用者明確選取後將既有圖章抽離為工作層。"""
-        if not self.session or self.busy or not self.session.access.can_edit:
-            return
-        token = self.token
-        revision = self.session.revision
-        pdf = self.session.pdf
-        self.busy = True
-        self.refresh_actions()
-        self.statusBar().showMessage("正在掃描可安全轉換的既有圖章…")
 
-        def done(candidates):
-            self._show_legacy_stamp_candidates(candidates, pdf, token, revision)
 
-        def failed(error):
-            self._finish_legacy_stamp_failure(error, token, revision)
 
-        self.jobs.submit(find_convertible_images, (pdf,), done, failed)
 
-    def _show_legacy_stamp_candidates(self, candidates, pdf, token, revision):
-        if not self._legacy_stamp_context_is_current(token, revision):
-            self._restore_after_legacy_stamp_job()
-            return
-        if not candidates:
-            self._restore_after_legacy_stamp_job()
-            self.statusBar().showMessage(
-                "沒有可安全轉換的既有圖章；Logo、整頁掃描與重複影像不會列出。"
-            )
-            return
 
-        dialog = LegacyStampDialog(candidates, self)
-        if not dialog.exec() or dialog.selected_candidate is None:
-            self._restore_after_legacy_stamp_job()
-            self.statusBar().showMessage("已取消轉換既有圖章。")
-            return
 
-        candidate = dialog.selected_candidate
-        self.statusBar().showMessage("正在轉換選取的既有圖章…")
 
-        def done(result):
-            self._apply_converted_legacy_stamp(result, token, revision)
 
-        def failed(error):
-            self._finish_legacy_stamp_failure(error, token, revision)
 
-        self.jobs.submit(
-            convert_legacy_image,
-            (pdf, candidate, self.asset_root),
-            done,
-            failed,
-        )
 
-    def _apply_converted_legacy_stamp(self, result, token, revision):
-        self.busy = False
-        if not self._legacy_stamp_context_is_current(token, revision):
-            self.refresh_actions()
-            return
-        try:
-            base_pdf, layer = result
-            self.session.apply_state(base_pdf, self.session.overlays + (layer,))
-            self.clear_search_results()
-            self.page_data = None
-            self.select_layer(layer.id)
-            self.refresh_actions()
-            self.request_render("已轉換為可編輯圖章。")
-            self.queue_thumbnails((layer.page,))
-        except Exception as exc:
-            self.error((getattr(exc, "code", "STAMP_CONVERSION"), str(exc), ()))
 
-    def _finish_legacy_stamp_failure(self, error, token, revision):
-        self.busy = False
-        if not self._legacy_stamp_context_is_current(token, revision):
-            self.refresh_actions()
-            return
-        self.error(error)
 
-    def _restore_after_legacy_stamp_job(self):
-        self.busy = False
-        self.refresh_actions()
 
-    def _legacy_stamp_context_is_current(self, token, revision):
-        return (not self.closed and self.session is not None
-            and token == self.token and revision == self.session.revision)
 
-    def add_collection(self):
-        name,_=QFileDialog.getOpenFileName(self,"選擇常用圖章",str(self.asset_root),"PNG (*.png)")
-        if name:
-            self.import_layer(Path(name),True)
 
-    def add_signature(self):
-        dialog=SignatureDialog(self)
-        if dialog.exec():
-            path=self.session.history.root/"signature.png"
-            path.write_bytes(dialog.png_bytes())
-            self.import_layer(path,dialog.collect.isChecked())
-
-    def import_layer(self,path,persistent):
-        if not self.session:
-            return
-        try:
-            store=self.assets if persistent else AssetStore(self.session.history.root/"assets")
-            copied=store.import_png(path,persistent)
-            from PIL import Image
-            with Image.open(copied) as image:
-                ratio=image.height/image.width
-            width=min(150,self.page_data["bounds"][2]*0.4)
-            height=min(width*ratio,self.page_data["bounds"][3]*0.4)
-            layer=Overlay(uuid.uuid4().hex,self.page,str(copied),(40,40,40+width,40+height),0)
-            self.session.set_overlays(self.session.overlays+(layer,))
-            self.layer_id=layer.id
-            self.select_layer(layer.id)
-            self.refresh_actions()
-            self.request_render()
-        except Exception as exc:
-            self.error((getattr(exc,"code","IMAGE"),str(exc),()))
-
-    def select_layer(self,id):
-        self.canvas.cancel_inline_editor()
-        self.layer_id=id
-        layer=next((o for o in self.session.overlays if o.id==id),None)
-        if layer:
-            self.panels.setCurrentWidget(self.overlay_panel)
-            self.overlay_panel.set_layer(layer)
-
-    def move_layer(self,layer):
-        try:
-            # 先驗證新位置，失敗時還原畫布而不寫入歷史。
-            flatten_overlays(self.session.pdf,(layer,))
-            self.session.set_overlays(tuple(layer if o.id==layer.id else o for o in self.session.overlays))
-            self.select_layer(layer.id)
-            self.refresh_actions()
-        except Exception as exc:
-            self.error((getattr(exc,"code","GEOMETRY"),str(exc),()))
-        self.request_render()
-
-    def update_layer(self):
-        layer=next((o for o in self.session.overlays if o.id==self.layer_id),None)
-        if layer:
-            x,y,w,h,angle=(s.value() for s in self.overlay_panel.fields)
-            self.move_layer(replace(layer,rect=(x,y,x+w,y+h),angle=angle))
-
-    def delete_layer(self):
-        self.session.set_overlays(tuple(o for o in self.session.overlays if o.id!=self.layer_id))
-        self.panels.setCurrentWidget(self.text_panel)
-        self.refresh_actions()
-        self.request_render()
-
-    def merge(self):
-        dialog=MergeDialog(self)
-        if not dialog.exec():
-            return
-        name,_=QFileDialog.getSaveFileName(self,"合併輸出","合併.pdf","PDF (*.pdf)")
-        if name:
-            self.busy=True
-            self.refresh_actions()
-            self.jobs.submit(export_merge,(tuple(dialog.sources),dialog.order(),name,
-                tuple(str(p) for p in dialog.paths)),self.export_done,self.error)
-
-    def split(self):
-        dialog=SplitDialog(self.page_count,self)
-        if dialog.exec():
-            folder=QFileDialog.getExistingDirectory(self,"選擇輸出資料夾")
-            if folder:
-                self.busy=True
-                self.refresh_actions()
-                self.jobs.submit(export_split,(self.session.pdf,self.session.overlays,
-                    dialog.selections(),folder,str(self.session.source)),self.export_done,self.error)
-
-    def export_done(self,result):
-        self.busy=False
-        self.refresh_actions()
-        self.statusBar().showMessage("輸出完成："+(result if isinstance(result,str) else f"{len(result)} 份 PDF"))
 
     def showEvent(self,event):
         super().showEvent(event)

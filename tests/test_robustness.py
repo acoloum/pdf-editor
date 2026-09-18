@@ -4,6 +4,7 @@ from concurrent.futures import Future
 from pdf_editor.logs import log_path
 from pdf_editor.ui.main_window import MainWindow
 import pdf_editor.ui.main_window as main_window
+import pdf_editor.ui.page_actions as page_actions
 
 
 def _close(window):
@@ -18,7 +19,7 @@ def _record_thumbnail_jobs(window, monkeypatch):
     original = window.jobs.submit
 
     def submit(fn, args, success, failure):
-        if fn is main_window.thumbnail:
+        if fn is page_actions.thumbnail:
             calls.append((args[1], success, failure))
             return
         original(fn, args, success, failure)
