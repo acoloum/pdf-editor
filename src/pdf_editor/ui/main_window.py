@@ -1,7 +1,7 @@
 from pathlib import Path
 import pymupdf
-from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal,QPointF,QTimer,QUrl
-from PySide6.QtGui import QAction, QKeySequence, QDesktopServices
+from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal,QPointF,QTimer
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -45,7 +45,6 @@ from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.ui.overlay_panel import OverlayPanel
 from pdf_editor.ui.comparison_dialog import ComparisonDialog
 from pdf_editor.ui.style import STYLE, apply_theme, apply_dark_title_bar, app_icon, glyph_icon
-from pdf_editor.document.save import backup_folder
 from pdf_editor.ui.settings import AppSettings
 from pdf_editor.ui.background_jobs import export_document,overwrite_document
 from pdf_editor.ui.page_actions import PageActionsMixin
@@ -199,8 +198,6 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             self.actions[name]=action
         self.save_menu=QMenu("儲存選項",self)
         self.save_menu.addAction(self.actions["save_as"])
-        self.save_menu.addSeparator()
-        self.save_menu.addAction("開啟原檔備份資料夾",self.open_backup_folder)
         self.actions["save"].setMenu(self.save_menu)
         self.recent_menu=QMenu("最近開啟的檔案",self)
         self.recent_menu.aboutToShow.connect(self.rebuild_recent_menu)
@@ -308,7 +305,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
                 QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         tips={
             "open":"開啟 PDF（Ctrl+O）；點右側箭頭可選最近開啟的檔案",
-            "save":"儲存（Ctrl+S）；直接覆蓋原檔，覆蓋前會自動保留原檔備份",
+            "save":"儲存（Ctrl+S）；直接覆蓋原檔",
             "save_as":"另存新檔（Ctrl+Shift+S）；原始檔案不會被覆蓋",
             "undo":"復原上一步（Ctrl+Z）",
             "redo":"重做（Ctrl+Y）",
@@ -1282,27 +1279,14 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.busy=True
         self.refresh_actions()
         self.statusBar().showMessage("正在儲存…")
-        def done(result):
-            path,backup=result
+        def done(path):
             self.busy=False
             if self.session.revision==revision:
                 self.session.saved_fingerprint=fingerprint
             self.refresh_actions()
-            self.statusBar().showMessage(f"已儲存：{path}"
-                +(f"（原檔備份：{backup}）" if backup else "（未能建立原檔備份）"))
+            self.statusBar().showMessage("已儲存："+path)
         self.jobs.submit(overwrite_document,(self.session.pdf,self.session.overlays,
-            str(source),str(backup_folder())),done,self.error)
-
-    def open_backup_folder(self):
-        """在檔案總管開啟覆蓋原檔前保留的備份資料夾。"""
-        folder=backup_folder()
-        try:
-            folder.mkdir(parents=True,exist_ok=True)
-        except OSError as exc:
-            self.error(("BACKUP",f"無法開啟備份資料夾：{exc}",()))
-            return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
-        self.statusBar().showMessage(f"備份資料夾：{folder}")
+            str(source)),done,self.error)
 
     def confirm_overwrite(self,source):
         """首次覆蓋原檔時說明行為，使用者可選擇不再詢問。"""
@@ -1312,7 +1296,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         box.setIcon(QMessageBox.Icon.Question)
         box.setWindowTitle("儲存並覆蓋原檔")
         box.setText(f"將直接覆蓋原檔：\n{source}")
-        box.setInformativeText("覆蓋前會自動把原檔複製到備份資料夾。若要保留原檔，請改用「另存新檔」。")
+        box.setInformativeText("原檔會被這次的編輯結果取代。若要保留原檔，請改用「另存新檔」。")
         box.setStandardButtons(QMessageBox.StandardButton.Save|QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(QMessageBox.StandardButton.Save)
         remember=QCheckBox("以後不再詢問")

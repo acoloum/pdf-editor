@@ -1,68 +1,9 @@
 import os
-import shutil
 import tempfile
-from datetime import datetime, timedelta
 from pathlib import Path
 import pymupdf
 from pdf_editor.errors import EditorError, BatchPublishError
 from pdf_editor.persistent_overlays import embed_workspace
-
-# 覆蓋原檔前保留的備份數量上限與保存期限。
-BACKUP_LIMIT_BYTES = 500_000_000
-BACKUP_KEEP_DAYS = 60
-
-
-def backup_folder():
-    base = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir())
-    return base / "LocalPDFEditor" / "backups"
-
-
-def backup_original(path, folder=None):
-    """覆蓋原檔前把目前檔案複製到備份資料夾，回傳備份路徑。
-
-    來源不存在或備份失敗時回傳 None；備份失敗不應阻擋儲存，
-    但呼叫端可據此提醒使用者。
-    """
-    path = Path(path)
-    if not path.is_file():
-        return None
-    folder = Path(folder or backup_folder())
-    try:
-        folder.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        target = folder / f"{stamp}_{path.stem}.pdf"
-        index = 1
-        while target.exists():
-            target = folder / f"{stamp}-{index}_{path.stem}.pdf"
-            index += 1
-        shutil.copy2(path, target)
-    except OSError:
-        return None
-    prune_backups(folder)
-    return target
-
-
-def prune_backups(folder=None, limit=BACKUP_LIMIT_BYTES, keep_days=BACKUP_KEEP_DAYS):
-    """刪除過期或超過總容量的備份，回傳刪除數量。"""
-    folder = Path(folder or backup_folder())
-    try:
-        files = [(item.stat().st_mtime, item.stat().st_size, item)
-            for item in folder.glob("*.pdf") if item.is_file()]
-    except OSError:
-        return 0
-    deadline = (datetime.now() - timedelta(days=keep_days)).timestamp()
-    removed = 0
-    total = sum(size for _mtime, size, _item in files)
-    for mtime, size, item in sorted(files):
-        if mtime >= deadline and total <= limit:
-            break
-        try:
-            item.unlink()
-        except OSError:
-            continue
-        total -= size
-        removed += 1
-    return removed
 
 def same_file(a, b):
     a, b = Path(a), Path(b)
