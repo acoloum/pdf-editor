@@ -1,7 +1,7 @@
 """背景工作使用的文件處理函式；在工作程序中執行，不依賴介面。"""
 from pathlib import Path
 
-from pdf_editor.document.save import publish_batch, write_pdf
+from pdf_editor.document.save import backup_original, publish_batch, write_pdf
 from pdf_editor.engine.overlay import flatten_overlays
 from pdf_editor.errors import EditorError
 from pdf_editor.page_decorations import (add_header_footer, add_image_watermark,
@@ -15,6 +15,30 @@ from pdf_editor.persistent_overlays import embed_workspace
 def export_document(pdf,layers,target,source,overwrite):
     data=embed_workspace(pdf,layers) if layers else pdf
     return str(write_pdf(data,Path(target),overwrite,(Path(source),)))
+
+def overwrite_document(pdf, layers, target, backup_directory=None):
+    """覆蓋原檔：先把現有檔案複製到備份資料夾，再原子寫入新內容。"""
+    data = embed_workspace(pdf, layers) if layers else pdf
+    backup = backup_original(Path(target), backup_directory)
+    path = write_pdf(data, Path(target), overwrite=True, sources=(Path(target),), allow_source=True)
+    return str(path), (str(backup) if backup else "")
+
+
+def overwrite_document(pdf, layers, target, backup_directory=None):
+    """覆蓋原檔：先把現有檔案複製到備份資料夾，再原子寫入新內容。"""
+    data = embed_workspace(pdf, layers) if layers else pdf
+    backup = backup_original(Path(target), backup_directory)
+    path = write_pdf(data, Path(target), overwrite=True, sources=(Path(target),), allow_source=True)
+    return str(path), (str(backup) if backup else "")
+
+
+def overwrite_document(pdf, layers, target, backup_directory=None):
+    """覆蓋原檔：先把現有檔案複製到備份資料夾，再原子寫入新內容。"""
+    data = embed_workspace(pdf, layers) if layers else pdf
+    backup = backup_original(Path(target), backup_directory)
+    path = write_pdf(data, Path(target), overwrite=True, sources=(Path(target),), allow_source=True)
+    return str(path), (str(backup) if backup else "")
+
 
 def export_merge(sources,order,target,paths):
     return str(write_pdf(merge_pages(sources,order),Path(target),False,tuple(Path(p) for p in paths)))

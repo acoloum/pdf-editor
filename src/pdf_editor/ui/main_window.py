@@ -1,7 +1,7 @@
 from pathlib import Path
 import pymupdf
-from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal,QPointF,QTimer
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import Qt,QStandardPaths,QSize,Signal,QPointF,QTimer,QUrl
+from PySide6.QtGui import QAction, QKeySequence, QDesktopServices
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -27,7 +27,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QTabWidget,
     QTreeWidget,
-    QTreeWidgetItem)
+    QTreeWidgetItem,
+    QCheckBox)
 from pdf_editor.document.session import DocumentSession
 from pdf_editor.engine.render import render_page
 from pdf_editor.engine.geometry import transform_point,inverse_transform
@@ -44,8 +45,9 @@ from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.ui.overlay_panel import OverlayPanel
 from pdf_editor.ui.comparison_dialog import ComparisonDialog
 from pdf_editor.ui.style import STYLE, apply_theme, apply_dark_title_bar, app_icon, glyph_icon
+from pdf_editor.document.save import backup_folder
 from pdf_editor.ui.settings import AppSettings
-from pdf_editor.ui.background_jobs import export_document
+from pdf_editor.ui.background_jobs import export_document,overwrite_document
 from pdf_editor.ui.page_actions import PageActionsMixin
 from pdf_editor.ui.text_actions import TextActionsMixin
 from pdf_editor.ui.stamp_actions import StampActionsMixin
@@ -172,7 +174,8 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self._pending_icons=[]
         for name,label,handler,key in [
             ("open","開啟 PDF",self.choose_open,"Ctrl+O"),
-            ("save","另存新檔",self.save,"Ctrl+S"),
+            ("save","儲存",self.save_over_original,"Ctrl+S"),
+            ("save_as","另存新檔",self.save,"Ctrl+Shift+S"),
             ("undo","復原",lambda:self.history_step(False),"Ctrl+Z"),
             ("redo","重做",lambda:self.history_step(True),"Ctrl+Y"),
             ("add_text","新增文字",self.start_text_insertion,"Ctrl+T"),
@@ -194,8 +197,11 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             if name=="add_text":
                 action.setCheckable(True)
             self.actions[name]=action
-        # 另存新檔同時支援 Ctrl+S 與 Ctrl+Shift+S，避免習慣按 Ctrl+S 時沒有反應。
-        self.actions["save"].setShortcuts([QKeySequence("Ctrl+S"),QKeySequence("Ctrl+Shift+S")])
+        self.save_menu=QMenu("儲存選項",self)
+        self.save_menu.addAction(self.actions["save_as"])
+        self.save_menu.addSeparator()
+        self.save_menu.addAction("開啟原檔備份資料夾",self.open_backup_folder)
+        self.actions["save"].setMenu(self.save_menu)
         self.recent_menu=QMenu("最近開啟的檔案",self)
         self.recent_menu.aboutToShow.connect(self.rebuild_recent_menu)
         self.actions["open"].setMenu(self.recent_menu)
@@ -297,11 +303,13 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
                     toolbar.addAction(self.actions[item])
                 else:
                     toolbar.addWidget(item)
-        toolbar.widgetForAction(self.actions["open"]).setPopupMode(
-            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        for name in ("open","save"):
+            toolbar.widgetForAction(self.actions[name]).setPopupMode(
+                QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         tips={
             "open":"開啟 PDF（Ctrl+O）；點右側箭頭可選最近開啟的檔案",
-            "save":"另存新檔（Ctrl+S）；原始檔案不會被覆蓋",
+            "save":"儲存（Ctrl+S）；直接覆蓋原檔，覆蓋前會自動保留原檔備份",
+            "save_as":"另存新檔（Ctrl+Shift+S）；原始檔案不會被覆蓋",
             "undo":"復原上一步（Ctrl+Z）",
             "redo":"重做（Ctrl+Y）",
             "add_text":"在頁面上點選位置新增文字（Ctrl+T）",
@@ -644,7 +652,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
     def refresh_actions(self):
         active=self.session is not None
         edit=active and self.session.access.can_edit and not self.busy
-        for name in ("save","add_text","stamp","convert_stamp","signature","collection",
+        for name in ("save","save_as","add_text","stamp","convert_stamp","signature","collection",
                 "page_marks","header_footer"):
             self.actions[name].setEnabled(edit)
         self.actions["undo"].setEnabled(edit and self.session.can_undo)
@@ -722,7 +730,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             result=QMessageBox.question(self,"尚未儲存","是否儲存目前變更？",
                 QMessageBox.StandardButton.Save|QMessageBox.StandardButton.Discard|QMessageBox.StandardButton.Cancel)
             if result==QMessageBox.StandardButton.Save:
-                self.save()
+                self.save_over_original()
                 return False
             return result==QMessageBox.StandardButton.Discard
         return True
@@ -1253,6 +1261,68 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.session.redo() if redo else self.session.undo()
         self.text_panel.setEnabled(False)
         self.sync_page_navigation()
+
+    def save_over_original(self):
+        """直接覆蓋原檔；覆蓋前把原檔複製到備份資料夾。"""
+        if not self.session or self.busy:
+            return
+        source=self.session.source
+        if not source.exists():
+            QMessageBox.information(self,"找不到原檔",
+                f"原始檔案已不存在，請改用「另存新檔」：\n{source}")
+            self.save()
+            return
+        if self.session.password_used and QMessageBox.question(self,"輸出保護",
+                "覆蓋後的文件不保留密碼保護，是否繼續？")!=QMessageBox.StandardButton.Yes:
+            return
+        if not self.confirm_overwrite(source):
+            return
+        revision=self.session.revision
+        fingerprint=self.session.history.current[2]
+        self.busy=True
+        self.refresh_actions()
+        self.statusBar().showMessage("正在儲存…")
+        def done(result):
+            path,backup=result
+            self.busy=False
+            if self.session.revision==revision:
+                self.session.saved_fingerprint=fingerprint
+            self.refresh_actions()
+            self.statusBar().showMessage(f"已儲存：{path}"
+                +(f"（原檔備份：{backup}）" if backup else "（未能建立原檔備份）"))
+        self.jobs.submit(overwrite_document,(self.session.pdf,self.session.overlays,
+            str(source),str(backup_folder())),done,self.error)
+
+    def open_backup_folder(self):
+        """在檔案總管開啟覆蓋原檔前保留的備份資料夾。"""
+        folder=backup_folder()
+        try:
+            folder.mkdir(parents=True,exist_ok=True)
+        except OSError as exc:
+            self.error(("BACKUP",f"無法開啟備份資料夾：{exc}",()))
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        self.statusBar().showMessage(f"備份資料夾：{folder}")
+
+    def confirm_overwrite(self,source):
+        """首次覆蓋原檔時說明行為，使用者可選擇不再詢問。"""
+        if self.settings.value("save/skip_overwrite_confirm","") == "yes":
+            return True
+        box=QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("儲存並覆蓋原檔")
+        box.setText(f"將直接覆蓋原檔：\n{source}")
+        box.setInformativeText("覆蓋前會自動把原檔複製到備份資料夾。若要保留原檔，請改用「另存新檔」。")
+        box.setStandardButtons(QMessageBox.StandardButton.Save|QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Save)
+        remember=QCheckBox("以後不再詢問")
+        box.setCheckBox(remember)
+        if box.exec()!=QMessageBox.StandardButton.Save:
+            return False
+        if remember.isChecked():
+            self.settings.set_value("save/skip_overwrite_confirm","yes")
+            self.settings.sync()
+        return True
 
     def save(self):
         if not self.session or self.busy:

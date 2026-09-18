@@ -128,9 +128,9 @@ def test_save_accepts_ctrl_s(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
     try:
-        shortcuts = window.actions["save"].shortcuts()
-        assert QKeySequence("Ctrl+S") in shortcuts
-        assert QKeySequence("Ctrl+Shift+S") in shortcuts
+        # Ctrl+S 直接覆蓋原檔，Ctrl+Shift+S 另存新檔。
+        assert QKeySequence("Ctrl+S") in window.actions["save"].shortcuts()
+        assert QKeySequence("Ctrl+Shift+S") in window.actions["save_as"].shortcuts()
         # 快捷鍵需掛在主視窗本身，工具列隱藏或收合時仍可使用。
         from PySide6.QtWidgets import QWidget
         assert window.actions["save"] in QWidget.actions(window)
