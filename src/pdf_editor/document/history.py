@@ -33,6 +33,10 @@ def cleanup_stale():
         except OSError:
             pass
 
+MAX_ITEMS = 31
+MAX_TOTAL_BYTES = 400_000_000
+
+
 class History:
     def __init__(self, pdf, overlays=()):
         self.root = Path(tempfile.mkdtemp(prefix="session-", dir=history_root()))
@@ -62,9 +66,21 @@ class History:
         path.write_bytes(pdf)
         self.serial += 1
         self.items.append((path, tuple(overlays), fingerprint(pdf, overlays)))
-        if len(self.items) > 31:
-            self.items.pop(0)[0].unlink(missing_ok=True)
+        self._trim()
         self.index = len(self.items) - 1
+
+    def _trim(self):
+        """限制復原步數與暫存總容量，大型文件不會佔滿磁碟。"""
+        def total():
+            return sum(item[0].stat().st_size for item in self.items if item[0].exists())
+        used = total()
+        while len(self.items) > 1 and (len(self.items) > MAX_ITEMS or used > MAX_TOTAL_BYTES):
+            removed = self.items.pop(0)[0]
+            try:
+                used -= removed.stat().st_size
+            except OSError:
+                pass
+            removed.unlink(missing_ok=True)
 
     @property
     def current(self):

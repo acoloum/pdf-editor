@@ -1,4 +1,5 @@
 """墨頁 PDF 深色科技風主題：色票、Qt 樣式表、調色盤與工具列圖示。"""
+import functools
 import sys
 import tempfile
 from pathlib import Path
@@ -297,11 +298,15 @@ def glyph_icon(name, size=18):
     return themed_glyph_icon(glyph, size)
 
 
+@functools.lru_cache(maxsize=128)
 def themed_glyph_icon(glyph, size=18):
-    """依指定字碼繪製主題色圖示。"""
+    """依指定字碼繪製主題色圖示；相同圖示重複取用時直接沿用。
+
+    每個圖示只產生一般與停用兩種狀態，滑鼠停留的樣式由 Qt 自動衍生。
+    """
     icon = QIcon()
-    for mode, color in ((QIcon.Mode.Normal, C["accent"]), (QIcon.Mode.Active, "#67e8f9"),
-            (QIcon.Mode.Selected, "#67e8f9"), (QIcon.Mode.Disabled, C["text_disabled"])):
+    for mode, color in ((QIcon.Mode.Normal, C["accent"]),
+            (QIcon.Mode.Disabled, C["text_disabled"])):
         for ratio in (1, 2):
             pixmap = QPixmap(size * ratio, size * ratio)
             pixmap.fill(Qt.GlobalColor.transparent)

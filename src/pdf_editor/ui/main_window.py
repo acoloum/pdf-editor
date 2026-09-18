@@ -216,6 +216,8 @@ class MainWindow(QMainWindow):
         self.addToolBar(toolbar)
         self.toolbar=toolbar
         self.actions={}
+        # 圖示改為視窗顯示後再產生（首次約需 0.2 秒），縮短啟動到看見視窗的時間。
+        self._pending_icons=[]
         for name,label,handler,key in [
             ("open","開啟 PDF",self.choose_open,"Ctrl+O"),
             ("save","另存新檔",self.save,"Ctrl+S"),
@@ -232,7 +234,8 @@ class MainWindow(QMainWindow):
             ("split","拆分",self.split,None),
             ("page_marks","頁碼／浮水印",self.show_page_decoration_dialog,None),
             ("header_footer","頁首頁尾範本",self.show_header_footer_dialog,None)]:
-            action=QAction(glyph_icon(name),label,self)
+            action=QAction(label,self)
+            self._pending_icons.append((action,name))
             action.triggered.connect(handler)
             if key:
                 action.setShortcut(QKeySequence(key))
@@ -307,7 +310,8 @@ class MainWindow(QMainWindow):
                 "複製目前頁面的全部文字（Ctrl+Shift+C）"),
             ("fit_page","適合頁面",lambda:self.zoom.setCurrentText("適合頁面"),(),"整頁顯示"),
             ("fit_width","適合寬度",lambda:self.zoom.setCurrentText("適合寬度"),(),"頁面寬度填滿畫布")]:
-            action=QAction(glyph_icon(name),label,self)
+            action=QAction(label,self)
+            self._pending_icons.append((action,name))
             action.triggered.connect(handler)
             action.setShortcuts([QKeySequence(key) for key in shortcuts])
             action.setToolTip(tip)
@@ -319,12 +323,12 @@ class MainWindow(QMainWindow):
         self.stamp_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         self.page_menu_button=QToolButton()
         self.page_menu_button.setText("頁面操作")
-        self.page_menu_button.setIcon(glyph_icon("page_menu"))
+        self._pending_icons.append((self.page_menu_button,"page_menu"))
         self.page_menu_button.setMenu(page_menu)
         self.page_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.markup_menu_button=QToolButton()
         self.markup_menu_button.setText("標記註解")
-        self.markup_menu_button.setIcon(glyph_icon("markup_menu"))
+        self._pending_icons.append((self.markup_menu_button,"markup_menu"))
         self.markup_menu_button.setMenu(markup_menu)
         self.markup_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         for button in (self.stamp_menu_button,self.page_menu_button,self.markup_menu_button):
@@ -474,6 +478,7 @@ class MainWindow(QMainWindow):
                 self.addAction(action)
         self.setAcceptDrops(True)
         self.restore_window_state()
+        QTimer.singleShot(0,self.load_action_icons)
         self.statusBar().showMessage("開啟 PDF 開始編輯；也可以直接把 PDF 拖進視窗。文件全程在本機處理。")
         self.refresh_actions()
 
@@ -566,6 +571,12 @@ class MainWindow(QMainWindow):
                 self.session.source,self.session.access,self.session.password_used))
         except Exception:
             self.info_panel.clear()
+
+    def load_action_icons(self):
+        """視窗顯示後才產生工具列圖示，避免拖慢啟動。"""
+        pending,self._pending_icons=self._pending_icons,[]
+        for target,name in pending:
+            target.setIcon(glyph_icon(name))
 
     def restore_window_state(self):
         """還原上次的視窗大小、面板寬度與縮放模式。"""

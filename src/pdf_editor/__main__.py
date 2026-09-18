@@ -60,6 +60,24 @@ def _finish_acceptance(window, app, exit_code):
     app.exit(exit_code)
 
 
+def _schedule_subset_cache_prune():
+    """啟動後清理過量的字型子集快取，避免長期累積佔用磁碟。"""
+    from PySide6.QtCore import QTimer
+
+    def prune():
+        from pdf_editor.engine.fonts import prune_subset_cache
+        from pdf_editor.logs import get_logger
+        try:
+            removed = prune_subset_cache()
+        except Exception:
+            get_logger().exception("清理字型子集快取失敗")
+            return
+        if removed:
+            get_logger().info("已清理 %s 個字型子集快取檔案", removed)
+
+    QTimer.singleShot(5000, prune)
+
+
 def _install_exception_hook(app):
     """介面事件中未處理的例外寫入紀錄檔並提示使用者，避免程式默默失效。"""
     from pdf_editor.logs import get_logger, log_path
@@ -106,6 +124,7 @@ def main(argv=None):
     app.setOrganizationName("LocalPDFEditor")
     app.setApplicationName("墨頁 PDF")
     cleanup_stale()
+    _schedule_subset_cache_prune()
     _install_exception_hook(app)
     _install_qt_translations(app)
     window=MainWindow()

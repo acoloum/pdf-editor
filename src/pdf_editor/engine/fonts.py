@@ -25,6 +25,31 @@ def _subset_cache_dir():
         _SUBSET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     return _SUBSET_CACHE_DIR
 
+SUBSET_CACHE_LIMIT = 200_000_000
+
+
+def prune_subset_cache(limit=SUBSET_CACHE_LIMIT):
+    """字型子集快取超過上限時，刪除最久未使用的檔案；回傳刪除數量。"""
+    folder = _subset_cache_dir()
+    try:
+        files = [(path.stat().st_atime, path.stat().st_size, path)
+            for path in folder.glob("*") if path.is_file()]
+    except OSError:
+        return 0
+    total = sum(size for _atime, size, _path in files)
+    removed = 0
+    for _atime, size, path in sorted(files):
+        if total <= limit:
+            break
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        total -= size
+        removed += 1
+    return removed
+
+
 def subset_font(font_path, text):
     """將 font_path 子集化至僅含 text 所需字元，回傳子集檔路徑。
 

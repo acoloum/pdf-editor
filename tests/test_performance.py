@@ -96,3 +96,49 @@ def test_font_lookups_are_cached():
     if sys.platform == "win32":
         # 相近字型逐字檢查涵蓋範圍很慢，同樣的字集必須沿用結果。
         assert similar_font("TimesNewRomanPSMT", "316") is similar_font("TimesNewRomanPSMT", "613")
+
+
+def test_icons_are_cached_and_loaded_after_window_is_shown(qtbot):
+    from pdf_editor.ui.style import glyph_icon, themed_glyph_icon
+    themed_glyph_icon.cache_clear()
+    first = glyph_icon("open")
+    assert first is glyph_icon("open")
+    # 每個圖示只保留一般與停用兩種狀態。
+    assert len(first.availableSizes(first.Mode.Normal)) >= 1
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        assert window._pending_icons
+        assert window.actions["open"].icon().isNull()
+        window.show()
+        qtbot.waitUntil(lambda: not window._pending_icons, timeout=5000)
+        assert not window.actions["open"].icon().isNull()
+    finally:
+        window.close()
+
+
+def test_subset_cache_is_pruned_to_the_limit(monkeypatch, tmp_path):
+    from pdf_editor.engine import fonts
+    monkeypatch.setattr(fonts, "_SUBSET_CACHE_DIR", tmp_path)
+    for index in range(5):
+        (tmp_path / f"font{index}.otf").write_bytes(b"x" * 1000)
+    removed = fonts.prune_subset_cache(limit=2500)
+    remaining = sorted(path.name for path in tmp_path.glob("*"))
+    assert removed == 3
+    assert len(remaining) == 2
+
+
+def test_history_limits_total_size(monkeypatch, tmp_path):
+    from pdf_editor.document import history as history_module
+    monkeypatch.setattr(history_module, "MAX_TOTAL_BYTES", 3000)
+    blob = b"%PDF-1.4" + b"0" * 1000
+    history = history_module.History(blob)
+    try:
+        for index in range(6):
+            history.push(blob + bytes([index]), ())
+        used = sum(item[0].stat().st_size for item in history.items)
+        assert used <= 3000
+        assert len(history.items) >= 2
+        assert history.index == len(history.items) - 1
+    finally:
+        history.close()
