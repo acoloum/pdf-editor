@@ -353,3 +353,42 @@ def test_text_panel_has_no_legacy_preview_controls(qtbot):
             assert not hasattr(window, name)
     finally:
         _close(window)
+
+
+def _ink_coverage(pdf, rect):
+    with pymupdf.open(stream=pdf, filetype="pdf") as doc:
+        pix = doc[0].get_pixmap(dpi=200, clip=pymupdf.Rect(rect), colorspace=pymupdf.csGRAY)
+        return sum(1 for value in pix.samples if value < 128) / max(1, len(pix.samples))
+
+
+def test_simulated_bold_is_clearly_heavier_than_regular():
+    from pdf_editor.engine.text import FAKE_BOLD_WIDTH
+    doc = pymupdf.open()
+    page = doc.new_page(width=320, height=120)
+    page.insert_text((20, 60), "品質檢驗報告", fontname="noto",
+        fontfile=str(default_font()), fontsize=16)
+    data = doc.tobytes()
+    doc.close()
+    run = extract_runs(data, 0)[0]
+    rect = (10, 30, 310, 80)
+    regular = replace_text(data, _replacement(data, run, "品質檢驗報告", "expand"))
+    request = TextReplacement(hashlib.sha256(data).hexdigest(), 0, run.id, "品質檢驗報告",
+        run.rect, str(default_font()), run.size, run.color, "left", True, "expand")
+    bold = replace_text(data, request)
+    increase = _ink_coverage(bold, rect) / _ink_coverage(regular, rect) - 1
+    # 內建字型沒有粗體檔，以描邊模擬；墨水量需明顯增加（真粗體約 +50%）。
+    assert FAKE_BOLD_WIDTH >= 0.04
+    assert increase > 0.45
+
+
+def test_bold_prefers_the_same_family_bold_file():
+    from pdf_editor.engine.text import _resolve_bold
+    from pathlib import Path
+    times = r"C:\Windows\Fonts\times.ttf"
+    if not Path(times).exists():
+        return
+    request = TextReplacement("hash", 0, "id", "Test", (0, 0, 10, 10), times, 12,
+        (0, 0, 0), "left", True, "none")
+    path, fake = _resolve_bold(request)
+    assert Path(path).name.lower() == "timesbd.ttf"
+    assert not fake

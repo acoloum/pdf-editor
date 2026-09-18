@@ -58,7 +58,8 @@ class TextActionsMixin:
             return
         self.text_panel.info.setText("請直接在頁面文字框輸入；Enter 或點到別處套用，Esc 取消。")
         self.canvas.begin_inline_text(self.text_panel.rect(),run.text,run,run.size,
-            self.text_panel.alignment.currentData(),self.text_panel.font_path)
+            self.text_panel.alignment.currentData(),self.text_panel.font_path,
+            self.text_panel.bold.isChecked())
         self.refresh_actions()
 
     def is_page_centered(self,rect,tolerance=3.0):
@@ -342,7 +343,8 @@ class TextActionsMixin:
         self.text_panel.font_label.setText("替代字型：Noto Sans CJK TC（完整繁中文字元）")
         self.text_panel.set_insertion(rect,centered=cell is not None)
         self.canvas.begin_inline_text(rect,"",None,self.text_panel.size.value(),
-            self.text_panel.alignment.currentData(),self.text_panel.font_path)
+            self.text_panel.alignment.currentData(),self.text_panel.font_path,
+            self.text_panel.bold.isChecked())
         self.refresh_actions()
 
     def delete_run(self,run):
@@ -374,7 +376,8 @@ class TextActionsMixin:
             self.refresh_actions()
             self.request_render()
             self.canvas.begin_inline_text(insertion_rect,"",None,run.size,
-                self.text_panel.alignment.currentData(),self.text_panel.font_path)
+                self.text_panel.alignment.currentData(),self.text_panel.font_path,
+                self.text_panel.bold.isChecked())
         self.jobs.submit(replace_text,(self.session.pdf,request),done,self.error)
 
     RECOVERABLE_TEXT_ERRORS=("TEXT_OVERFLOW","OVERLAP","GEOMETRY","FONT_MISSING_GLYPH",
@@ -422,7 +425,8 @@ class TextActionsMixin:
             return
         self.panels.setCurrentWidget(self.text_panel)
         self.canvas.begin_inline_text(rect,text,run,self.text_panel.size.value(),
-            self.text_panel.alignment.currentData(),self.text_panel.font_path)
+            self.text_panel.alignment.currentData(),self.text_panel.font_path,
+            self.text_panel.bold.isChecked())
         self.canvas.show_inline_error(message)
         if code=="OVERLAP":
             own=run.id if run is not None else None

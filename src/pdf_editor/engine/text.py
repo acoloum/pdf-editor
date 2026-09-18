@@ -167,8 +167,18 @@ def _font_resource_name(prefix, font_path, text):
     token = hashlib.sha256(f"{font_path}\0{text}".encode("utf-8")).hexdigest()[:12]
     return f"{prefix}_{token}"
 
+# 描邊模擬粗體的線寬（點）。0.01 時墨水量僅增加約 19%，遠比真粗體（約 +50%）細，
+# 使用者反映看不出粗體；0.045 約 +65%，中文筆畫仍分明（0.07 以上會糊成一團）。
+# 不改用其他家族的系統粗體：實測微軟正黑體粗體比內建 Noto 一般字還細，
+# 換家族既改變字形外觀，也不會比較粗。
+FAKE_BOLD_WIDTH = 0.045
+
+
 def _resolve_bold(request):
-    """依請求的粗體旗標解析最終字型檔與是否模擬粗體。"""
+    """依請求的粗體旗標解析最終字型檔與是否模擬粗體。
+
+    優先使用同家族的真正粗體字型，找不到時以描邊模擬。
+    """
     if not getattr(request, "bold", False):
         return request.font_path, False
     bold_path = resolve_bold(request.font_path)
@@ -186,11 +196,11 @@ def _new_text_shape(page, rect, text, font_path, font, size, color, alignment, f
     box = pymupdf.Rect(rect)
     page.insert_font(fontname=fontname, fontfile=font_path)
     shape = page.new_shape()
-    # 模擬粗體：render_mode=2（fill+stroke）。
-    # PyMuPDF 對 CJK Type0 字型會依字級比例放大 stroke 寬度，
-    # border_width 固定 0.01pt 時墨水覆蓋率約 43%（≈真實粗體），
-    # 若改為 size*0.04 會被放大成一團黑塊（覆蓋率 ~89%）。
-    stroke = dict(render_mode=2, fill=color, border_width=0.01) if fake_bold else {}
+    # 模擬粗體：render_mode=2（fill+stroke），線寬為固定點數。
+    # 不可改用與字級成比例的值（如 size*0.04）：PyMuPDF 對 CJK Type0 字型
+    # 會再依字級放大 stroke 寬度，字會糊成一團黑塊。
+    stroke = (dict(render_mode=2, fill=color, border_width=FAKE_BOLD_WIDTH)
+        if fake_bold else {})
     if "\n" not in text:
         width = font.text_length(text, fontsize=size)
         if width > box.width + 0.01 or size > box.height + 0.01:

@@ -322,3 +322,4 @@ def _cached_similar_font(style, charset):
     if style is None:
         return None
     return similar_font(f"cached-{style}", charset, system_fonts())
+

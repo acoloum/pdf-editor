@@ -674,7 +674,8 @@ class Canvas(QGraphicsView):
         a,b=self.matrix[0],self.matrix[1]
         return max(0.1,(a*a+b*b)**0.5)
 
-    def begin_inline_text(self,rect,text,run=None,size=11,alignment="left",font_path=None):
+    def begin_inline_text(self,rect,text,run=None,size=11,alignment="left",font_path=None,
+            bold=False):
         self.cancel_inline_editor()
         self.inline_run=run
         self.inline_rect=tuple(rect)
@@ -691,9 +692,10 @@ class Canvas(QGraphicsView):
         families=(f'"{family}", ' if family else "")+'"Microsoft JhengHei UI"'
         editor.setStyleSheet(
             "#inlineEditor{background:rgba(255,255,255,240);color:#0b1220;border:2px solid %s;"
-            "border-radius:3px;padding:2px 5px;font-size:%dpx;font-family:%s;}"
+            "border-radius:3px;padding:2px 5px;font-size:%dpx;font-family:%s;font-weight:%s;}"
             "#inlineEditor[error=\"true\"]{border:2px solid %s;background:#fff5f5;}"
-            %(COLORS["accent_strong"],pixels,families,COLORS["danger"]))
+            %(COLORS["accent_strong"],pixels,families,"bold" if bold else "normal",
+                COLORS["danger"]))
         editor.commit_requested.connect(self._commit_inline_text)
         editor.cancel_requested.connect(self._cancel_inline_text)
         editor.content_resized.connect(self._position_inline_editor)
