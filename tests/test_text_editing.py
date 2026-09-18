@@ -231,8 +231,7 @@ def test_font_style_and_similar_font_selection():
         fonts.checked_font = original
 
 
-def test_page_cell_index_is_cached_per_page(font_path):
-    import time
+def test_page_cell_index_is_cached_per_page(font_path, monkeypatch):
     from pdf_editor.engine import text as text_engine
     doc = pymupdf.open()
     page = doc.new_page(width=300, height=200)
@@ -241,16 +240,21 @@ def test_page_cell_index_is_cached_per_page(font_path):
         page.insert_text((x + 10, 40), f"CELL{x}", fontsize=10)
     data = doc.tobytes()
     doc.close()
-    text_engine.page_cell_index.cache_clear()
+    text_engine.clear_cell_cache()
+    analysed = []
+    original = text_engine._analyse_page_cells
+    monkeypatch.setattr(text_engine, "_analyse_page_cells",
+        lambda pdf, page: analysed.append(page) or original(pdf, page))
     runs = extract_runs(data, 0)
-    started = time.perf_counter()
-    first = text_engine.find_table_cell(data, 0, runs[0].rect)
-    second = text_engine.find_table_cell(data, 0, runs[1].rect)
+    first = text_engine.find_table_cell(data, 0, runs[0].rect, "doc-key")
+    second = text_engine.find_table_cell(data, 0, runs[1].rect, "doc-key")
     assert first is not None and second is not None and first != second
-    info = text_engine.page_cell_index.cache_info()
-    # 同一頁點選兩段文字只分析一次頁面。
-    assert info.misses == 1 and info.hits == 1
-    assert time.perf_counter() - started < 5
+    # 同一頁只分析一次，且快取不保留 PDF 內容。
+    assert analysed == [0]
+    keys = list(text_engine._CELL_CACHE)
+    assert keys == [("doc-key", 0)]
+    text_engine.find_table_cell(data, 0, runs[0].rect)
+    assert len(analysed) == 2
 
 
 def test_centered_title_keeps_center_alignment(qtbot, tmp_path):

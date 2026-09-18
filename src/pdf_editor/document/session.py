@@ -33,7 +33,24 @@ class DocumentSession:
 
     @property
     def pdf(self):
-        return self.history.current[0].read_bytes()
+        """目前版本的 PDF 內容；同一版本重複取用時不再重讀檔案。"""
+        path, _overlays, fingerprint = self.history.current
+        cached = getattr(self, "_pdf_cache", None)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+        data = path.read_bytes()
+        self._pdf_cache = (fingerprint, data)
+        return data
+
+    @property
+    def pdf_path(self):
+        """目前版本的暫存檔路徑，供背景工作直接讀取，不必複製內容。"""
+        return self.history.current[0]
+
+    @property
+    def document_key(self):
+        """目前版本的識別碼，供快取索引使用。"""
+        return self.history.current[2]
 
     @property
     def overlays(self):

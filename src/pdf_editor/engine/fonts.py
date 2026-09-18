@@ -1,3 +1,4 @@
+import functools
 import hashlib
 import os
 from pathlib import Path
@@ -165,15 +166,20 @@ def _clean_font_name(name):
     return name.split("(")[0].strip()
 
 
+@functools.lru_cache(maxsize=1)
 def system_fonts():
-    """列舉 Windows 已安裝字型。回傳（顯示名稱, 絕對路徑），依名稱排序。"""
+    """列舉 Windows 已安裝字型。回傳（顯示名稱, 絕對路徑），依名稱排序。
+
+    掃描登錄檔約需 40 毫秒，且在選取文字時會被呼叫；結果快取至程式結束，
+    安裝新字型後需重新啟動才會出現在清單中。
+    """
     if sys.platform != "win32":
-        return []
+        return ()
     result = {}
     try:
         raw_values = _font_registry_values()
     except Exception:
-        return []
+        return ()
     for raw_name, filename in raw_values:
         name = _clean_font_name(raw_name)
         if not name:
@@ -184,7 +190,7 @@ def system_fonts():
         if path is None or path.suffix.lower() not in (".ttf", ".otf", ".ttc"):
             continue
         result[name] = str(path)
-    return sorted(result.items())
+    return tuple(sorted(result.items()))
 
 
 _STYLE_SUFFIXES = ("Bold Italic", "ExtraBold", "Bold", "Italic",
@@ -200,6 +206,7 @@ def _base_family(name):
     return name
 
 
+@functools.lru_cache(maxsize=32)
 def resolve_bold(base_path):
     """尋找 base_path 的同族粗體檔；已是粗體回傳自身；找不到回傳 None。"""
     base = str(base_path)
@@ -248,6 +255,8 @@ SIMILAR_FONTS = {
 def font_style(font_name):
     """回傳 kai、serif、sans；無法判斷（如 Type3 字型）時回傳 None。"""
     name = str(font_name or "").split("+")[-1].lower()
+    if name.startswith("cached-"):
+        return name.split("-", 1)[1]
     if not name or name.startswith("type3"):
         return None
     for style, hints in FONT_STYLE_HINTS:
@@ -258,6 +267,9 @@ def font_style(font_name):
 
 def similar_font(font_name, text, fonts=None):
     """找出與原字型風格相近、且含有全部字元的系統字型，回傳（顯示名稱, 路徑）。"""
+    if fonts is None:
+        # 逐字檢查字型涵蓋範圍約需 200 毫秒，依風格與字元集快取結果。
+        return _cached_similar_font(font_style(font_name), "".join(sorted(set(text))))
     style = font_style(font_name)
     if style is None:
         return None
@@ -278,3 +290,10 @@ def similar_font(font_name, text, fonts=None):
             continue
         return match
     return None
+
+
+@functools.lru_cache(maxsize=64)
+def _cached_similar_font(style, charset):
+    if style is None:
+        return None
+    return similar_font(f"cached-{style}", charset, system_fonts())

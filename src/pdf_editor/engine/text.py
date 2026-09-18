@@ -16,12 +16,39 @@ def _image_covers_rect(img_info, rect):
         return False
     return inter.get_area() / rect.get_area() > 0.5
 
-@functools.lru_cache(maxsize=4)
-def page_cell_index(pdf: bytes, page: int):
+# 儲存格分析結果依（文件識別碼, 頁碼）快取；鍵不保留 PDF 內容，
+# 否則每個版本的完整位元組都會被快取抓住不放（8.5 MB 文件曾佔用上百 MB）。
+_CELL_CACHE = {}
+_CELL_CACHE_LIMIT = 2
+
+
+def document_key(pdf: bytes) -> str:
+    return hashlib.sha256(pdf).hexdigest()
+
+
+def clear_cell_cache():
+    _CELL_CACHE.clear()
+
+
+def page_cell_index(pdf: bytes, page: int, key: str | None = None):
     """分析整頁的表格儲存格與可用繪圖框，每頁只做一次。
 
-    表格偵測每次約需上百毫秒；改為依頁快取後，同頁點選不同文字只需查表。
+    表格偵測每次約需上百毫秒；依頁快取後，同頁點選不同文字只需查表。
+    key 由呼叫端提供文件識別碼時可省下雜湊計算。
     """
+    cache_key = (key or document_key(pdf), page)
+    cached = _CELL_CACHE.get(cache_key)
+    if cached is not None:
+        _CELL_CACHE[cache_key] = _CELL_CACHE.pop(cache_key)
+        return cached
+    result = _analyse_page_cells(pdf, page)
+    _CELL_CACHE[cache_key] = result
+    while len(_CELL_CACHE) > _CELL_CACHE_LIMIT:
+        _CELL_CACHE.pop(next(iter(_CELL_CACHE)))
+    return result
+
+
+def _analyse_page_cells(pdf: bytes, page: int):
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         current = doc[page]
         try:
@@ -43,12 +70,12 @@ def page_cell_index(pdf: bytes, page: int):
         return cells, tuple(drawings)
 
 
-@functools.lru_cache(maxsize=64)
-def find_table_cell(pdf: bytes, page: int, rect) -> tuple[float, float, float, float] | None:
+def find_table_cell(pdf: bytes, page: int, rect,
+        key: str | None = None) -> tuple[float, float, float, float] | None:
     """找出包含文字中心點的表格儲存格，找不到時回傳 None。"""
     box = pymupdf.Rect(rect)
     point = pymupdf.Point((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
-    cells, drawings = page_cell_index(pdf, page)
+    cells, drawings = page_cell_index(pdf, page, key)
     candidates = [pymupdf.Rect(cell) for cell in cells if pymupdf.Rect(cell).contains(point)]
     if not candidates:
         # 以繪圖矩形備援偵測儲存格，用於 find_tables 無法解析的矮列或單格表格。

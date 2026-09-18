@@ -5,6 +5,16 @@ from pdf_editor.engine import fonts
 from pdf_editor.engine.text import extract_runs
 
 
+@pytest.fixture(autouse=True)
+def clear_font_caches():
+    """系統字型清單與相近字型結果有快取，測試前後都需清除。"""
+    for cached in (fonts.system_fonts, fonts.resolve_bold, fonts._cached_similar_font):
+        cached.cache_clear()
+    yield
+    for cached in (fonts.system_fonts, fonts.resolve_bold, fonts._cached_similar_font):
+        cached.cache_clear()
+
+
 def test_embedded_font_is_rejected_when_unicode_cannot_roundtrip(
     pdf_bytes, tmp_path, monkeypatch
 ):
@@ -29,7 +39,7 @@ def test_system_fonts_filters_fon_and_missing(monkeypatch):
         ("系統字型 (TrueType)", "missing.ttf")]
     monkeypatch.setattr(fonts, "_font_registry_values", lambda: fake)
     monkeypatch.setattr(fonts.sys, "platform", "win32")
-    assert fonts.system_fonts() == []
+    assert fonts.system_fonts() == ()
 
 
 def test_system_fonts_resolves_relative_path(monkeypatch, tmp_path):
@@ -39,7 +49,7 @@ def test_system_fonts_resolves_relative_path(monkeypatch, tmp_path):
         lambda: [("Demo Font (TrueType)", "demo.ttf")])
     monkeypatch.setattr(fonts, "_font_directories", lambda: [tmp_path])
     monkeypatch.setattr(fonts.sys, "platform", "win32")
-    assert fonts.system_fonts() == [("Demo Font", str(font_file))]
+    assert fonts.system_fonts() == (("Demo Font", str(font_file)),)
 
 
 def test_system_fonts_handles_registry_error(monkeypatch):
@@ -47,7 +57,7 @@ def test_system_fonts_handles_registry_error(monkeypatch):
         raise OSError("拒絕存取")
     monkeypatch.setattr(fonts, "_font_registry_values", boom)
     monkeypatch.setattr(fonts.sys, "platform", "win32")
-    assert fonts.system_fonts() == []
+    assert fonts.system_fonts() == ()
 
 
 def test_resolve_bold_finds_family_bold(monkeypatch):

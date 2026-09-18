@@ -994,7 +994,7 @@ class MainWindow(QMainWindow):
                 get_logger().warning("第 %s 頁縮圖產生失敗：%s",index+1,error[1])
                 self.statusBar().showMessage(f"第 {index+1} 頁縮圖產生失敗，頁面內容仍可正常檢視。")
             finish()
-        self.jobs.submit(thumbnail,(self.session.pdf,index),done,failed)
+        self.jobs.submit(thumbnail,(str(self.session.pdf_path),index),done,failed)
 
     def goto_page(self,page):
         if not self.session or not 0<=page<self.page_count or page==self.page:
@@ -1704,7 +1704,7 @@ class MainWindow(QMainWindow):
         self.render_serial+=1
         serial,token=self.render_serial,self.token
         self.statusBar().showMessage("正在更新頁面…")
-        data=self.session.pdf
+        data=str(self.session.pdf_path)
         layers=self.session.overlays
         def done(result):
             if self.closed or token!=self.token or serial!=self.render_serial:
@@ -1781,7 +1781,7 @@ class MainWindow(QMainWindow):
                 self.text_panel.font_path=similar[1]
                 self.text_panel.font_label.setText(
                     f"原字型 {run.font_name} 無法直接使用，改用相近字型：{similar[0]}")
-        cell=find_table_cell(self.session.pdf,self.page,run.rect)
+        cell=find_table_cell(self.session.pdf,self.page,run.rect,self.session.document_key)
         if cell:
             self.text_panel.set_rect(cell)
             self.text_panel.set_alignment(2)
@@ -1815,14 +1815,15 @@ class MainWindow(QMainWindow):
         # 若使用者已手動移動文字框（差異超過 2 點）則尊重其設定。
         in_cell=False
         if run is not None and p.alignment.currentData()=="center":
-            cell=find_table_cell(self.session.pdf,self.page,run.rect)
+            cell=find_table_cell(self.session.pdf,self.page,run.rect,self.session.document_key)
             manual=tuple(p.rect())
             if cell and (not p.modified or abs(manual[0]-cell[0])+abs(manual[1]-cell[1])
                     +abs(manual[2]-cell[2])+abs(manual[3]-cell[3])<2.0):
                 target_rect=cell
                 in_cell=True
         elif run is None and self.insertion_rect is not None:
-            in_cell=find_table_cell(self.session.pdf,self.page,target_rect)==tuple(target_rect)
+            in_cell=find_table_cell(self.session.pdf,self.page,target_rect,
+                self.session.document_key)==tuple(target_rect)
         # 儲存格內縮小字級；一般文字自動加寬文字框。
         fit="shrink" if in_cell else "expand"
         if run is not None and text==run.text and not p.modified:
@@ -2084,7 +2085,7 @@ class MainWindow(QMainWindow):
             return
         x,y=position
         self.actions["add_text"].setChecked(False)
-        cell=find_table_cell(self.session.pdf,self.page,(x,y,x,y))
+        cell=find_table_cell(self.session.pdf,self.page,(x,y,x,y),self.session.document_key)
         if cell:
             rect=cell
         else:
@@ -2112,7 +2113,7 @@ class MainWindow(QMainWindow):
         self.actions["add_text"].setChecked(False)
         self.run=run
         p=self.text_panel
-        cell=find_table_cell(self.session.pdf,self.page,run.rect)
+        cell=find_table_cell(self.session.pdf,self.page,run.rect,self.session.document_key)
         x0,y0,x1,y1=run.rect
         insertion_rect=cell or (x0,y0,x1+40,y1+run.size)
         request=TextReplacement(hashlib.sha256(self.session.pdf).hexdigest(),
@@ -2197,11 +2198,12 @@ class MainWindow(QMainWindow):
         """頁面顯示後稍候預先分析表格，點選文字時不必再等待。"""
         if not self.session or not self.session.access.can_edit:
             return
-        pdf,page=self.session.pdf,self.page
+        pdf,page,key=self.session.pdf,self.page,self.session.document_key
         def analyse():
-            if self.session is not None and self.session.pdf is pdf and self.page==page and not self.busy:
+            if (self.session is not None and self.session.document_key==key
+                    and self.page==page and not self.busy):
                 try:
-                    page_cell_index(pdf,page)
+                    page_cell_index(pdf,page,key)
                 except Exception:
                     pass
         QTimer.singleShot(200,analyse)
