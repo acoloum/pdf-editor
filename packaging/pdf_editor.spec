@@ -13,6 +13,7 @@ a = Analysis([str(root / "packaging/launcher.py")],
     noarchive=False)
 pyz = PYZ(a.pure)
 exe = EXE(pyz,a.scripts,[],exclude_binaries=True,name="LocalPDFEditor",
+    icon=str(root / "resources/icons/app.ico"),
     console=False,debug=False,upx=False)
 coll = COLLECT(exe,a.binaries,a.datas,strip=False,upx=False,name="LocalPDFEditor")
 

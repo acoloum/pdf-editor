@@ -272,11 +272,18 @@ def build_palette():
     return palette
 
 
+def app_icon():
+    """應用程式圖示（工作列、視窗標題與工作切換畫面）。"""
+    path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[3])) / "resources/icons/app.ico"
+    return QIcon(str(path)) if path.exists() else QIcon()
+
+
 def apply_theme(app):
     """將深色主題套用到整個應用程式，涵蓋未指定父視窗的對話框。"""
     if app is None or app.property("pdf_editor_theme"):
         return
     app.setStyle("Fusion")
+    app.setWindowIcon(app_icon())
     app.setPalette(build_palette())
     app.setStyleSheet(STYLE)
     app.setProperty("pdf_editor_theme", True)

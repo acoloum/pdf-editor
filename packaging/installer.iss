@@ -16,6 +16,9 @@ WizardStyle=modern
 UninstallDisplayName={#AppName}
 ChangesAssociations=yes
 MinVersion=10.0.22000
+SetupIconFile=..\resources\icons\app.ico
+esources\iconspp.ico
+UninstallDisplayIcon={app}\LocalPDFEditor.exe
 [Languages]
 Name: "chinesetraditional"; MessagesFile: "ChineseTraditional.isl"
 [Tasks]

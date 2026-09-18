@@ -43,7 +43,7 @@ from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.ui.overlay_panel import OverlayPanel
 from pdf_editor.ui.comparison_dialog import ComparisonDialog
-from pdf_editor.ui.style import STYLE, apply_theme, apply_dark_title_bar, glyph_icon
+from pdf_editor.ui.style import STYLE, apply_theme, apply_dark_title_bar, app_icon, glyph_icon
 from pdf_editor.ui.settings import AppSettings
 from pdf_editor.ui.background_jobs import export_document
 from pdf_editor.ui.page_actions import PageActionsMixin
@@ -122,6 +122,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.setWindowTitle("墨頁 PDF")
         self.resize(1320,850)
         apply_theme(QApplication.instance())
+        self.setWindowIcon(app_icon())
         self.setStyleSheet(STYLE)
         self.session=None
         self.page_data=None

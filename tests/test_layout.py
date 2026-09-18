@@ -123,3 +123,29 @@ def test_toolbar_labels_fit_default_window_width(qtbot):
         assert all(button.width() >= button.sizeHint().width() for button in buttons if button.isVisible())
     finally:
         _close(window)
+
+
+def test_application_icon_is_available(qtbot):
+    from pdf_editor.ui.style import app_icon
+    icon = app_icon()
+    assert not icon.isNull()
+    # 小尺寸（工作列、檔案總管）與大尺寸（Alt+Tab、圖示檢視）都要有。
+    sizes = {size.width() for size in icon.availableSizes()}
+    assert {16, 32, 48, 256} <= sizes
+    window = MainWindow()
+    qtbot.addWidget(window)
+    try:
+        assert not window.windowIcon().isNull()
+    finally:
+        _close(window)
+
+
+def test_packaging_uses_the_application_icon():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    assert (root / "resources/icons/app.ico").exists()
+    assert "resources/icons/app.ico" in (root / "packaging/pdf_editor.spec").read_text(encoding="utf-8")
+    installer = (root / "packaging/installer.iss").read_text(encoding="utf-8")
+    lines = dict(line.split("=", 1) for line in installer.splitlines() if "=" in line)
+    assert lines["SetupIconFile"].endswith("app.ico")
+    assert lines["UninstallDisplayIcon"].endswith("LocalPDFEditor.exe")
