@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QWidget,QVBoxLayout,QFormLayout,QLabel,QDoubleSpin
 class OverlayPanel(QWidget):
     update_requested=Signal()
     delete_requested=Signal()
+    stamp_pages_requested=Signal()
     def __init__(self):
         super().__init__()
         layout=QVBoxLayout(self)
@@ -11,7 +12,7 @@ class OverlayPanel(QWidget):
         title.setObjectName("heading")
         layout.addWidget(title)
         layout.addWidget(QLabel("拖曳圖章本體可移動；拖曳四角控制點可等比例縮放。\n"
-            "下方欄位可用於精確微調。"))
+            "下方欄位可用於精確微調。調整後的大小會沿用到下一次蓋章。"))
         form=QFormLayout()
         self.fields=[]
         for text in ["左側 X","頂端 Y","寬度","高度","旋轉角度"]:
@@ -23,6 +24,10 @@ class OverlayPanel(QWidget):
         apply=QPushButton("套用位置與大小")
         apply.clicked.connect(self.update_requested)
         layout.addWidget(apply)
+        self.stamp_pages=QPushButton("蓋到多個頁面…")
+        self.stamp_pages.setObjectName("primary")
+        self.stamp_pages.clicked.connect(self.stamp_pages_requested)
+        layout.addWidget(self.stamp_pages)
         delete=QPushButton("刪除圖章／簽名")
         delete.clicked.connect(self.delete_requested)
         layout.addWidget(delete)

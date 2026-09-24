@@ -57,3 +57,37 @@ class AppSettings:
 
     def sync(self):
         self._settings.sync()
+
+    def stamp_geometry(self, asset=None):
+        """回傳上次使用的圖章大小與位置（x, y, 寬, 高）；沒有紀錄時回傳 None。"""
+        for key in (self._stamp_key(asset), "stamp/last_geometry"):
+            if key is None:
+                continue
+            value = self._settings.value(key)
+            if not value:
+                continue
+            try:
+                numbers = [float(item) for item in str(value).split(",")]
+            except ValueError:
+                continue
+            if len(numbers) == 4 and numbers[2] > 0 and numbers[3] > 0:
+                return tuple(numbers)
+        return None
+
+    def set_stamp_geometry(self, asset, rect):
+        """記住圖章的大小與位置，供下次蓋同一張或其他圖章時沿用。"""
+        x0, y0, x1, y1 = rect
+        value = ",".join(f"{number:.2f}" for number in (x0, y0, x1 - x0, y1 - y0))
+        self._settings.setValue("stamp/last_geometry", value)
+        key = self._stamp_key(asset)
+        if key:
+            self._settings.setValue(key, value)
+        self._settings.sync()
+
+    @staticmethod
+    def _stamp_key(asset):
+        if not asset:
+            return None
+        import hashlib
+        digest = hashlib.sha256(str(asset).encode("utf-8")).hexdigest()[:16]
+        return f"stamp/geometry/{digest}"

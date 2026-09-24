@@ -180,6 +180,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             ("add_text","新增文字",self.start_text_insertion,"Ctrl+T"),
             ("stamp","蓋章",self.add_stamp,None),
             ("convert_stamp","轉換既有圖章",self.convert_legacy_stamp,None),
+            ("stamp_pages","蓋到多個頁面",self.stamp_to_pages,None),
             ("signature","手寫簽名",self.add_signature,None),
             ("collection","常用圖章",self.add_collection,None),
             ("ocr","OCR 文字辨識",self.run_ocr,None),
@@ -246,7 +247,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
                 markup_menu.addSeparator()
             self.actions[name]=action
         stamp_menu=QMenu(self)
-        for name in ("stamp","collection","convert_stamp"):
+        for name in ("stamp","collection","stamp_pages","convert_stamp"):
             stamp_menu.addAction(self.actions[name])
         for name,label,handler,shortcuts,tip in [
             ("zoom_out","縮小",lambda:self.zoom_by(-1),("Ctrl+-",),"縮小頁面（Ctrl+- 或 Ctrl+滾輪）"),
@@ -313,6 +314,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             "stamp":"匯入 PNG 圖章；點右側箭頭可使用常用圖章或轉換既有圖章",
             "collection":"從收藏中選擇常用圖章或簽名",
             "convert_stamp":"將文件中原有的圖章影像轉為可移動、縮放的圖層",
+            "stamp_pages":"把目前選取的圖章以相同大小與位置蓋到多個頁面",
             "signature":"手寫簽名後放到頁面上",
             "ocr":"辨識縮圖列中選取頁面的文字，讓掃描檔可搜尋與複製",
             "compare":"與另一份 PDF 逐頁比較差異",
@@ -415,6 +417,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.text_panel.format_requested.connect(self.apply_text_format)
         self.overlay_panel=OverlayPanel()
         self.overlay_panel.update_requested.connect(self.update_layer)
+        self.overlay_panel.stamp_pages_requested.connect(self.stamp_to_pages)
         self.overlay_panel.delete_requested.connect(self.delete_layer)
         self.panels.addWidget(self.text_panel)
         self.panels.addWidget(self.overlay_panel)
@@ -682,6 +685,10 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
                 "highlight_blue","delete_annotation"):
             self.actions[name].setEnabled(edit)
         self.markup_menu_button.setEnabled(edit)
+        selected_layer=(self.session is not None
+            and any(layer.id==self.layer_id for layer in self.session.overlays))
+        self.actions["stamp_pages"].setEnabled(edit and selected_layer and self.page_count>1)
+        self.overlay_panel.stamp_pages.setEnabled(edit and selected_layer and self.page_count>1)
         self.actions["search"].setEnabled(active and not self.busy)
         valid_search=active and not self.busy and bool(self.search_results) and self.search_revision==self.session.revision
         self.actions["search_previous"].setEnabled(valid_search)
