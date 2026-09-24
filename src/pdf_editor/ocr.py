@@ -1,6 +1,8 @@
 import csv
 import io
 import math
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,12 +66,29 @@ def parse_tsv(tsv: str, minimum_confidence: float = 35.0) -> tuple[OcrWord, ...]
     return tuple(words)
 
 
+@contextmanager
+def _tessdata_path_for_engine(tessdata: Path):
+    """Windows 版 Tesseract 以 ANSI 開檔，路徑含中文時會找不到語言模型；
+    此時暫時切換工作目錄並改用相對路徑，結束後還原。"""
+    path = str(tessdata)
+    if path.isascii():
+        yield path
+        return
+    original = os.getcwd()
+    os.chdir(tessdata)
+    try:
+        yield "."
+    finally:
+        os.chdir(original)
+
+
 def recognize_image(image: Image.Image, tessdata: Path, language: str = OCR_LANGUAGE) -> str:
     """以封裝的 Tesseract 引擎辨識單張 RGB 圖像。"""
     try:
         import tesserocr
 
-        with tesserocr.PyTessBaseAPI(path=str(tessdata), lang=language) as api:
+        with (_tessdata_path_for_engine(tessdata) as path,
+                tesserocr.PyTessBaseAPI(path=path, lang=language) as api):
             api.SetImage(image)
             api.Recognize()
             tsv = api.GetTSVText(0)

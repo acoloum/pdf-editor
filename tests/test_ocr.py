@@ -2,10 +2,11 @@ import io
 import shutil
 import sys
 import types
+from pathlib import Path
 
 import pymupdf
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 import pdf_editor.ocr as ocr
 from pdf_editor.engine import fonts
@@ -294,3 +295,54 @@ def test_recognize_image_adds_columns_to_headerless_tesseract_tsv(monkeypatch, t
     result = recognize_image(image, tmp_path)
 
     assert parse_tsv(result) == (OcrWord("辨識文字", 90, (10, 20, 30, 40)),)
+
+
+def test_recognize_image_passes_ascii_path_when_tessdata_folder_has_chinese_name(
+        monkeypatch, tmp_path):
+    """Windows 版 Tesseract 讀不到含中文的路徑，需改以相對路徑載入並還原工作目錄。"""
+    tessdata = tmp_path / "墨頁PDF" / "tessdata"
+    tessdata.mkdir(parents=True)
+    seen = {}
+
+    class Api:
+        def __init__(self, path, lang):
+            seen["path"] = path
+            seen["cwd"] = Path.cwd()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def SetImage(self, image):
+            pass
+
+        def Recognize(self):
+            return None
+
+        def GetTSVText(self, page_number):
+            return make_tsv(("辨識文字", 90, (10, 20, 30, 40)))
+
+    monkeypatch.setitem(sys.modules, "tesserocr", types.SimpleNamespace(PyTessBaseAPI=Api))
+    original_cwd = Path.cwd()
+
+    recognize_image(Image.new("RGB", (50, 50), "white"), tessdata)
+
+    assert seen["path"].isascii()
+    assert (seen["cwd"] / seen["path"]).resolve() == tessdata.resolve()
+    assert Path.cwd() == original_cwd
+
+
+def test_recognize_image_runs_real_tesseract_from_chinese_named_folder(tmp_path):
+    """以實際 Tesseract 驗證安裝在中文資料夾時 OCR 仍可啟動。"""
+    pytest.importorskip("tesserocr")
+    source = Path(__file__).resolve().parents[1] / "resources" / "tesseract" / "tessdata"
+    tessdata = tmp_path / "墨頁PDF" / "tessdata"
+    shutil.copytree(source, tessdata)
+    image = Image.new("RGB", (400, 100), "white")
+    ImageDraw.Draw(image).text((10, 40), "Hello 123", fill="black")
+
+    words = parse_tsv(recognize_image(image, tessdata), minimum_confidence=0)
+
+    assert any("123" in word.text for word in words)
