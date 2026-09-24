@@ -2,7 +2,7 @@
 [Setup]
 AppId={{8A941655-2B51-46FD-986C-C4BDA0A3D0F8}
 AppName={#AppName}
-AppVersion=0.19.0
+AppVersion=0.20.0
 DefaultDirName={localappdata}\Programs\LocalPDFEditor
 DefaultGroupName={#AppName}
 PrivilegesRequired=lowest
