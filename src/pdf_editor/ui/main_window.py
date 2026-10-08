@@ -407,7 +407,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.canvas.layer_selected.connect(self.select_layer)
         self.canvas.layer_moved.connect(self.move_layer)
         self.canvas.image_clicked.connect(self.edit_image_at)
-        self.canvas.background_clicked.connect(self.discard_pending_conversion)
+        self.canvas.background_clicked.connect(self.click_background)
         self.canvas.mouse_released.connect(self.render_after_release)
         self.canvas.crop_requested.connect(self.apply_direct_crop)
         self.canvas.crop_cancelled.connect(self.cancel_direct_crop)
@@ -562,6 +562,11 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.actions["add_text"].setChecked(False)
         if crop:
             self.cancel_direct_crop()
+
+    def click_background(self):
+        """點頁面空白處：圖層的選取框消失，Ctrl+C 不再複製圖片；並撤銷未改動的圖片轉換。"""
+        self.last_selection=None
+        self.discard_pending_conversion()
 
     def clear_selection_state(self,disable_panel=False):
         """清除目前選取的文字、註解與新增位置。"""
@@ -942,6 +947,8 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             return
         # 稍後會渲染新頁面，不必先重繪即將離開的頁面。
         self.discard_pending_conversion(render=False)
+        # 換頁後原本選取的圖層不在畫面上，Ctrl+C 不再複製它。
+        self.last_selection=None
         self.page=page
         if self.thumbs.currentRow()!=page:
             self.thumbs.blockSignals(True)

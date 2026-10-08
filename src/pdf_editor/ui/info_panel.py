@@ -87,7 +87,7 @@ class DocumentInfoPanel(QWidget):
             "・點選頁面文字即可直接修改\n"
             "・拖曳圖章本體移動，拖曳四角等比例縮放\n"
             "・Ctrl + 滾輪縮放，捲到頁尾自動翻頁\n"
-            "・右鍵可複製文字與使用頁面操作")
+            "・右鍵可複製文字、複製貼上圖片與使用頁面操作")
         tips.setObjectName("hint")
         tips.setWordWrap(True)
         layout.addSpacing(12)

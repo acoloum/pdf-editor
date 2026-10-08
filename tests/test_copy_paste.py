@@ -1,6 +1,7 @@
 """圖片複製與貼上：剪貼簿格式、貼上規則與 Ctrl+C／Ctrl+V。"""
 
 import io
+import sys
 from dataclasses import replace
 
 import pymupdf
@@ -550,5 +551,114 @@ def test_ctrl_v_on_read_only_document_explains_why(qtbot, multi_page_path):
 
         assert window.session.overlays == ()
         assert window.statusBar().currentMessage() == "目前無法貼上圖片。"
+    finally:
+        _close(window)
+
+
+@pytest.fixture
+def transparent_stamp(tmp_path):
+    path = tmp_path / "透明章.png"
+    Image.new("RGBA", (200, 100), (0, 0, 0, 0)).save(path)
+    return path
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="只有 Windows 有原生 PNG 剪貼簿格式")
+def test_copy_layer_registers_native_png_clipboard_format(qtbot, multi_page_path, red_stamp):
+    import ctypes
+
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.import_layer(red_stamp, False)
+
+        window.copy_selection()
+
+        user32 = ctypes.windll.user32
+        user32.RegisterClipboardFormatW.restype = ctypes.c_uint
+        png_format = user32.RegisterClipboardFormatW("PNG")
+        assert png_format and user32.IsClipboardFormatAvailable(png_format)
+    finally:
+        _close(window)
+
+
+def test_copy_layer_image_data_has_white_instead_of_transparent_background(
+        qtbot, multi_page_path, transparent_stamp):
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.import_layer(transparent_stamp, False)
+
+        window.copy_selection()
+
+        # 只讀 CF_DIB 的程式看不到透明度；透明處要合成為白色，否則會變黑。
+        data = QApplication.clipboard().mimeData().imageData()
+        image = data.toImage() if hasattr(data, "toImage") else QImage(data)
+        color = image.pixelColor(image.width() // 2, image.height() // 2)
+        assert (color.red(), color.green(), color.blue(), color.alpha()) == (255, 255, 255, 255)
+    finally:
+        _close(window)
+
+
+def test_copy_layer_reports_busy_clipboard(qtbot, multi_page_path, red_stamp, monkeypatch):
+    import pdf_editor.ui.stamp_actions as stamp_actions
+    from PySide6.QtCore import QMimeData
+
+    class BusyClipboard:
+        """模擬被其他程式占用：寫入無效，讀回的內容沒有墨頁格式。"""
+        writes = 0
+
+        def setMimeData(self, _mime):
+            BusyClipboard.writes += 1
+
+        def mimeData(self):
+            return QMimeData()
+
+    class FakeApplication:
+        @staticmethod
+        def clipboard():
+            return BusyClipboard()
+
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.import_layer(red_stamp, False)
+        monkeypatch.setattr(stamp_actions, "QApplication", FakeApplication)
+
+        window.copy_selection()
+
+        assert BusyClipboard.writes == 2
+        assert window.statusBar().currentMessage() == "剪貼簿暫時被其他程式占用，請再按一次 Ctrl+C。"
+    finally:
+        _close(window)
+
+
+def test_blank_click_or_page_change_stops_ctrl_c_copying_layer(qtbot, multi_page_path, red_stamp):
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.import_layer(red_stamp, False)
+        QApplication.clipboard().setText("原本的文字")
+
+        window.canvas.background_clicked.emit()
+        window.copy_selection()
+        assert not QApplication.clipboard().mimeData().hasFormat(MIME_TYPE)
+
+        window.select_layer(window.session.overlays[-1].id)
+        window.goto_page(1)
+        window.copy_selection()
+        assert not QApplication.clipboard().mimeData().hasFormat(MIME_TYPE)
+    finally:
+        _close(window)
+
+
+def test_paste_cancels_text_insertion_mode(qtbot, multi_page_path, red_stamp):
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.import_layer(red_stamp, False)
+        window.copy_selection()
+        window.actions["add_text"].trigger()
+        assert window.actions["add_text"].isChecked() and window.canvas._text_insertion
+
+        window.paste_layer_at((150, 100))
+
+        assert len(window.session.overlays) == 2
+        assert not window.actions["add_text"].isChecked()
+        assert not window.canvas._text_insertion
     finally:
         _close(window)

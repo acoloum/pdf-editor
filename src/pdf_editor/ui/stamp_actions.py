@@ -1,7 +1,7 @@
 """圖章與簽名：匯入、收藏、點選或轉換既有圖片、多頁連續蓋章與圖層調整。"""
 import pymupdf
-from PySide6.QtCore import QBuffer,QIODevice,QMimeData
-from PySide6.QtGui import QCursor,QImage,QPixmap
+from PySide6.QtCore import QBuffer,QIODevice,QMimeData,Qt,QThread
+from PySide6.QtGui import QCursor,QImage,QPainter,QPixmap
 from PySide6.QtWidgets import QApplication,QFileDialog
 from dataclasses import replace
 from pathlib import Path
@@ -22,6 +22,8 @@ import uuid
 
 # 剪貼簿圖片的像素上限，與匯入 PNG 的限制相同。
 _MAX_PASTE_PIXELS=25_000_000
+# Qt 對應到 Windows 原生剪貼簿格式「PNG」的 MIME 名稱。
+WINDOWS_PNG_MIME='application/x-qt-windows-mime;value="PNG"'
 
 
 class StampActionsMixin:
@@ -335,12 +337,36 @@ class StampActionsMixin:
         except Exception:
             self.statusBar().showMessage("無法複製圖片，圖檔可能已被移除。")
             return
+        clipboard=QApplication.clipboard()
+        for attempt in range(2):
+            if attempt:
+                # 剪貼簿可能被其他程式暫時占用而寫入失敗，稍候再試一次。
+                QThread.msleep(100)
+            # 剪貼簿會接管 QMimeData，每次寫入都要建立新的物件。
+            clipboard.setMimeData(self.layer_mime(data,png))
+            current=clipboard.mimeData()
+            if current is not None and current.hasFormat(MIME_TYPE):
+                self.statusBar().showMessage("已複製圖片；按 Ctrl+V 貼在滑鼠位置，也可以貼到其他程式。")
+                return
+        self.statusBar().showMessage("剪貼簿暫時被其他程式占用，請再按一次 Ctrl+C。")
+
+    @staticmethod
+    def layer_mime(data,png):
+        """組合剪貼簿內容：墨頁專用格式、保留透明度的 PNG，以及合成白底的點陣圖。"""
         mime=QMimeData()
         mime.setData(MIME_TYPE,data)
+        # image/png 供 Qt 程式讀取；Windows 原生的「PNG」格式讓 Word、瀏覽器、LINE 保留透明度。
         mime.setData("image/png",png)
-        mime.setImageData(QImage.fromData(png,"PNG"))
-        QApplication.clipboard().setMimeData(mime)
-        self.statusBar().showMessage("已複製圖片；按 Ctrl+V 貼在滑鼠位置，也可以貼到其他程式。")
+        mime.setData(WINDOWS_PNG_MIME,png)
+        # 點陣圖（CF_DIB）沒有透明度，只讀這種格式的程式會把透明處顯示成黑色，先合成到白底上。
+        source=QImage.fromData(png,"PNG")
+        flat=QImage(source.size(),QImage.Format.Format_RGB32)
+        flat.fill(Qt.GlobalColor.white)
+        painter=QPainter(flat)
+        painter.drawImage(0,0,source)
+        painter.end()
+        mime.setImageData(flat)
+        return mime
 
     def clipboard_layer(self):
         """讀取剪貼簿：優先墨頁專用格式，其次一般圖片；沒有圖片時回傳 None。
@@ -426,6 +452,8 @@ class StampActionsMixin:
             self.statusBar().showMessage("無法貼上圖片："+str(exc))
             return
         try:
+            # 與其他編輯相同，先結束新增文字、註解或裁切等進行中的模式。
+            self.cancel_editing_modes()
             self.session.set_overlays(self.session.overlays+(layer,))
             self.select_layer(layer.id)
             self.refresh_actions()
