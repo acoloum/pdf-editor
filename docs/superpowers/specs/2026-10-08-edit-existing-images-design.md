@@ -27,7 +27,7 @@
 
 ### 可編輯圖片的快速清單
 
-新增 `find_editable_image_rects(pdf) -> dict[int, tuple[EditableImage, ...]]`，依頁碼回傳通過快速檢查的圖片（xref 與矩形）。快速檢查包括：整份文件只用一次、不是整頁掃描、軸向擺放未旋轉或鏡射。這一步不做渲染比對，速度很快。主視窗在每個文件版本（`document_key`）於背景計算一次並快取，換頁時直接取用。
+新增 `editable_images_on_page(document, page_number) -> tuple[EditableImage, ...]`，回傳該頁通過快速檢查的圖片（xref、頁碼與矩形）。快速檢查包括：在本頁只畫一次、其他頁面的資源沒有引用同一張圖、不是整頁掃描、軸向擺放未旋轉或鏡射。這一步不做渲染比對，速度很快。`render_page` 渲染時一併計算，結果放在頁面資料的 `images` 欄位；計算失敗時視為空清單。這樣不必另外開背景工作，也不需要額外快取。
 
 ### 游標回饋
 
@@ -37,7 +37,7 @@
 
 點擊時依下列順序判斷：圖層 → 註解選取模式等既有模式 → 文字 → 可編輯圖片 → 平移。也就是說，同一點同時有文字和圖片時，以文字為優先。
 
-點到可編輯圖片時，畫布發出 `image_clicked(xref)`。主視窗在背景執行 `convert_image_at(pdf, xref, asset_root)`：只針對這個 xref 建立候選，並跑完整的安全檢查（含外觀比對），再用與 `convert_legacy_image` 相同的交易流程抽離。狀態列顯示「正在準備編輯圖片…」。轉換期間畫布不接受對該圖片的拖曳。
+點到可編輯圖片時，畫布發出 `image_clicked(EditableImage)`。主視窗在背景執行 `convert_image_at(pdf, image, asset_root)`：先確認這張圖目前仍只在同一頁、同一位置出現一次（避免頁面資料過時而改到別張圖），再只針對它建立候選，並跑完整的安全檢查（含外觀比對），再用與 `convert_legacy_image` 相同的交易流程抽離。狀態列顯示「正在準備編輯圖片…」。轉換期間畫布不接受對該圖片的拖曳。
 
 成功時套用新狀態、選取新圖層並顯示四角控制點，同時記錄「待確認轉換」：圖層 ID 與轉換後的 `revision`。失敗時不改動文件，並在狀態列用繁體中文說明原因，例如「這張圖片在文件中重複使用，無法單獨編輯」或「這張圖片受其他內容影響，無法安全編輯」。
 
@@ -62,7 +62,7 @@
 
 ## 元件邊界
 
-- `legacy_overlay_conversion.py`：放寬外觀比對；新增 `find_editable_image_rects` 與 `convert_image_at`，與既有清單流程共用檢查及抽離邏輯。
+- `legacy_overlay_conversion.py`：放寬外觀比對；新增 `editable_images_on_page` 與 `convert_image_at`，與既有清單流程共用檢查及抽離邏輯。
 - `model.py`：`Overlay.remove_white`、`EditableImage`。
 - `engine/overlay.py`：去除白底的影像處理。
 - `persistent_overlays.py`：選填欄位 `remove_white` 的寫入與驗證。
@@ -70,18 +70,19 @@
 - `ui/canvas.py`：可編輯圖片矩形、游標回饋、`image_clicked` 訊號。
 - `ui/stamp_actions.py`：點選轉換、待確認轉換、自動還原、去除白底切換。
 - `ui/overlay_panel.py`：去除白底勾選框。
-- `ui/main_window.py`：選單改名、可編輯圖片清單的背景計算與快取，以及在換頁、存檔、關閉、復原時呼叫自動還原。
+- `engine/render.py`：頁面資料加入 `images`。
+- `ui/main_window.py`：選單改名，以及在換頁、存檔、關閉、復原時呼叫自動還原。
 
 ## 錯誤處理
 
-所有掃描與轉換都在背景工作中以記憶體副本進行，成功才提交工作階段；任何失敗都不改動文件，並以繁體中文說明原因。快速清單計算失敗時，視為該頁沒有可編輯圖片，不顯示錯誤，清單入口仍可使用。
+所有掃描與轉換都在背景工作中以記憶體副本進行，成功才提交工作階段；任何失敗都不改動文件，並以繁體中文說明原因。快速檢查失敗時，視為該頁沒有可編輯圖片，不顯示錯誤，清單入口仍可使用。
 
 ## 測試與驗收
 
 自動測試：
 
 - 外觀比對：模擬反鋸齒的小量差異可以通過；圖片被其他內容覆蓋、受裁切路徑影響時仍然被拒絕；差距大於 24 或超過比例都會被拒絕。
-- `find_editable_image_rects`：重複使用、整頁掃描、旋轉的圖片不會列出。
+- `editable_images_on_page`：重複使用、整頁掃描、旋轉的圖片不會列出。
 - `convert_image_at`：成功時產生圖層且外觀一致；條件不符時拋出含原因的 `EditorError`，文件不變。
 - `discard_last`：移除最後一筆、沒有重做紀錄、`dirty` 回到 False。
 - UI：點圖片後轉換並選取；沒改動就點空白處，會自動還原且文件未修改；拖曳後再取消選取則保留；換頁及存檔前會自動還原；同一點有文字時選到文字。
