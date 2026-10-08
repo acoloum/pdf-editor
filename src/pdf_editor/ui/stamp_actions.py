@@ -119,7 +119,7 @@ class StampActionsMixin:
         pdf = self.session.pdf
         self.busy = True
         self.refresh_actions()
-        self.statusBar().showMessage("正在掃描可安全轉換的既有圖章…")
+        self.statusBar().showMessage("正在掃描可單獨編輯的圖片…")
 
         def done(candidates):
             self._show_legacy_stamp_candidates(candidates, pdf, token, revision)
@@ -136,18 +136,18 @@ class StampActionsMixin:
         if not candidates:
             self._restore_after_legacy_stamp_job()
             self.statusBar().showMessage(
-                "沒有可安全轉換的既有圖章；Logo、整頁掃描與重複影像不會列出。"
+                "沒有可單獨編輯的圖片；Logo、整頁掃描與重複使用的影像不會列出。"
             )
             return
 
         dialog = LegacyStampDialog(candidates, self)
         if not dialog.exec() or dialog.selected_candidate is None:
             self._restore_after_legacy_stamp_job()
-            self.statusBar().showMessage("已取消轉換既有圖章。")
+            self.statusBar().showMessage("已取消編輯既有圖片。")
             return
 
         candidate = dialog.selected_candidate
-        self.statusBar().showMessage("正在轉換選取的既有圖章…")
+        self.statusBar().showMessage("正在轉換選取的圖片…")
 
         def done(result):
             self._apply_converted_legacy_stamp(result, token, revision)
@@ -174,7 +174,7 @@ class StampActionsMixin:
             self.page_data = None
             self.select_layer(layer.id)
             self.refresh_actions()
-            self.request_render("已轉換為可編輯圖章。")
+            self.request_render("已轉為可編輯圖片，可拖曳移動或縮放。")
             self.queue_thumbnails((layer.page,))
         except Exception as exc:
             self.error((getattr(exc, "code", "STAMP_CONVERSION"), str(exc), ()))

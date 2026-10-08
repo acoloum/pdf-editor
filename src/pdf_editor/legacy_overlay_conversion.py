@@ -44,10 +44,10 @@ def find_convertible_images(pdf: bytes) -> tuple[LegacyImageCandidate, ...]:
     except EditorError:
         raise
     except Exception as exc:
-        raise EditorError("STAMP_CONVERSION", "無法掃描文件中的既有圖章影像。") from exc
+        raise EditorError("STAMP_CONVERSION", "無法掃描文件中的圖片。") from exc
 
 
-_CANDIDATE_CHANGED = "圖章候選已變更，請重新掃描後再選取。"
+_CANDIDATE_CHANGED = "圖片已變更，請重新開啟清單後再選取。"
 _IMAGE_CHANGED = "圖片位置已變更，請再點一次。"
 _IMAGE_REUSED = "這張圖片在文件中重複使用，無法單獨編輯。"
 
@@ -66,9 +66,9 @@ def convert_legacy_image(pdf: bytes, candidate: LegacyImageCandidate, asset_root
     except EditorError as exc:
         if exc.code == "STAMP_CONVERSION":
             raise
-        raise EditorError("STAMP_CONVERSION", "既有圖章轉換失敗，文件未被變更。") from exc
+        raise EditorError("STAMP_CONVERSION", "圖片轉換失敗，文件未被變更。") from exc
     except Exception as exc:
-        raise EditorError("STAMP_CONVERSION", "既有圖章轉換失敗，文件未被變更。") from exc
+        raise EditorError("STAMP_CONVERSION", "圖片轉換失敗，文件未被變更。") from exc
 
 
 def convert_image_at(pdf: bytes, image: EditableImage, asset_root) -> tuple[bytes, Overlay]:
@@ -372,4 +372,4 @@ def _verify_pdf(base_pdf: bytes, candidate: LegacyImageCandidate) -> None:
             if (png, width, height) == (candidate.png, candidate.width, candidate.height):
                 raise ValueError("原影像仍存在")
     except Exception as exc:
-        raise EditorError("STAMP_CONVERSION", "無法驗證已抽離圖章的基底文件。") from exc
+        raise EditorError("STAMP_CONVERSION", "無法驗證已抽離圖片的基底文件。") from exc

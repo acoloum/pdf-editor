@@ -2817,7 +2817,7 @@ def test_window_converts_selected_legacy_stamp_into_layer(
         assert window.session.dirty
         assert calls == [(candidate, window.asset_root)]
         assert not window.busy
-        assert window.statusBar().currentMessage() == "已轉換為可編輯圖章。"
+        assert window.statusBar().currentMessage() == "已轉為可編輯圖片，可拖曳移動或縮放。"
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
@@ -2867,7 +2867,7 @@ def test_window_reports_when_no_legacy_stamp_candidate_exists(
         assert window.session.overlays == ()
         assert not window.busy
         assert window.actions["convert_stamp"].isEnabled()
-        assert "沒有可安全轉換" in window.statusBar().currentMessage()
+        assert "沒有可單獨編輯的圖片" in window.statusBar().currentMessage()
     finally:
         window.close()
 

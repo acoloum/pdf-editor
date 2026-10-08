@@ -163,7 +163,7 @@ def test_same_image_drawn_twice_at_same_rect_is_not_a_convertible_stamp():
 def test_stale_candidate_cannot_change_pdf(tmp_path):
     stale_candidate = find_convertible_images(_pdf_with_unique_stamp())[0]
 
-    with pytest.raises(EditorError, match="候選已變更") as error:
+    with pytest.raises(EditorError, match="圖片已變更") as error:
         convert_legacy_image(_pdf_with_reused_image(), stale_candidate, tmp_path / "assets")
 
     assert error.value.code == "STAMP_CONVERSION"
