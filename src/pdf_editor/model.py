@@ -69,6 +69,13 @@ class LegacyImageCandidate:
     height: int
 
 @dataclass(frozen=True)
+class EditableImage:
+    """頁面上可直接點選編輯的既有圖片；實際轉換前仍會再完整檢查。"""
+    xref: int
+    page: int
+    rect: Rect
+
+@dataclass(frozen=True)
 class AnnotationInfo:
     xref: int
     kind: str

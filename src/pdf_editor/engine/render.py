@@ -2,6 +2,7 @@ from pathlib import Path
 import pymupdf
 from pdf_editor.engine.text import extract_runs
 from pdf_editor.annotations import list_annotations
+from pdf_editor.legacy_overlay_conversion import editable_images_on_page
 
 
 def open_document(source):
@@ -28,7 +29,15 @@ def render_page(pdf, page, scale, pixel_ratio=1.0):
             "display_size":(pix.width/pixel_ratio,pix.height/pixel_ratio),
             "rotation":p.rotation, "bounds": (0,0,p.cropbox.width,p.cropbox.height),
             "runs":extract_runs(content,page),
-            "annotations":list_annotations(content,page), "page":page}
+            "annotations":list_annotations(content,page), "page":page,
+            "images":_editable_images(doc,page)}
+
+def _editable_images(document, page):
+    """可直接點選編輯的圖片；分析失敗時不影響頁面顯示。"""
+    try:
+        return editable_images_on_page(document, page)
+    except Exception:
+        return ()
 
 def thumbnail(pdf, page):
     with open_document(pdf) as doc:

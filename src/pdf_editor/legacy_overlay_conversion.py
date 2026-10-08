@@ -8,7 +8,7 @@ from PIL import Image, ImageChops
 
 from pdf_editor.assets import AssetStore
 from pdf_editor.errors import EditorError
-from pdf_editor.model import LegacyImageCandidate, Overlay
+from pdf_editor.model import EditableImage, LegacyImageCandidate, Overlay
 
 
 # 外觀比對容許的誤差：一般取樣值差距須 ≤ 2；刪除再放回影像時，
@@ -74,6 +74,29 @@ def convert_legacy_image(pdf: bytes, candidate: LegacyImageCandidate, asset_root
         raise EditorError("STAMP_CONVERSION", "既有圖章轉換失敗，文件未被變更。") from exc
     except Exception as exc:
         raise EditorError("STAMP_CONVERSION", "既有圖章轉換失敗，文件未被變更。") from exc
+
+
+def editable_images_on_page(document, page_number: int) -> tuple[EditableImage, ...]:
+    """快速列出本頁可直接點選編輯的圖片；不做渲染比對，轉換時會再完整把關。"""
+    page = document[page_number]
+    xrefs = {image[0] for image in page.get_images(full=True) if image[0] > 0}
+    if not xrefs:
+        return ()
+    # 其他頁面的資源引用同一張圖，就當作重複使用，不提供直接點選。
+    elsewhere = {
+        image[0]
+        for number in range(document.page_count) if number != page_number
+        for image in document.get_page_images(number, full=True)
+    }
+    found = []
+    for xref in sorted(xrefs - elsewhere):
+        rects = page.get_image_rects(xref)
+        if len(rects) != 1:
+            continue
+        rect = _rect_tuple(rects[0])
+        if _is_not_page_scan(page, rect) and _has_supported_placement(page, xref, rect):
+            found.append(EditableImage(xref, page_number, rect))
+    return tuple(found)
 
 
 def _image_uses(document) -> dict[int, list[tuple[int, tuple[float, float, float, float]]]]:

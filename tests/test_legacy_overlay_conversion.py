@@ -5,12 +5,15 @@ import pytest
 from PIL import Image
 
 from pdf_editor.engine.overlay import flatten_overlays
+from pdf_editor.engine.render import render_page
 from pdf_editor.errors import EditorError
 from pdf_editor.legacy_overlay_conversion import (
     _samples_match,
     convert_legacy_image,
+    editable_images_on_page,
     find_convertible_images,
 )
+from pdf_editor.model import EditableImage
 
 
 def _png(size, color):
@@ -227,3 +230,31 @@ def test_samples_match_rejects_widespread_small_differences():
 def test_samples_match_rejects_mismatched_or_empty_samples():
     assert not _samples_match(0, 0, 3, b"", b"")
     assert not _samples_match(2, 2, 3, _white_samples(2, 2), _white_samples(2, 1))
+
+
+def _editable_images(pdf, page=0):
+    with pymupdf.open(stream=pdf, filetype="pdf") as document:
+        return editable_images_on_page(document, page)
+
+
+def test_editable_images_on_page_lists_single_use_stamp_only():
+    images = _editable_images(_pdf_with_unique_stamp_and_reused_logo())
+
+    assert [(item.page, item.rect) for item in images] == [(0, (210, 260, 270, 300))]
+    assert all(isinstance(item, EditableImage) for item in images)
+
+
+@pytest.mark.parametrize("pdf_factory", [
+    _single_scanned_page_pdf,
+    _pdf_with_rotated_asymmetric_stamp,
+    _pdf_with_image_drawn_twice_at_same_rect,
+    _pdf_with_reused_image,
+])
+def test_editable_images_on_page_skips_unsafe_images(pdf_factory):
+    assert _editable_images(pdf_factory()) == ()
+
+
+def test_render_page_includes_editable_images():
+    images = render_page(_pdf_with_unique_stamp(), 0, 1.0)["images"]
+
+    assert [(item.page, item.rect) for item in images] == [(0, (210, 260, 270, 300))]
