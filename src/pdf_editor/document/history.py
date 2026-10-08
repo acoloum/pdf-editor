@@ -60,7 +60,7 @@ class History:
 
     def push(self, pdf, overlays):
         for item in self.items[self.index + 1:]:
-            item[0].unlink(missing_ok=True)
+            self._remove_file(item[0])
         self.items = self.items[:self.index + 1]
         path = self.root / f"{self.serial}.pdf"
         path.write_bytes(pdf)

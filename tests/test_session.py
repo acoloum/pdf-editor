@@ -261,6 +261,23 @@ def test_trim_survives_file_in_use(source_path, monkeypatch):
         assert len(session.history.items) == 2
 
 
+def test_push_survives_locked_redo_file(source_path):
+    with DocumentSession.open(source_path) as session:
+        original = session.pdf
+        session.apply_pdf(original + b"\n%redo")
+        redo_path = session.pdf_path
+        session.undo()
+        reader = pymupdf.open(str(redo_path))
+        try:
+            session.apply_pdf(original + b"\n%new")
+        finally:
+            reader.close()
+
+        assert session.pdf.endswith(b"%new")
+        assert not session.can_redo
+        assert len(session.history.items) == 2
+
+
 def test_can_discard_reflects_position_and_available_steps(source_path):
     with DocumentSession.open(source_path) as session:
         assert not session.can_discard()
