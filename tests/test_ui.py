@@ -22,7 +22,7 @@ from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.engine.fonts import default_font
 from pdf_editor.errors import EditorError
 from pdf_editor.annotations import mark_text
-from pdf_editor.model import LegacyImageCandidate, Overlay
+from pdf_editor.model import DocumentAccess, LegacyImageCandidate, Overlay
 from pdf_editor.ocr import OcrResult
 from pdf_editor.comparison import PageComparison, compare_pages
 
@@ -3046,3 +3046,65 @@ def test_signature_png_is_high_resolution_and_cropped(qtbot):
         assert image.width >= 100 * factor
         assert image.width < 600 * factor
         assert image.height < 220 * factor
+
+
+def test_read_only_document_lists_no_clickable_images(qtbot, tmp_path, monkeypatch):
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        window.resize(1000, 800)
+        window.show()
+        qtbot.waitExposed(window)
+        window.session.access = DocumentAccess(False, False, "此文件僅供閱讀")
+        window.request_render()
+        clicked = QSignalSpy(window.canvas.image_clicked)
+
+        assert window.page_data["images"] == ()
+        _hover(window.canvas, _view_point(window.canvas, 240, 280))
+        assert window.canvas.image_hover is None
+        qtbot.mouseClick(window.canvas.viewport(), Qt.MouseButton.LeftButton,
+            pos=_view_point(window.canvas, 240, 280))
+        assert clicked.count() == 0
+
+        # 唯讀判斷不能污染快取：回到可編輯後仍要有可點選的圖片。
+        window.session.access = DocumentAccess(True, True, None)
+        window.request_render()
+        assert window.page_data["images"]
+    finally:
+        _close_without_prompt(window)
+
+
+def test_list_entry_discards_unchanged_click_conversion(qtbot, tmp_path, monkeypatch):
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_first_image(window)
+        assert len(window.session.overlays) == 1
+        monkeypatch.setattr(stamp_actions, "find_convertible_images", lambda pdf: ())
+
+        window.convert_legacy_stamp()
+
+        assert window.session.overlays == ()
+        assert not window.session.dirty
+        assert window.pending_conversion is None
+    finally:
+        _close_without_prompt(window)
+
+
+def test_clicking_image_is_refused_while_comparison_is_open(
+        qtbot, tmp_path, monkeypatch, pdf_bytes):
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        image = window.page_data["images"][0]
+        window.open_comparison(pdf_bytes)
+        dialog = window.comparison_dialog
+        revision = window.session.revision
+
+        window.canvas.image_clicked.emit(image)
+
+        assert window.comparison_dialog is dialog
+        assert window.session.revision == revision
+        assert window.session.overlays == ()
+        assert not window.busy
+        assert window.statusBar().currentMessage() == "頁面比較開啟中，無法編輯圖片。"
+    finally:
+        window.close_comparison()
+        _close_without_prompt(window)

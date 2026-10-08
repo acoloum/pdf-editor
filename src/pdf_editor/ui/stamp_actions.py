@@ -27,6 +27,10 @@ class StampActionsMixin:
         """直接點選頁面上的圖片：在背景轉成可拖曳、縮放的圖層。"""
         if not self.session or self.busy or not self.session.access.can_edit:
             return
+        if self.comparison_dialog is not None:
+            # 轉換會改變文件版本，使開啟中的頁面比較失效而被關閉；比較期間不允許編輯圖片。
+            self.statusBar().showMessage("頁面比較開啟中，無法編輯圖片。")
+            return
         token=self.token
         revision=self.session.revision
         self.busy=True
@@ -108,6 +112,8 @@ class StampActionsMixin:
         """掃描文件，讓使用者明確選取後將既有圖章抽離為工作層。"""
         if not self.session or self.busy or not self.session.access.can_edit:
             return
+        # 先撤銷尚未改動的點圖片轉換，避免掃描清單時殘留多餘的轉換結果。
+        self.discard_pending_conversion()
         token = self.token
         revision = self.session.revision
         pdf = self.session.pdf

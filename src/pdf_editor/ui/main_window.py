@@ -1221,11 +1221,15 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         data=str(self.session.pdf_path)
         layers=self.session.overlays
         image_key=(self.session.document_key,self.page)
-        cached_images=self._image_cache.get(image_key)
+        # 唯讀文件不能編輯圖片：不分析、不快取，也不提供可點選的圖片（避免懸停提示與誤導的點擊）。
+        can_edit=self.session.access.can_edit
+        cached_images=self._image_cache.get(image_key) if can_edit else ()
         def done(result):
             if self.closed or token!=self.token or serial!=self.render_serial:
                 return
-            if "images" in result:
+            if not can_edit:
+                result["images"]=()
+            elif "images" in result:
                 self._image_cache={key:value for key,value in self._image_cache.items()
                     if key[0]==image_key[0]}
                 self._image_cache[image_key]=result["images"]
