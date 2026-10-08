@@ -128,7 +128,7 @@ from PIL import Image, ImageChops
 # 外觀比對容許的誤差：一般取樣值差距須 ≤ 2；刪除再放回影像時，
 # 附近線條的反鋸齒可能出現零星差異，因此允許極少量取樣值稍大。
 _SAMPLE_TOLERANCE = 2
-_MAX_SAMPLE_DIFFERENCE = 24
+_MAX_SAMPLE_DIFFERENCE = 12
 _MAX_OUTLIER_RATIO = 0.0005
 ```
 
