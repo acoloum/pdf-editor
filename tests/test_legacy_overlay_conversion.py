@@ -7,6 +7,7 @@ from PIL import Image
 from pdf_editor.engine.overlay import flatten_overlays
 from pdf_editor.errors import EditorError
 from pdf_editor.legacy_overlay_conversion import (
+    _samples_match,
     convert_legacy_image,
     find_convertible_images,
 )
@@ -190,3 +191,39 @@ def test_rotated_page_image_covered_by_vector_is_not_offered_for_conversion(rota
     assert find_convertible_images(
         _rotated_pdf_with_vector_covering_stamp(rotation)
     ) == ()
+
+
+def _white_samples(width, height):
+    return bytes([255]) * (width * height * 3)
+
+
+def test_samples_match_accepts_sparse_antialias_noise():
+    # 實際材質證明：刪除再放回圖章後，表格線附近有 45 個取樣值差 3～4。
+    first = _white_samples(1000, 1000)
+    second = bytearray(first)
+    for index in range(0, 45 * 997, 997):
+        second[index] = 251
+
+    assert _samples_match(1000, 1000, 3, first, bytes(second))
+
+
+def test_samples_match_rejects_any_large_difference():
+    first = _white_samples(1000, 1000)
+    second = bytearray(first)
+    second[12345] = 225
+
+    assert not _samples_match(1000, 1000, 3, first, bytes(second))
+
+
+def test_samples_match_rejects_widespread_small_differences():
+    first = _white_samples(1000, 1000)
+    second = bytearray(first)
+    for index in range(0, 2000 * 997, 997):
+        second[index] = 251
+
+    assert not _samples_match(1000, 1000, 3, first, bytes(second))
+
+
+def test_samples_match_rejects_mismatched_or_empty_samples():
+    assert not _samples_match(0, 0, 3, b"", b"")
+    assert not _samples_match(2, 2, 3, _white_samples(2, 2), _white_samples(2, 1))

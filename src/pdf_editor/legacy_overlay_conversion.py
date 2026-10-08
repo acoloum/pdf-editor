@@ -4,11 +4,18 @@ import io
 import uuid
 
 import pymupdf
-from PIL import Image
+from PIL import Image, ImageChops
 
 from pdf_editor.assets import AssetStore
 from pdf_editor.errors import EditorError
 from pdf_editor.model import LegacyImageCandidate, Overlay
+
+
+# 外觀比對容許的誤差：一般取樣值差距須 ≤ 2；刪除再放回影像時，
+# 附近線條的反鋸齒可能出現零星差異，因此允許極少量取樣值稍大。
+_SAMPLE_TOLERANCE = 2
+_MAX_SAMPLE_DIFFERENCE = 24
+_MAX_OUTLIER_RATIO = 0.0005
 
 
 def find_convertible_images(pdf: bytes) -> tuple[LegacyImageCandidate, ...]:
@@ -165,10 +172,28 @@ def _rendered_region_matches(
             samples.append((pixmap.width, pixmap.height, pixmap.n, pixmap.samples))
     if samples[0][:3] != samples[1][:3]:
         return False
-    if samples[0][0] <= 0 or samples[0][1] <= 0 or not samples[0][3]:
+    return _samples_match(*samples[0][:3], samples[0][3], samples[1][3])
+
+
+def _samples_match(width: int, height: int, n: int, first: bytes, second: bytes) -> bool:
+    """比對兩張渲染圖；容許零星反鋸齒差異，但拒絕任何明顯變化。"""
+    mode = {1: "L", 3: "RGB"}.get(n)
+    if mode is None or width <= 0 or height <= 0 or not first:
         return False
-    first, second = samples[0][3], samples[1][3]
-    return all(abs(a - b) <= 2 for a, b in zip(first, second))
+    if len(first) != width * height * n or len(second) != len(first):
+        return False
+    difference = ImageChops.difference(
+        Image.frombytes(mode, (width, height), bytes(first)),
+        Image.frombytes(mode, (width, height), bytes(second)),
+    )
+    histogram = difference.histogram()
+    outliers = 0
+    for band in range(n):
+        counts = histogram[band * 256:(band + 1) * 256]
+        if any(counts[_MAX_SAMPLE_DIFFERENCE + 1:]):
+            return False
+        outliers += sum(counts[_SAMPLE_TOLERANCE + 1:])
+    return outliers <= len(first) * _MAX_OUTLIER_RATIO
 
 
 def _verify_pdf(base_pdf: bytes, candidate: LegacyImageCandidate) -> None:
