@@ -382,9 +382,12 @@ class Canvas(QGraphicsView):
         self.runs=data["runs"]
         self.annotations=data.get("annotations",())
         self.editable_images=data.get("images",())
+        # scene().clear() 已移除舊外框；只有提示曾設定游標時才還原，避免蓋掉拖曳中的游標。
+        had_hover=self._hover_image is not None
         self.image_hover=None
         self._hover_image=None
-        self.viewport().unsetCursor()
+        if had_hover:
+            self.viewport().unsetCursor()
         pix=QPixmap()
         pix.loadFromData(data["png"])
         pix.setDevicePixelRatio(data.get("pixel_ratio",1.0))
@@ -440,6 +443,8 @@ class Canvas(QGraphicsView):
 
     def _image_hover_target(self,scene_pos):
         """只有在沒有圖層、文字或進行中模式時，才提示圖片可點選。"""
+        if not self.editable_images:
+            return None
         if (self._crop_mode or self._text_insertion or self._note_insertion
                 or self._annotation_selection or self._drag_run
                 or self.dragMode()!=QGraphicsView.DragMode.NoDrag):
@@ -450,28 +455,27 @@ class Canvas(QGraphicsView):
             return None
         return self._image_at(scene_pos)
 
-    def _update_image_hover(self,scene_pos):
-        image=self._image_hover_target(scene_pos)
-        if image==self._hover_image:
-            return
-        self.clear_image_hover()
-        if image is None:
-            return
-        r=transformed_rect(self.matrix,image.rect)
-        pen=QPen(QColor(COLORS["accent"]),2,Qt.PenStyle.DashLine)
-        pen.setCosmetic(True)
-        self.image_hover=self.scene().addRect(r[0],r[1],r[2]-r[0],r[3]-r[1],pen)
-        self.image_hover.setZValue(4)
-        self.image_hover.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        self._hover_image=image
+    def _show_image_hover(self,image):
+        if image!=self._hover_image:
+            self.clear_image_hover()
+            r=transformed_rect(self.matrix,image.rect)
+            pen=QPen(QColor(COLORS["accent"]),2,Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            self.image_hover=self.scene().addRect(r[0],r[1],r[2]-r[0],r[3]-r[1],pen)
+            self.image_hover.setZValue(4)
+            self.image_hover.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self._hover_image=image
+        # 每次移動都重設游標：從圖層移過來時，Qt 會把游標還原成圖層前的樣式。
         self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
 
     def clear_image_hover(self):
+        was_hovering=self._hover_image is not None
         if self.image_hover is not None:
             self.scene().removeItem(self.image_hover)
         self.image_hover=None
         self._hover_image=None
-        self.viewport().unsetCursor()
+        if was_hovering:
+            self.viewport().unsetCursor()
 
     def clear_text_selection(self):
         self.selected_run=None
@@ -939,11 +943,14 @@ class Canvas(QGraphicsView):
             image=self._image_at(scene_pos)
             if image and event.button()==Qt.MouseButton.LeftButton:
                 # 文字優先；沒點到文字才轉交圖片編輯。
+                # 注意：接收訊號的槽函式不可同步重建場景（畫面是非同步重繪）。
                 self.clear_image_hover()
                 self.image_clicked.emit(image)
                 event.accept()
                 return
-            self.background_clicked.emit()
+            if event.button()==Qt.MouseButton.LeftButton:
+                # 同上；右鍵（內容選單）與中鍵不算點空白處，不發訊號。
+                self.background_clicked.emit()
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         super().mousePressEvent(event)
 
@@ -1039,8 +1046,13 @@ class Canvas(QGraphicsView):
             self._show_highlight((r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy))
             event.accept()
             return
-        self._update_image_hover(self.mapToScene(event.position().toPoint()))
+        image=self._image_hover_target(self.mapToScene(event.position().toPoint()))
+        if image is None:
+            # 先清除提示，Qt 處理圖層游標時才不會存下圖片提示的游標當作原始游標。
+            self.clear_image_hover()
         super().mouseMoveEvent(event)
+        if image is not None:
+            self._show_image_hover(image)
 
     def mouseReleaseEvent(self,event):
         if self._crop_mode and self._crop_drag_handle:

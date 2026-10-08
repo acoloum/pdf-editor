@@ -244,6 +244,10 @@ class StampActionsMixin:
         if layer is None or layer.remove_white==checked:
             return
         self.move_layer(replace(layer,remove_white=checked))
+        # 驗證失敗時沒有寫入，勾選框要回到實際狀態。
+        current=next((o for o in self.session.overlays if o.id==layer.id),None)
+        if current:
+            self.overlay_panel.set_layer(current)
 
     def delete_layer(self):
         self.session.set_overlays(tuple(o for o in self.session.overlays if o.id!=self.layer_id))

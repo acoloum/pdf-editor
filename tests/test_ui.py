@@ -263,6 +263,42 @@ def test_canvas_hover_and_click_on_editable_image(qtbot):
     assert canvas.viewport().cursor().shape() != Qt.CursorShape.PointingHandCursor
 
 
+def test_canvas_hover_keeps_pointing_cursor_when_moving_from_layer_to_image(qtbot, tmp_path):
+    stamp = tmp_path / "章.png"
+    Image.new("RGBA", (100, 80), (210, 35, 45, 255)).save(stamp)
+    layer = Overlay("stamp", 0, str(stamp), (140, 260, 200, 300), 0)
+    canvas = Canvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(700, 600)
+    canvas.show()
+    canvas.display(render_page(_stamp_page_pdf(), 0, 1.0), (layer,), None)
+    qtbot.waitExposed(canvas)
+
+    _hover(canvas, _view_point(canvas, 170, 280))
+    assert canvas.image_hover is None
+    _hover(canvas, _view_point(canvas, 240, 280))
+
+    assert canvas.image_hover is not None
+    assert canvas.viewport().cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+
+def test_canvas_right_click_does_not_report_image_or_background(qtbot):
+    canvas = Canvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(700, 600)
+    canvas.show()
+    canvas.display(render_page(_stamp_page_pdf(), 0, 1.0))
+    qtbot.waitExposed(canvas)
+    images = QSignalSpy(canvas.image_clicked)
+    blank = QSignalSpy(canvas.background_clicked)
+
+    for point in (_view_point(canvas, 240, 280), _view_point(canvas, 450, 380)):
+        qtbot.mouseClick(canvas.viewport(), Qt.MouseButton.RightButton, pos=point)
+        qtbot.mouseClick(canvas.viewport(), Qt.MouseButton.MiddleButton, pos=point)
+
+    assert (images.count(), blank.count()) == (0, 0)
+
+
 def test_canvas_prefers_text_over_image_and_reports_background_click(qtbot, pdf_bytes):
     # 共用測試 PDF 的圖片實際範圍約 (101,40,329,120)（等比例置中），其上疊有文字。
     canvas = Canvas()

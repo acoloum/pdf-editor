@@ -1265,6 +1265,10 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.clear_selection_state()
         self.session.redo() if redo else self.session.undo()
         self.text_panel.setEnabled(False)
+        # 復原／重做可能改變目前選取圖層的設定，讓面板跟著更新。
+        layer=next((o for o in self.session.overlays if o.id==self.layer_id),None)
+        if layer:
+            self.overlay_panel.set_layer(layer)
         self.sync_page_navigation()
 
     def save_over_original(self):

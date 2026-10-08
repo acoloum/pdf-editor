@@ -168,6 +168,7 @@ def test_overlay_panel_toggles_remove_white_with_undo(qtbot, multi_page_path, wh
         assert next(o for o in window.session.overlays if o.id == layer_id).remove_white
         window.history_step(False)
         assert not next(o for o in window.session.overlays if o.id == layer_id).remove_white
+        assert not window.overlay_panel.remove_white.isChecked()
     finally:
         _close(window)
 
@@ -184,5 +185,27 @@ def test_stamp_to_pages_keeps_remove_white(qtbot, multi_page_path, white_stamp_p
 
         assert len(window.session.overlays) == 3
         assert all(item.remove_white for item in window.session.overlays)
+    finally:
+        _close(window)
+
+
+def test_remove_white_checkbox_resyncs_when_validation_fails(qtbot, multi_page_path, white_stamp_png, monkeypatch):
+    import pdf_editor.ui.stamp_actions as stamp_actions
+
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.import_layer(white_stamp_png, False)
+        qtbot.waitUntil(lambda: not window.busy, timeout=30000)
+        layer_id = window.layer_id
+        monkeypatch.setattr(window, "error", lambda error: None)
+
+        def fail(*args):
+            raise ValueError("驗證失敗")
+
+        monkeypatch.setattr(stamp_actions, "flatten_overlays", fail)
+        window.overlay_panel.remove_white.setChecked(True)
+
+        assert not next(o for o in window.session.overlays if o.id == layer_id).remove_white
+        assert not window.overlay_panel.remove_white.isChecked()
     finally:
         _close(window)
