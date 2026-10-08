@@ -275,3 +275,77 @@ def test_ctrl_v_in_text_inputs_pastes_text_not_image(qtbot, source_path):
         assert len(window.session.overlays) == 1
     finally:
         _close(window)
+
+
+def _menu_actions(menu):
+    return {action.text(): action for action in menu.actions()}
+
+
+def test_context_menu_copies_layer_and_pastes_at_point(qtbot, multi_page_path, red_stamp):
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.import_layer(red_stamp, False)
+        layer = window.session.overlays[-1]
+
+        menu = window.build_canvas_menu((150, 100), None, layer)
+        actions = _menu_actions(menu)
+        actions["複製圖片"].trigger()
+        assert QApplication.clipboard().mimeData().hasFormat(MIME_TYPE)
+
+        menu = window.build_canvas_menu((150, 100), None, None)
+        actions = _menu_actions(menu)
+        assert "複製圖片" not in actions
+        assert actions["在此貼上圖片"].isEnabled()
+        actions["在此貼上圖片"].trigger()
+        pasted = window.session.overlays[-1]
+        assert ((pasted.rect[0] + pasted.rect[2]) / 2, (pasted.rect[1] + pasted.rect[3]) / 2) == \
+            pytest.approx((150, 100))
+    finally:
+        _close(window)
+
+
+def test_context_menu_paste_disabled_without_clipboard_image(qtbot, multi_page_path):
+    window = _open(qtbot, multi_page_path)
+    try:
+        QApplication.clipboard().setText("只有文字")
+
+        actions = _menu_actions(window.build_canvas_menu((150, 100), None, None))
+
+        assert not actions["在此貼上圖片"].isEnabled()
+    finally:
+        _close(window)
+
+
+def _single_stamp_pdf(tmp_path):
+    buffer = io.BytesIO()
+    Image.new("RGB", (60, 40), (0, 60, 255)).save(buffer, format="PNG")
+    with pymupdf.open() as document:
+        page = document.new_page(width=500, height=400)
+        page.insert_image((210, 260, 270, 300), stream=buffer.getvalue())
+        path = tmp_path / "單章.pdf"
+        path.write_bytes(document.tobytes(garbage=4, deflate=True))
+    return path
+
+
+def test_copy_paste_after_click_conversion_keeps_conversion(qtbot, tmp_path, monkeypatch):
+    import pdf_editor.ui.main_window as main_window
+
+    def submit_synchronously(self, function, arguments, success, failure):
+        try:
+            success(function(*arguments))
+        except Exception as exc:
+            failure((getattr(exc, "code", "ERROR"), str(exc), ()))
+
+    monkeypatch.setattr(main_window.Jobs, "submit", submit_synchronously)
+    window = _open(qtbot, _single_stamp_pdf(tmp_path))
+    try:
+        window.canvas.image_clicked.emit(window.page_data["images"][0])
+        assert len(window.session.overlays) == 1
+
+        window.copy_selection()
+        window.paste_layer_at((100, 100))
+        window.canvas.background_clicked.emit()
+
+        assert len(window.session.overlays) == 2
+    finally:
+        _close(window)

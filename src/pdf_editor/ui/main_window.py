@@ -993,8 +993,12 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             self.thumbs.setCurrentItem(item)
         self.page_menu.exec(self.thumbs.viewport().mapToGlobal(position))
 
-    def build_canvas_menu(self,point,run):
+    def build_canvas_menu(self,point,run,layer=None):
         menu=QMenu(self)
+        if layer is not None:
+            copy_image=menu.addAction("複製圖片")
+            copy_image.triggered.connect(lambda _checked=False,item=layer:self.copy_layer(item))
+            menu.addSeparator()
         if run is not None and run.text.strip():
             preview=run.text.strip()
             preview=preview if len(preview)<=16 else preview[:16]+"…"
@@ -1008,6 +1012,9 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             add_text.triggered.connect(lambda _checked=False,position=point:self.begin_text_insertion(position))
             note=menu.addAction("在此新增文字註解")
             note.triggered.connect(lambda _checked=False,position=point:self.begin_text_note(position))
+            paste=menu.addAction("在此貼上圖片")
+            paste.setEnabled(self.can_paste_image())
+            paste.triggered.connect(lambda _checked=False,position=point:self.paste_layer_at(position))
         menu.addSeparator()
         pages=menu.addMenu("頁面操作")
         pages.addActions(self.page_menu.actions())
@@ -1022,7 +1029,8 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
     def show_canvas_menu(self,global_position,point,run):
         if not self.session:
             return
-        self.build_canvas_menu(point,run).exec(global_position)
+        layer=self.canvas.layer_at(self.canvas.viewport().mapFromGlobal(global_position))
+        self.build_canvas_menu(point,run,layer).exec(global_position)
 
     def copy_to_clipboard(self,text):
         QApplication.clipboard().setText(text)
