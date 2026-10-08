@@ -1468,6 +1468,9 @@ from pdf_editor.legacy_overlay_conversion import (
         revision,layer_ids=pending
         if self.session.revision!=revision:
             return False
+        # 大型文件的轉換前狀態可能已被歷程上限裁掉；無法全部撤銷時保留轉換。
+        if not self.session.can_discard(len(layer_ids)):
+            return False
         for _ in layer_ids:
             self.session.discard_last()
         if self.layer_id in layer_ids:
@@ -1564,6 +1567,84 @@ from pdf_editor.legacy_overlay_conversion import (
 
 ```python
         self.pending_conversion=None
+```
+
+- [ ] **Step 5b：快取可點選圖片清單，縮放與重繪時不重算**
+
+`render_page` 已有 `include_images=True` 參數（False 時結果沒有 `"images"`）。可點選圖片只跟文件版本與頁碼有關，與縮放無關。
+
+`__init__` 在 `self.pending_conversion=None` 之後加入：
+
+```python
+        # 可點選圖片清單：{(文件版本, 頁碼): images}，只保留目前文件版本的項目。
+        self._image_cache={}
+```
+
+`request_render` 中 `layers=self.session.overlays` 之後加入：
+
+```python
+        image_key=(self.session.document_key,self.page)
+        cached_images=self._image_cache.get(image_key)
+```
+
+`done` 裡 `self.page_data=result` 之前加入：
+
+```python
+            if "images" in result:
+                self._image_cache={key:value for key,value in self._image_cache.items()
+                    if key[0]==image_key[0]}
+                self._image_cache[image_key]=result["images"]
+            else:
+                result["images"]=cached_images
+```
+
+最後的 `self.jobs.submit(render_page,(data,self.page,self.scale,pixel_ratio),done,self.error)` 改為：
+
+```python
+        self.jobs.submit(render_page,(data,self.page,self.scale,pixel_ratio,cached_images is None),
+            done,self.error)
+```
+
+若既有測試擷取 `render_page` 的參數並比對整個 tuple，依新參數調整該測試的期望值（不要改動測試要驗證的行為）。
+
+在 Step 1 的測試之後再加入兩個測試：
+
+```python
+def test_render_reuses_cached_editable_images_when_zooming(qtbot, tmp_path, monkeypatch):
+    calls = []
+    real_render = main_window.render_page
+
+    def spy_render(*args):
+        calls.append(args)
+        return real_render(*args)
+
+    monkeypatch.setattr(main_window, "render_page", spy_render)
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        images = window.page_data["images"]
+        assert images
+        calls.clear()
+
+        window.zoom_by(1)
+
+        assert calls and calls[-1][4] is False
+        assert window.page_data["images"] == images
+    finally:
+        _close_without_prompt(window)
+
+
+def test_unchanged_conversion_is_kept_when_history_was_trimmed(qtbot, tmp_path, monkeypatch):
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_first_image(window)
+        monkeypatch.setattr(window.session, "can_discard", lambda count=1: False)
+
+        window.canvas.background_clicked.emit()
+
+        assert len(window.session.overlays) == 1
+        assert window.pending_conversion is None
+    finally:
+        _close_without_prompt(window)
 ```
 
 - [ ] **Step 6：執行測試確認通過**

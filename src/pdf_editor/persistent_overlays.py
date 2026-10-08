@@ -109,7 +109,7 @@ def _validated_overlay_data(item: object, names: set[str], document, page_bounds
         if _sha256(content) != asset_sha256:
             raise ValueError()
         # 這裡只需要實際繪製的矩形；去除白底不改變幾何，故刻意不傳 remove_white。
-        _transformed, rendered_rect =transformed_png(content, tuple(rect), angle)
+        _transformed, rendered_rect = transformed_png(content, tuple(rect), angle)
         if not pymupdf.Rect(0, 0, page_width, page_height).contains(rendered_rect):
             raise ValueError()
         return identifier, page, tuple(rect), angle, asset_name, content, remove_white
