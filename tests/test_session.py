@@ -203,3 +203,29 @@ def test_externally_revised_annotation_falls_back_and_survives_resave(tmp_path):
         page = document[0]
         annotation = next(page.annots())
         assert annotation.info["content"] == "THIRD PARTY REVISED NOTE"
+
+
+def test_discard_last_removes_latest_step_without_redo(source_path):
+    with DocumentSession.open(source_path) as session:
+        original = session.pdf
+        session.apply_pdf(original + b"\n%discard")
+        discarded_path = session.pdf_path
+        revision = session.revision
+
+        session.discard_last()
+
+        assert session.pdf == original
+        assert not session.can_redo
+        assert not session.dirty
+        assert session.revision == revision + 1
+        assert not discarded_path.exists()
+
+
+def test_discard_last_refuses_when_not_at_latest_step(source_path):
+    with DocumentSession.open(source_path) as session:
+        with pytest.raises(ValueError):
+            session.discard_last()
+        session.apply_pdf(session.pdf + b"\n%step")
+        session.undo()
+        with pytest.raises(ValueError):
+            session.discard_last()

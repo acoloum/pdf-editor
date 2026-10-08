@@ -69,6 +69,14 @@ class History:
         self._trim()
         self.index = len(self.items) - 1
 
+    def discard_last(self):
+        """撤銷最新一筆且不留重做紀錄，供未改動的暫時轉換使用。"""
+        if self.index <= 0 or self.index != len(self.items) - 1:
+            raise ValueError("只能捨棄最新的一筆歷程。")
+        path = self.items.pop()[0]
+        path.unlink(missing_ok=True)
+        self.index -= 1
+
     def _trim(self):
         """限制復原步數與暫存總容量，大型文件不會佔滿磁碟。"""
         def total():

@@ -95,6 +95,10 @@ class DocumentSession:
             self.history.index += 1
             self.revision += 1
 
+    def discard_last(self):
+        self.history.discard_last()
+        self.revision += 1
+
     def close(self):
         self.history.close()
 
