@@ -1,10 +1,13 @@
 """圖章與簽名：匯入、收藏、點選或轉換既有圖片、多頁連續蓋章與圖層調整。"""
 import pymupdf
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtCore import QMimeData
+from PySide6.QtGui import QImage
+from PySide6.QtWidgets import QApplication,QFileDialog
 from dataclasses import replace
 from pathlib import Path
 from pdf_editor.assets import AssetStore
-from pdf_editor.engine.overlay import flatten_overlays
+from pdf_editor.engine.overlay import flatten_overlays,transformed_image
+from pdf_editor.layer_clipboard import MIME_TYPE,encode_layer
 from pdf_editor.legacy_overlay_conversion import (
     convert_image_at,
     convert_legacy_image,
@@ -305,7 +308,37 @@ class StampActionsMixin:
             parts.append(f"超出頁面範圍 {len(outside)} 頁（第 {listed}{more} 頁）")
         return ("略過：" + "；".join(parts)) if parts else ""
 
+    def selected_layer(self):
+        """目前選取的圖層；沒有時回傳 None。"""
+        if not self.session:
+            return None
+        return next((o for o in self.session.overlays if o.id==self.layer_id),None)
+
+    def copy_selection(self):
+        """Ctrl+C：最後選取的是圖層就複製圖片，否則照舊複製文字。"""
+        layer=self.selected_layer() if self.last_selection=="layer" else None
+        if layer is not None:
+            self.copy_layer(layer)
+            return
+        self.copy_selected_text()
+
+    def copy_layer(self,layer):
+        """同時放入墨頁專用格式與畫面外觀的 PNG，墨頁與其他程式都能貼上。"""
+        try:
+            data=encode_layer(layer)
+            png,_rect=transformed_image(layer)
+        except Exception:
+            self.statusBar().showMessage("無法複製圖片，圖檔可能已被移除。")
+            return
+        mime=QMimeData()
+        mime.setData(MIME_TYPE,data)
+        mime.setData("image/png",png)
+        mime.setImageData(QImage.fromData(png,"PNG"))
+        QApplication.clipboard().setMimeData(mime)
+        self.statusBar().showMessage("已複製圖片；按 Ctrl+V 貼在滑鼠位置，也可以貼到其他程式。")
+
     def select_layer(self,id):
+        self.last_selection="layer"
         pending=self.pending_conversion
         if pending and id not in pending[1]:
             self.discard_pending_conversion()

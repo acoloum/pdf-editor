@@ -135,6 +135,8 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.layer_id=None
         # 點圖片轉換後尚未改動的狀態：(轉換後版本, 轉換出的圖層 ID)。
         self.pending_conversion=None
+        # 最後選取的對象（"layer"／"text"／"annotation"），決定 Ctrl+C 複製圖片還是文字。
+        self.last_selection=None
         # 可點選圖片清單：{(文件版本, 頁碼): images}，只保留目前文件版本的項目。
         self._image_cache={}
         self.annotation=None
@@ -267,7 +269,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             ("search_previous","上一筆",lambda:self.next_search_result(-1),("Shift+F3",),"上一筆結果（Shift+F3）"),
             ("search_next","下一筆",self.next_search_result,("F3",),"下一筆結果（F3）"),
             ("print","列印",self.print_document,("Ctrl+P",),"預覽並列印文件（Ctrl+P），圖章與簽名會一併印出"),
-            ("copy_text","複製文字",self.copy_selected_text,("Ctrl+C",),"複製選取的文字（Ctrl+C）"),
+            ("copy_text","複製",self.copy_selection,("Ctrl+C",),"複製選取的文字或圖片（Ctrl+C）"),
             ("copy_page_text","複製本頁全部文字",self.copy_page_text,("Ctrl+Shift+C",),
                 "複製目前頁面的全部文字（Ctrl+Shift+C）"),
             ("fit_page","適合頁面",lambda:self.zoom.setCurrentText("適合頁面"),(),"整頁顯示"),
@@ -778,6 +780,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.session=session
         self.token+=1
         self.pending_conversion=None
+        self.last_selection=None
         self.run=None
         self.annotation=None
         self.insertion_rect=None
