@@ -2678,7 +2678,8 @@ def _click_image_leaving_render_queued(window, jobs):
     window.canvas.image_clicked.emit(image)
     function, arguments, success, failure = jobs.queue.pop(0)
     success(function(*arguments))
-    assert [item[0] for item in jobs.queue] == [main_window.render_page]
+    # 重繪排在前面；轉換也會讓該頁縮圖重新產生（含新圖層）。
+    assert [item[0].__name__ for item in jobs.queue] == ["render_page", "thumbnail"]
 
 
 def _assert_other_layer_moved(window, other):

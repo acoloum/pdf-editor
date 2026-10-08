@@ -62,6 +62,7 @@ class StampActionsMixin:
             self.select_layer(layer.id)
             self.refresh_actions()
             self.request_render("可拖曳圖片移動，或拖曳四角縮放；右側可勾選「去除白底」。")
+            self.queue_thumbnails((layer.page,))
         except Exception as exc:
             # 不讓例外離開背景工作回呼，否則同一輪排隊的其他回呼會被略過。
             self.error((getattr(exc,"code","STAMP_CONVERSION"),str(exc),()))
@@ -97,6 +98,8 @@ class StampActionsMixin:
         if not can_revert:
             return False
         layer_ids=pending[1]
+        # 撤銷前先記下圖層所在頁面，撤銷後才能更新這些頁面的縮圖。
+        pages={o.page for o in self.session.overlays if o.id in layer_ids}
         for _ in layer_ids:
             self.session.discard_last()
         if self.layer_id in layer_ids:
@@ -106,6 +109,7 @@ class StampActionsMixin:
         self.refresh_actions()
         if render:
             self.request_render_after_release()
+        self.queue_thumbnails(tuple(sorted(pages)))
         return True
 
     def convert_legacy_stamp(self):
@@ -224,6 +228,7 @@ class StampActionsMixin:
             reused=self.settings.stamp_geometry(copied) is not None
             self.request_render("已新增圖章，沿用上次調整的大小；可用「蓋到多個頁面…」一次蓋到其他頁。"
                 if reused else "已新增圖章；調整好大小後可用「蓋到多個頁面…」一次蓋到其他頁。")
+            self.queue_thumbnails((layer.page,))
         except Exception as exc:
             self.error((getattr(exc,"code","IMAGE"),str(exc),()))
 
@@ -319,6 +324,8 @@ class StampActionsMixin:
             self.remember_stamp_geometry(layer)
             self.select_layer(layer.id)
             self.refresh_actions()
+            # 移動、縮放、旋轉與去除白底都經過這裡，讓該頁縮圖跟著更新。
+            self.queue_thumbnails((layer.page,))
         except Exception as exc:
             self.error((getattr(exc,"code","GEOMETRY"),str(exc),()))
         self.request_render()
@@ -341,7 +348,9 @@ class StampActionsMixin:
             self.overlay_panel.set_layer(current)
 
     def delete_layer(self):
+        pages={o.page for o in self.session.overlays if o.id==self.layer_id}
         self.session.set_overlays(tuple(o for o in self.session.overlays if o.id!=self.layer_id))
         self.panels.setCurrentWidget(self.text_panel)
         self.refresh_actions()
         self.request_render()
+        self.queue_thumbnails(tuple(pages))

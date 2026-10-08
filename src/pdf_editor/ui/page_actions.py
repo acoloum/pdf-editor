@@ -88,7 +88,9 @@ class PageActionsMixin:
                 get_logger().warning("第 %s 頁縮圖產生失敗：%s",index+1,error[1])
                 self.statusBar().showMessage(f"第 {index+1} 頁縮圖產生失敗，頁面內容仍可正常檢視。")
             finish()
-        self.jobs.submit(thumbnail,(str(self.session.pdf_path),index),done,failed)
+        # 只帶入此頁的圖層；圖層資產是 PNG 檔路徑，背景程序可直接讀取。
+        layers=tuple(layer for layer in self.session.overlays if layer.page==index)
+        self.jobs.submit(thumbnail,(str(self.session.pdf_path),index,layers),done,failed)
 
     def sync_page_navigation(self,selected=None,selected_pages=None):
         with pymupdf.open(stream=self.session.pdf,filetype="pdf") as doc:

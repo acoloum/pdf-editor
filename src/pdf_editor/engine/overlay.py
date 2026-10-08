@@ -53,16 +53,19 @@ def transformed_png(content, rect, angle, remove_white=False):
     image.save(buffer, format="PNG")
     return buffer.getvalue(), rect
 
+def draw_overlay(page, layer):
+    """把圖層畫到已開啟的頁面上；輸出與縮圖共用，確保兩者結果一致。"""
+    data, rect = transformed_image(layer)
+    bounds = pymupdf.Rect(0,0,page.cropbox.width,page.cropbox.height)
+    if not bounds.contains(rect):
+        raise EditorError("GEOMETRY", "旋轉後的圖章超出頁面，請移動或縮小。")
+    page.insert_image(rect, stream=data, keep_proportion=False)
+
 def flatten_overlays(pdf, overlays):
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         for layer in overlays:
             if not 0 <= layer.page < doc.page_count:
                 raise EditorError("PAGE", "圖章所在頁面不存在。")
-            data, rect = transformed_image(layer)
-            page = doc[layer.page]
-            bounds = pymupdf.Rect(0,0,page.cropbox.width,page.cropbox.height)
-            if not bounds.contains(rect):
-                raise EditorError("GEOMETRY", "旋轉後的圖章超出頁面，請移動或縮小。")
-            page.insert_image(rect, stream=data, keep_proportion=False)
+            draw_overlay(doc[layer.page], layer)
         return doc.tobytes(garbage=4, deflate=True)
 
