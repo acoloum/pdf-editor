@@ -1,10 +1,12 @@
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QWidget,QVBoxLayout,QFormLayout,QLabel,QDoubleSpinBox,QPushButton
+from PySide6.QtWidgets import (QWidget,QVBoxLayout,QFormLayout,QLabel,QDoubleSpinBox,
+    QPushButton,QCheckBox)
 
 class OverlayPanel(QWidget):
     update_requested=Signal()
     delete_requested=Signal()
     stamp_pages_requested=Signal()
+    remove_white_toggled=Signal(bool)
     def __init__(self):
         super().__init__()
         layout=QVBoxLayout(self)
@@ -24,6 +26,10 @@ class OverlayPanel(QWidget):
         apply=QPushButton("套用位置與大小")
         apply.clicked.connect(self.update_requested)
         layout.addWidget(apply)
+        self.remove_white=QCheckBox("去除白底（讓底下的內容透出）")
+        self.remove_white.setToolTip("把接近白色的部分變透明；原圖不會被修改，取消勾選即可還原")
+        self.remove_white.toggled.connect(self.remove_white_toggled)
+        layout.addWidget(self.remove_white)
         self.stamp_pages=QPushButton("蓋到多個頁面…")
         self.stamp_pages.setObjectName("primary")
         self.stamp_pages.clicked.connect(self.stamp_pages_requested)
@@ -37,3 +43,7 @@ class OverlayPanel(QWidget):
         r=layer.rect
         for s,v in zip(self.fields,(r[0],r[1],r[2]-r[0],r[3]-r[1],layer.angle)):
             s.setValue(v)
+        # 切換選取時同步勾選狀態，不觸發修改。
+        self.remove_white.blockSignals(True)
+        self.remove_white.setChecked(layer.remove_white)
+        self.remove_white.blockSignals(False)

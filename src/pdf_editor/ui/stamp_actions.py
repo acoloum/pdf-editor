@@ -188,7 +188,7 @@ class StampActionsMixin:
                 if not bounds.contains(rect):
                     outside.append(page+1)
                     continue
-                added.append(Overlay(uuid.uuid4().hex,page,layer.asset_path,layer.rect,layer.angle))
+                added.append(replace(layer,id=uuid.uuid4().hex,page=page))
         if not added:
             self.statusBar().showMessage("沒有可蓋章的頁面："
                 +self.describe_stamp_skips(outside,duplicated))
@@ -237,6 +237,13 @@ class StampActionsMixin:
         if layer:
             x,y,w,h,angle=(s.value() for s in self.overlay_panel.fields)
             self.move_layer(replace(layer,rect=(x,y,x+w,y+h),angle=angle))
+
+    def set_layer_remove_white(self,checked):
+        """切換選取圖層的去除白底；與移動、縮放相同，會留下可復原的紀錄。"""
+        layer=next((o for o in self.session.overlays if o.id==self.layer_id),None) if self.session else None
+        if layer is None or layer.remove_white==checked:
+            return
+        self.move_layer(replace(layer,remove_white=checked))
 
     def delete_layer(self):
         self.session.set_overlays(tuple(o for o in self.session.overlays if o.id!=self.layer_id))

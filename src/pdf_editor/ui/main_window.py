@@ -419,6 +419,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.overlay_panel.update_requested.connect(self.update_layer)
         self.overlay_panel.stamp_pages_requested.connect(self.stamp_to_pages)
         self.overlay_panel.delete_requested.connect(self.delete_layer)
+        self.overlay_panel.remove_white_toggled.connect(self.set_layer_remove_white)
         self.panels.addWidget(self.text_panel)
         self.panels.addWidget(self.overlay_panel)
         self.panels.setMinimumWidth(280)

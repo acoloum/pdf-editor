@@ -146,3 +146,43 @@ def test_stamp_pages_action_requires_a_selected_stamp(qtbot, multi_page_path, st
         assert window.actions["stamp_pages"] in window.stamp_menu_button.menu().actions()
     finally:
         _close(window)
+
+
+@pytest.fixture
+def white_stamp_png(tmp_path):
+    path = tmp_path / "白底章.png"
+    Image.new("RGBA", (200, 100), (255, 255, 255, 255)).save(path)
+    return path
+
+
+def test_overlay_panel_toggles_remove_white_with_undo(qtbot, multi_page_path, white_stamp_png):
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.import_layer(white_stamp_png, False)
+        layer_id = window.layer_id
+        assert not window.overlay_panel.remove_white.isChecked()
+
+        window.overlay_panel.remove_white.setChecked(True)
+        qtbot.waitUntil(lambda: not window.busy, timeout=30000)
+
+        assert next(o for o in window.session.overlays if o.id == layer_id).remove_white
+        window.history_step(False)
+        assert not next(o for o in window.session.overlays if o.id == layer_id).remove_white
+    finally:
+        _close(window)
+
+
+def test_stamp_to_pages_keeps_remove_white(qtbot, multi_page_path, white_stamp_png, monkeypatch):
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.import_layer(white_stamp_png, False)
+        window.overlay_panel.remove_white.setChecked(True)
+        qtbot.waitUntil(lambda: not window.busy, timeout=30000)
+        monkeypatch.setattr(StampPagesDialog, "exec", lambda self: self.all_pages.setChecked(True) or 1)
+
+        window.stamp_to_pages()
+
+        assert len(window.session.overlays) == 3
+        assert all(item.remove_white for item in window.session.overlays)
+    finally:
+        _close(window)
