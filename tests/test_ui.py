@@ -2660,6 +2660,136 @@ def test_closing_with_unchanged_conversion_does_not_prompt(qtbot, tmp_path, monk
     assert window.closed
 
 
+def _layer_drag_window(qtbot, tmp_path, monkeypatch):
+    """開好視窗並放一個其他圖層；回傳視窗、延後工作與該圖層。"""
+    stamp = tmp_path / "其他章.png"
+    Image.new("RGBA", (40, 40), (210, 35, 45, 255)).save(stamp)
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    other = Overlay("other-stamp", 0, str(stamp), (300, 100, 340, 140), 0)
+    window.session.set_overlays((other,))
+    window.request_render()
+    jobs.flush()
+    return window, jobs, other
+
+
+def _click_image_leaving_render_queued(window, jobs):
+    """只執行點圖片的轉換工作，轉換後的重繪留在佇列中（尚未完成）。"""
+    image = next(item for item in window.page_data["images"] if item.rect == FIRST_STAMP)
+    window.canvas.image_clicked.emit(image)
+    function, arguments, success, failure = jobs.queue.pop(0)
+    success(function(*arguments))
+    assert [item[0] for item in jobs.queue] == [main_window.render_page]
+
+
+def _assert_other_layer_moved(window, other):
+    assert [layer.id for layer in window.session.overlays] == ["other-stamp"]
+    moved = window.session.overlays[0]
+    assert moved.rect[0] > other.rect[0] + 10 and moved.rect[1] > other.rect[1] + 10
+    assert FIRST_STAMP in [item.rect for item in window.page_data["images"]]
+
+
+def test_in_flight_render_failing_on_deleted_file_is_ignored_during_drag(
+        qtbot, tmp_path, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(main_window.QMessageBox, "warning", lambda *args: warnings.append(args))
+    window, jobs, other = _layer_drag_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_image_leaving_render_queued(window, jobs)
+        canvas = window.canvas
+        start, end = _view_point(canvas, 320, 120), _view_point(canvas, 370, 170)
+
+        qtbot.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=start)
+        _hover(canvas, end, Qt.MouseButton.LeftButton)
+        # 轉換後的重繪此時才執行：暫存檔已被自動還原刪除，失敗結果必須當成過時。
+        jobs.flush()
+        qtbot.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=end)
+        jobs.flush()
+
+        _assert_other_layer_moved(window, other)
+        assert warnings == []
+        assert not window.busy
+    finally:
+        _close_deferred(window, jobs)
+
+
+def test_in_flight_render_completing_during_drag_does_not_rebuild_scene(
+        qtbot, tmp_path, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(main_window.QMessageBox, "warning", lambda *args: warnings.append(args))
+    window, jobs, other = _layer_drag_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_image_leaving_render_queued(window, jobs)
+        function, arguments, success, _failure = jobs.queue.pop(0)
+        stale_result = function(*arguments)
+        canvas = window.canvas
+        start, end = _view_point(canvas, 320, 120), _view_point(canvas, 370, 170)
+
+        qtbot.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=start)
+        _hover(canvas, end, Qt.MouseButton.LeftButton)
+        # 轉換後的重繪在拖曳途中完成，不能重建（已過時的）畫面而讓拖曳失效。
+        success(stale_result)
+        qtbot.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=end)
+        jobs.flush()
+
+        _assert_other_layer_moved(window, other)
+        assert warnings == []
+    finally:
+        _close_deferred(window, jobs)
+
+
+def test_image_click_does_not_leave_canvas_marked_as_pressed(qtbot, tmp_path, monkeypatch):
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        point = _view_point(window.canvas, 240, 280)
+
+        qtbot.mouseClick(window.canvas.viewport(), Qt.MouseButton.LeftButton, pos=point)
+
+        assert window.busy
+        assert not window.canvas.pointer_pressed
+        jobs.flush()
+        assert len(window.session.overlays) == 1
+    finally:
+        _close_deferred(window, jobs)
+
+
+def test_deferred_render_runs_when_canvas_is_disabled_mid_press(qtbot, tmp_path, monkeypatch):
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        window._render_after_release = True
+        window.canvas.pointer_pressed = True
+
+        # 按住期間畫布被停用時放開事件不會送達；改在停用時補做延後的重繪。
+        window.canvas.setEnabled(False)
+
+        assert not window.canvas.pointer_pressed
+        assert not window._render_after_release
+        assert [item[0] for item in jobs.queue] == [main_window.render_page]
+    finally:
+        window.canvas.setEnabled(True)
+        _close_deferred(window, jobs)
+
+
+def test_text_press_keeps_drag_when_conversion_cannot_be_reverted(qtbot, tmp_path, monkeypatch):
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_image_at(window, jobs, FIRST_STAMP)
+        monkeypatch.setattr(window.session, "can_discard", lambda count=1: False)
+        run = next(r for r in window.page_data["runs"] if "品質" in r.text)
+        point = _view_point(window.canvas, (run.rect[0] + run.rect[2]) / 2,
+            (run.rect[1] + run.rect[3]) / 2)
+
+        qtbot.mousePress(window.canvas.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        try:
+            # 無法還原時照常選取文字，畫布上的文字拖曳不能被取消。
+            assert window.canvas.selected_run is not None
+            assert len(window.session.overlays) == 1
+        finally:
+            qtbot.mouseRelease(window.canvas.viewport(), Qt.MouseButton.LeftButton, pos=point)
+    finally:
+        monkeypatch.delattr(window.session, "can_discard")
+        _close_deferred(window, jobs)
+
+
 def test_window_converts_selected_legacy_stamp_into_layer(
         qtbot, source_path, tmp_path, monkeypatch):
     candidate = _legacy_candidate()

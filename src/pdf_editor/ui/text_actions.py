@@ -17,7 +17,7 @@ class TextActionsMixin:
     def select_run(self,run,open_editor=True):
         if not self.session or not self.session.access.can_edit:
             return
-        if self._pending_conversion_is_live():
+        if self._pending_conversion_can_revert():
             previous=self._reselect_after_render
             # 撤銷轉換會重新渲染頁面；先登記，渲染完成後以一般方式重新選取這段文字。
             self._reselect_after_render=(self.page,tuple(run.rect),run.text,True)

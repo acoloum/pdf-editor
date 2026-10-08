@@ -1,5 +1,5 @@
 from dataclasses import replace
-from PySide6.QtCore import Qt, Signal, QPointF, QTimer, QRectF
+from PySide6.QtCore import Qt, Signal, QPointF, QTimer, QRectF, QEvent
 from PySide6.QtGui import (QPixmap,QPen,QColor,QTransform,QPainter,QKeyEvent,QBrush,
     QPainterPath)
 from PySide6.QtWidgets import (QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,
@@ -955,6 +955,8 @@ class Canvas(QGraphicsView):
                 # 文字優先；沒點到文字才轉交圖片編輯。
                 # 注意：接收訊號的槽函式不可同步重建場景（畫面是非同步重繪）。
                 self.clear_image_hover()
+                # 主視窗轉換期間會停用畫布，放開事件不會送達；這次按壓視為已結束。
+                self.pointer_pressed=False
                 self.image_clicked.emit(image)
                 event.accept()
                 return
@@ -1065,6 +1067,14 @@ class Canvas(QGraphicsView):
         super().mouseMoveEvent(event)
         if image is not None:
             self._show_image_hover(image)
+
+    def changeEvent(self,event):
+        super().changeEvent(event)
+        if (event.type()==QEvent.Type.EnabledChange and not self.isEnabled()
+                and self.pointer_pressed):
+            # 按住期間被停用時收不到放開事件；視同放開，讓延後的重繪照常補做。
+            self.pointer_pressed=False
+            self.mouse_released.emit()
 
     def mouseReleaseEvent(self,event):
         self._handle_mouse_release(event)

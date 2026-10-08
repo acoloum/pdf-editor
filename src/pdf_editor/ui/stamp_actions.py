@@ -75,6 +75,12 @@ class StampActionsMixin:
         return (pending is not None and self.session is not None
             and self.session.revision==pending[0])
 
+    def _pending_conversion_can_revert(self):
+        """目前是否能撤銷未改動的圖片轉換。"""
+        # 大型文件的轉換前狀態可能已被歷程上限裁掉；無法全部撤銷時保留轉換。
+        return (not self.busy and self._pending_conversion_is_live()
+            and self.session.can_discard(len(self.pending_conversion[1])))
+
     def discard_pending_conversion(self,render=True):
         """點圖片轉換後若沒有任何改動，撤銷轉換且不留重做紀錄；回傳是否有撤銷。
 
@@ -82,15 +88,11 @@ class StampActionsMixin:
         """
         if self.busy:
             return False
+        can_revert=self._pending_conversion_can_revert()
         pending,self.pending_conversion=self.pending_conversion,None
-        if pending is None or self.session is None:
+        if not can_revert:
             return False
-        revision,layer_ids=pending
-        if self.session.revision!=revision:
-            return False
-        # 大型文件的轉換前狀態可能已被歷程上限裁掉；無法全部撤銷時保留轉換。
-        if not self.session.can_discard(len(layer_ids)):
-            return False
+        layer_ids=pending[1]
         for _ in layer_ids:
             self.session.discard_last()
         if self.layer_id in layer_ids:

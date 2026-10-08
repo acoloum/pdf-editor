@@ -1199,6 +1199,9 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         """在畫布上按住滑鼠時（例如正在拖曳圖層）延到放開後才重繪，避免重建畫面打斷拖曳。"""
         if self.canvas.pointer_pressed and QApplication.mouseButtons()!=Qt.MouseButton.NoButton:
             self._render_after_release=True
+            # 進行中的渲染畫的是還原前的狀態（暫存檔可能已刪除）：讓它的結果與失敗都視為過時，
+            # 拖曳途中才不會重建畫面或跳出錯誤。
+            self.render_serial+=1
             return
         self.request_render()
 
