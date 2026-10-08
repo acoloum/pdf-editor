@@ -14,7 +14,7 @@ from pdf_editor.model import EditableImage, LegacyImageCandidate, Overlay
 # 外觀比對容許的誤差：一般取樣值差距須 ≤ 2；刪除再放回影像時，
 # 附近線條的反鋸齒可能出現零星差異，因此允許極少量取樣值稍大。
 _SAMPLE_TOLERANCE = 2
-_MAX_SAMPLE_DIFFERENCE = 24
+_MAX_SAMPLE_DIFFERENCE = 12
 _MAX_OUTLIER_RATIO = 0.0005
 
 
@@ -28,9 +28,7 @@ def find_convertible_images(pdf: bytes) -> tuple[LegacyImageCandidate, ...]:
                 if len(locations) != 1:
                     continue
                 page_number, rect = locations[0]
-                if not _is_not_page_scan(document[page_number], rect):
-                    continue
-                if not _has_supported_placement(document[page_number], xref, rect):
+                if _use_rejection(document[page_number], xref, rect):
                     continue
                 try:
                     candidate = _candidate_from_use(document, xref, page_number, rect)
@@ -47,6 +45,7 @@ def find_convertible_images(pdf: bytes) -> tuple[LegacyImageCandidate, ...]:
 
 _CANDIDATE_CHANGED = "圖章候選已變更，請重新掃描後再選取。"
 _IMAGE_CHANGED = "圖片位置已變更，請再點一次。"
+_IMAGE_REUSED = "這張圖片在文件中重複使用，無法單獨編輯。"
 
 
 def convert_legacy_image(pdf: bytes, candidate: LegacyImageCandidate, asset_root) -> tuple[bytes, Overlay]:
@@ -55,7 +54,11 @@ def convert_legacy_image(pdf: bytes, candidate: LegacyImageCandidate, asset_root
         current = {item.xref: item for item in find_convertible_images(pdf)}
         if current.get(candidate.xref) != candidate:
             raise EditorError("STAMP_CONVERSION", _CANDIDATE_CHANGED)
-        return _extract_candidate(pdf, candidate, asset_root, _CANDIDATE_CHANGED)
+        return _extract_candidate(
+            pdf, candidate, asset_root, _CANDIDATE_CHANGED,
+            lambda document: _image_uses(document).get(candidate.xref)
+            == [(candidate.page, candidate.rect)],
+        )
     except EditorError as exc:
         if exc.code == "STAMP_CONVERSION":
             raise
@@ -68,19 +71,11 @@ def convert_image_at(pdf: bytes, image: EditableImage, asset_root) -> tuple[byte
     """直接點選圖片時，只檢查並抽離這一張；任何條件不符都不改動文件。"""
     try:
         with pymupdf.open(stream=pdf, filetype="pdf") as document:
-            uses = _image_uses(document).get(image.xref, [])
-            if len(uses) > 1:
-                raise EditorError("STAMP_CONVERSION", "這張圖片在文件中重複使用，無法單獨編輯。")
-            # 頁面資料可能已過時；位置不符時不猜測，避免改到別張圖。
-            if uses != [(image.page, image.rect)]:
-                raise EditorError("STAMP_CONVERSION", _IMAGE_CHANGED)
-            page = document[image.page]
-            if not _is_not_page_scan(page, image.rect):
-                raise EditorError("STAMP_CONVERSION", "整頁掃描的圖片無法單獨編輯。")
-            if not _has_supported_placement(page, image.xref, image.rect):
-                raise EditorError("STAMP_CONVERSION", "旋轉或傾斜擺放的圖片無法單獨編輯。")
-            candidate = _candidate_from_use(document, image.xref, image.page, image.rect)
-        return _extract_candidate(pdf, candidate, asset_root, _IMAGE_CHANGED)
+            candidate = _candidate_for_click(document, image)
+        return _extract_candidate(
+            pdf, candidate, asset_root, _IMAGE_CHANGED,
+            lambda document: _used_only_at(document, image) is None,
+        )
     except EditorError as exc:
         if exc.code == "STAMP_CONVERSION":
             raise
@@ -89,13 +84,42 @@ def convert_image_at(pdf: bytes, image: EditableImage, asset_root) -> tuple[byte
         raise EditorError("STAMP_CONVERSION", "圖片轉換失敗，文件未被變更。") from exc
 
 
+def _candidate_for_click(document, image: EditableImage) -> LegacyImageCandidate:
+    """確認點選的圖片只在該頁的該位置使用且可安全編輯；不符時丟出原因。"""
+    problem = _used_only_at(document, image)
+    if problem:
+        raise EditorError("STAMP_CONVERSION", problem)
+    page = document[image.page]
+    problem = _use_rejection(page, image.xref, image.rect)
+    if problem:
+        raise EditorError("STAMP_CONVERSION", problem)
+    return _candidate_from_use(document, image.xref, image.page, image.rect)
+
+
+def _used_only_at(document, image: EditableImage) -> str | None:
+    """只靠資源引用與該頁的繪製位置判斷是否單獨使用；不符時回傳原因。
+
+    不掃描所有頁面的影像位置，大型掃描檔才不會因此變慢。
+    """
+    for number in range(document.page_count):
+        if number != image.page and any(
+                item[0] == image.xref for item in document.get_page_images(number, full=True)):
+            return _IMAGE_REUSED
+    rects = document[image.page].get_image_rects(image.xref)
+    if len(rects) > 1:
+        return _IMAGE_REUSED
+    # 頁面資料可能已過時；位置不符時不猜測，避免改到別張圖。
+    if [_rect_tuple(rect) for rect in rects] != [image.rect]:
+        return _IMAGE_CHANGED
+    return None
+
+
 def _extract_candidate(pdf: bytes, candidate: LegacyImageCandidate, asset_root,
-                       changed_message: str) -> tuple[bytes, Overlay]:
+                       changed_message: str, still_single_use) -> tuple[bytes, Overlay]:
     """從副本移除影像並驗證外觀；全部通過後才建立資產。"""
     with pymupdf.open(stream=pdf, filetype="pdf") as document:
-        # 在實際刪除前重新確認此 xref 仍僅有一個使用位置。
-        uses = _image_uses(document)
-        if uses.get(candidate.xref) != [(candidate.page, candidate.rect)]:
+        # 在實際刪除前重新確認此影像仍僅有一個使用位置。
+        if not still_single_use(document):
             raise EditorError("STAMP_CONVERSION", changed_message)
         document[candidate.page].delete_image(candidate.xref)
         base_pdf = document.tobytes(garbage=4, deflate=True)
@@ -113,9 +137,10 @@ def _extract_candidate(pdf: bytes, candidate: LegacyImageCandidate, asset_root,
 def editable_images_on_page(document, page_number: int) -> tuple[EditableImage, ...]:
     """快速列出本頁可直接點選編輯的圖片；不做渲染比對，轉換時會再完整把關。"""
     page = document[page_number]
-    xrefs = {image[0] for image in page.get_images(full=True) if image[0] > 0}
-    if not xrefs:
+    images = {image[0]: image for image in page.get_images(full=True) if image[0] > 0}
+    if not images:
         return ()
+    scan_sizes = _scan_image_sizes(page)
     # 其他頁面的資源引用同一張圖，就當作重複使用，不提供直接點選。
     elsewhere = {
         image[0]
@@ -123,14 +148,28 @@ def editable_images_on_page(document, page_number: int) -> tuple[EditableImage, 
         for image in document.get_page_images(number, full=True)
     }
     found = []
-    for xref in sorted(xrefs - elsewhere):
-        rects = page.get_image_rects(xref)
-        if len(rects) != 1:
+    for xref in sorted(images.keys() - elsewhere):
+        # 整頁掃描影像的位置查詢最耗時，先用像素尺寸略過。
+        if (images[xref][2], images[xref][3]) in scan_sizes:
             continue
-        rect = _rect_tuple(rects[0])
-        if _is_not_page_scan(page, rect) and _has_supported_placement(page, xref, rect):
+        # 位置與擺放矩陣一次取得，避免重複解碼影像。
+        placements = page.get_image_rects(xref, transform=True)
+        if len(placements) != 1:
+            continue
+        rect = _rect_tuple(placements[0][0])
+        if _use_rejection(page, xref, rect, placements) is None:
             found.append(EditableImage(xref, page_number, rect))
     return tuple(found)
+
+
+def _scan_image_sizes(page) -> set[tuple[int, int]]:
+    """本頁涵蓋幾乎整頁的影像像素尺寸；get_image_info 不解碼影像，速度很快。"""
+    page_area = page.cropbox.get_area()
+    return {
+        (info["width"], info["height"])
+        for info in page.get_image_info()
+        if pymupdf.Rect(info["bbox"]).get_area() >= page_area * 0.9
+    }
 
 
 def _image_uses(document) -> dict[int, list[tuple[int, tuple[float, float, float, float]]]]:
@@ -170,19 +209,23 @@ def _normalize_png(image_bytes: bytes) -> tuple[bytes, int, int]:
         return normalized.getvalue(), width, height
 
 
-def _is_not_page_scan(page, rect) -> bool:
-    image_rect = pymupdf.Rect(rect)
-    cropbox = page.cropbox
-    return image_rect.get_area() < cropbox.get_area() * 0.9
+def _use_rejection(page, xref: int, rect, placements=None) -> str | None:
+    """影像不適合單獨編輯時回傳原因，可編輯則回傳 None。
+
+    placements 為已取得的 get_image_rects(xref, transform=True) 結果；未提供時才查詢。
+    """
+    if pymupdf.Rect(rect).get_area() >= page.cropbox.get_area() * 0.9:
+        return "整頁掃描的圖片無法單獨編輯。"
+    if placements is None:
+        placements = page.get_image_rects(xref, transform=True)
+    if not _has_axis_aligned_placement(placements, rect):
+        return "旋轉或傾斜擺放的圖片無法單獨編輯。"
+    return None
 
 
-def _has_supported_placement(page, xref: int, rect) -> bool:
+def _has_axis_aligned_placement(placements, rect) -> bool:
     """目前只接受未旋轉、未鏡射且未斜切的軸向影像。"""
-    matching = [
-        matrix
-        for found_rect, matrix in page.get_image_rects(xref, transform=True)
-        if _rect_tuple(found_rect) == rect
-    ]
+    matching = [matrix for found_rect, matrix in placements if _rect_tuple(found_rect) == rect]
     if len(matching) != 1:
         return False
     a, b, c, d, _e, _f = matching[0]

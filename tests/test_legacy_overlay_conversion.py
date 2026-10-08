@@ -293,6 +293,8 @@ def test_convert_image_at_rejects_stale_position(tmp_path):
     with pytest.raises(EditorError, match="位置已變更"):
         convert_image_at(source, stale, tmp_path / "assets")
 
+    assert not (tmp_path / "assets").exists()
+
 
 def test_convert_image_at_rejects_image_covered_by_vector(tmp_path):
     source = _pdf_with_vector_covering_stamp()
@@ -303,3 +305,98 @@ def test_convert_image_at_rejects_image_covered_by_vector(tmp_path):
         convert_image_at(source, image, tmp_path / "assets")
 
     assert not (tmp_path / "assets").exists()
+
+
+def test_convert_image_at_rejects_image_referenced_by_another_page(tmp_path):
+    with pymupdf.open() as document:
+        first = document.new_page(width=500, height=400)
+        first.insert_image((210, 260, 270, 300), stream=_png((60, 40), (0, 60, 255, 255)))
+        xref = first.get_images()[0][0]
+        second = document.new_page(width=500, height=400)
+        second.insert_image((20, 20, 80, 60), xref=xref)
+        source = document.tobytes(garbage=4, deflate=True)
+
+    with pytest.raises(EditorError, match="重複使用") as error:
+        convert_image_at(source, EditableImage(xref, 0, (210, 260, 270, 300)),
+                         tmp_path / "assets")
+
+    assert error.value.code == "STAMP_CONVERSION"
+    assert not (tmp_path / "assets").exists()
+
+
+def test_convert_image_at_rejects_full_page_scan(tmp_path):
+    source = _single_scanned_page_pdf()
+    with pymupdf.open(stream=source, filetype="pdf") as document:
+        xref = document[0].get_images()[0][0]
+
+    with pytest.raises(EditorError, match="整頁掃描") as error:
+        convert_image_at(source, EditableImage(xref, 0, (0, 0, 500, 400)),
+                         tmp_path / "assets")
+
+    assert error.value.code == "STAMP_CONVERSION"
+    assert not (tmp_path / "assets").exists()
+
+
+def test_convert_image_at_rejects_rotated_image(tmp_path):
+    source = _pdf_with_rotated_asymmetric_stamp()
+    with pymupdf.open(stream=source, filetype="pdf") as document:
+        xref = document[0].get_images()[0][0]
+        rect = _rect_of(document[0], xref)
+
+    with pytest.raises(EditorError, match="旋轉或傾斜") as error:
+        convert_image_at(source, EditableImage(xref, 0, rect), tmp_path / "assets")
+
+    assert error.value.code == "STAMP_CONVERSION"
+    assert not (tmp_path / "assets").exists()
+
+
+def _rect_of(page, xref):
+    rect = page.get_image_rects(xref)[0]
+    return tuple(int(v) if float(v).is_integer() else float(v) for v in rect)
+
+
+def test_faint_line_drawn_over_image_is_not_offered_for_conversion():
+    with pymupdf.open() as document:
+        page = document.new_page(width=500, height=400)
+        page.insert_image((210, 260, 270, 300), stream=_png((60, 40), (255, 255, 255, 255)))
+        page.draw_line((200, 280), (280, 280), color=(0.92, 0.92, 0.92), width=1)
+        source = document.tobytes()
+
+    assert find_convertible_images(source) == ()
+
+
+def _samples_with_differences(count, difference):
+    first = _white_samples(1000, 1000)
+    second = bytearray(first)
+    for index in range(count):
+        second[index] = 255 - difference
+    return first, bytes(second)
+
+
+def test_samples_match_difference_boundary():
+    assert _samples_match(1000, 1000, 3, *_samples_with_differences(1, 12))
+    assert not _samples_match(1000, 1000, 3, *_samples_with_differences(1, 13))
+
+
+def test_samples_match_outlier_ratio_boundary():
+    # 1000x1000 RGB 共 300 萬個取樣值，上限為 1500 個。
+    assert _samples_match(1000, 1000, 3, *_samples_with_differences(1500, 4))
+    assert not _samples_match(1000, 1000, 3, *_samples_with_differences(1501, 4))
+
+
+def test_render_page_can_skip_editable_images():
+    data = render_page(_pdf_with_unique_stamp(), 0, 1.0, include_images=False)
+
+    assert "images" not in data
+
+
+def test_editable_images_on_page_lists_stamp_on_scanned_page_but_not_scan():
+    with pymupdf.open() as document:
+        page = document.new_page(width=500, height=400)
+        page.insert_image((0, 0, 500, 400), stream=_png((500, 400), (250, 250, 250, 255)))
+        page.insert_image((210, 260, 270, 300), stream=_png((60, 40), (0, 60, 255, 255)))
+        source = document.tobytes(garbage=4, deflate=True)
+
+    images = _editable_images(source)
+
+    assert [item.rect for item in images] == [(210, 260, 270, 300)]
