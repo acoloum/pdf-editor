@@ -2,8 +2,8 @@
 
 import base64
 import json
-import math
 
+import pymupdf
 import pytest
 from PIL import Image
 
@@ -14,6 +14,7 @@ from pdf_editor.layer_clipboard import (
     encode_layer,
     paste_rect,
 )
+from pdf_editor.engine.overlay import flatten_overlays
 from pdf_editor.model import Overlay
 
 
@@ -42,6 +43,26 @@ def test_encode_then_decode_keeps_layer_settings(tmp_path):
                 "remove_white": "yes", "png": base64.b64encode(b"x").decode()}).encode(),
     json.dumps({"version": FORMAT_VERSION, "width": 5, "height": 5, "angle": 0,
                 "remove_white": False, "png": "!!!"}).encode(),
+    # 巢狀過深會讓 json 拋出 RecursionError。
+    b"[" * 10000,
+    # 超大整數轉成浮點數時會拋出 OverflowError。
+    ('{"version":1,"width":' + "1" * 400 + ',"height":5,"angle":0,"remove_white":false,"png":"eA=="}').encode(),
+    # 布林與字串不算數字。
+    json.dumps({"version": True, "width": 5, "height": 5, "angle": 0,
+                "remove_white": False, "png": "eA=="}).encode(),
+    json.dumps({"version": FORMAT_VERSION, "width": True, "height": 5, "angle": 0,
+                "remove_white": False, "png": "eA=="}).encode(),
+    json.dumps({"version": FORMAT_VERSION, "width": "5", "height": 5, "angle": 0,
+                "remove_white": False, "png": "eA=="}).encode(),
+    json.dumps({"version": FORMAT_VERSION, "width": 5, "height": 5, "angle": False,
+                "remove_white": False, "png": "eA=="}).encode(),
+    # 退化的大小：極端寬扁或超出上限。
+    json.dumps({"version": FORMAT_VERSION, "width": 1e308, "height": 1e-300, "angle": 0,
+                "remove_white": False, "png": "eA=="}).encode(),
+    json.dumps({"version": FORMAT_VERSION, "width": 100001, "height": 5, "angle": 0,
+                "remove_white": False, "png": "eA=="}).encode(),
+    json.dumps({"version": FORMAT_VERSION, "width": 0.05, "height": 5, "angle": 0,
+                "remove_white": False, "png": "eA=="}).encode(),
 ])
 def test_decode_rejects_invalid_data(data):
     assert decode_layer(data) is None
@@ -70,3 +91,23 @@ def test_paste_rect_keeps_rotated_box_and_plain_rect_inside_page():
     assert (x0, y0, x1, y1) == pytest.approx((1, 26, 101, 76))
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     assert cy - 50 >= 1 and cx - 25 >= 1
+
+
+@pytest.mark.parametrize("page_size, size", [
+    ((595, 842), (200, 100)),
+    ((4000, 4000), (3500, 1000)),
+    ((4000, 4000), (12345, 6789)),  # 比頁面還大，必須先縮小
+])
+@pytest.mark.parametrize("angle", [30, 45, 60])
+def test_paste_rect_rotated_layer_can_be_flattened_at_page_corners(tmp_path, page_size, size, angle):
+    asset = _stamp(tmp_path)
+    doc = pymupdf.open()
+    doc.new_page(width=page_size[0], height=page_size[1])
+    pdf = doc.tobytes()
+    doc.close()
+    width, height = page_size
+    for center in ((0, 0), (width, 0), (0, height), (width, height)):
+        rect = paste_rect(center, size[0], size[1], page_size, angle)
+        layer = Overlay("貼上", 0, str(asset), rect, angle)
+
+        assert flatten_overlays(pdf, (layer,))
