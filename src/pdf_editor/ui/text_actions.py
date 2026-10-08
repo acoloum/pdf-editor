@@ -17,6 +17,12 @@ class TextActionsMixin:
     def select_run(self,run,open_editor=True):
         if not self.session or not self.session.access.can_edit:
             return
+        if self.pending_conversion is not None:
+            # 撤銷轉換會重新渲染頁面；先登記，渲染完成後選回這段文字。
+            self._reselect_after_render=(self.page,tuple(run.rect),run.text)
+            if self.discard_pending_conversion():
+                return
+            self._reselect_after_render=None
         self.text_panel.cancel_pending_format()
         self.canvas.clear_conflicts()
         self.cancel_editing_modes(crop=False)
@@ -225,6 +231,7 @@ class TextActionsMixin:
         self.statusBar().showMessage("請直接點選頁面上的螢光、底線或文字註解。")
 
     def select_annotation(self,item):
+        self.discard_pending_conversion()
         self.canvas.cancel_annotation_selection()
         self.actions["select_annotation"].setChecked(False)
         self.canvas.cancel_inline_editor()

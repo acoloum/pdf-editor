@@ -53,11 +53,11 @@ def _view_point(canvas, x, y):
     return canvas.mapFromScene(QPointF(*transform_point(canvas.matrix, x, y)))
 
 
-def _hover(canvas, point):
-    """送出無按鍵的滑鼠移動事件（qtbot.mouseMove 在此環境不會送達檢視區）。"""
+def _hover(canvas, point, buttons=Qt.MouseButton.NoButton):
+    """送出滑鼠移動事件（qtbot.mouseMove 在此環境不會送達檢視區）；buttons 為按住的按鍵。"""
     event = QMouseEvent(QEvent.Type.MouseMove, QPointF(point),
         QPointF(canvas.viewport().mapToGlobal(point)), Qt.MouseButton.NoButton,
-        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        buttons, Qt.KeyboardModifier.NoModifier)
     QCoreApplication.sendEvent(canvas.viewport(), event)
 
 
@@ -280,6 +280,26 @@ def test_canvas_hover_keeps_pointing_cursor_when_moving_from_layer_to_image(qtbo
 
     assert canvas.image_hover is not None
     assert canvas.viewport().cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+
+def test_canvas_dragging_layer_across_image_shows_no_image_hover(qtbot, tmp_path):
+    stamp = tmp_path / "章.png"
+    Image.new("RGBA", (100, 80), (210, 35, 45, 255)).save(stamp)
+    layer = Overlay("stamp", 0, str(stamp), (140, 260, 200, 300), 0)
+    canvas = Canvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(700, 600)
+    canvas.show()
+    canvas.display(render_page(_stamp_page_pdf(), 0, 1.0), (layer,), None)
+    qtbot.waitExposed(canvas)
+
+    qtbot.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=_view_point(canvas, 170, 280))
+    # 按住按鍵一次拖到圖片上方：圖層尚未跟上游標，也不能出現圖片提示或手指游標。
+    _hover(canvas, _view_point(canvas, 240, 280), Qt.MouseButton.LeftButton)
+
+    assert canvas.image_hover is None
+    assert canvas.viewport().cursor().shape() != Qt.CursorShape.PointingHandCursor
+    qtbot.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=_view_point(canvas, 240, 280))
 
 
 def test_canvas_right_click_does_not_report_image_or_background(qtbot):
@@ -2136,6 +2156,208 @@ def test_window_exposes_legacy_stamp_conversion_only_for_open_idle_document(
     finally:
         window.busy = False
         window.close()
+
+
+def _open_stamp_page_window(qtbot, tmp_path, monkeypatch):
+    path = tmp_path / "材質證明.pdf"
+    path.write_bytes(_stamp_page_pdf())
+    monkeypatch.setattr(main_window.Jobs, "submit", _submit_synchronously)
+    return _open_window_for_legacy_stamp(qtbot, path)
+
+
+def _click_first_image(window):
+    image = window.page_data["images"][0]
+    window.canvas.image_clicked.emit(image)
+    return image
+
+
+def _close_without_prompt(window):
+    # 尚未改動的圖片轉換在關閉時會自動還原；先還原再標記已儲存，關閉時才不會詢問是否儲存。
+    window.discard_pending_conversion()
+    window.session.saved_fingerprint = window.session.history.current[2]
+    window.close()
+
+
+def test_clicking_image_converts_it_into_selected_layer(qtbot, tmp_path, monkeypatch):
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        image = _click_first_image(window)
+
+        assert len(window.session.overlays) == 1
+        layer = window.session.overlays[0]
+        assert (layer.page, layer.rect) == (image.page, image.rect)
+        assert window.layer_id == layer.id
+        assert window.panels.currentWidget() is window.overlay_panel
+        assert not window.busy
+    finally:
+        _close_without_prompt(window)
+
+
+def test_clicking_image_moves_selection_from_previous_layer(qtbot, tmp_path, monkeypatch):
+    from pdf_editor.ui.canvas import LayerItem
+
+    stamp = tmp_path / "舊章.png"
+    Image.new("RGBA", (40, 40), (210, 35, 45, 255)).save(stamp)
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        old = Overlay("old-stamp", 0, str(stamp), (300, 100, 340, 140), 0)
+        window.session.set_overlays((old,))
+        window.select_layer(old.id)
+        window.request_render()
+
+        _click_first_image(window)
+
+        new_id = window.session.overlays[-1].id
+        selected = {item.layer.id for item in window.canvas.scene().items()
+            if isinstance(item, LayerItem) and item.isSelected()}
+        assert selected == {new_id}
+    finally:
+        _close_without_prompt(window)
+
+
+def test_blank_click_reverts_unchanged_image_conversion(qtbot, tmp_path, monkeypatch):
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_first_image(window)
+
+        window.canvas.background_clicked.emit()
+
+        assert window.session.overlays == ()
+        assert not window.session.dirty
+        assert not window.session.can_redo
+        assert window.layer_id is None
+    finally:
+        _close_without_prompt(window)
+
+
+def test_moved_image_layer_is_kept_after_blank_click(qtbot, tmp_path, monkeypatch):
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_first_image(window)
+        layer = window.session.overlays[0]
+        window.move_layer(replace(layer, rect=(100, 100, 160, 140)))
+
+        window.canvas.background_clicked.emit()
+
+        assert window.session.overlays[0].rect == (100, 100, 160, 140)
+        assert window.session.dirty
+    finally:
+        _close_without_prompt(window)
+
+
+def test_selecting_same_layer_keeps_pending_conversion(qtbot, tmp_path, monkeypatch):
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_first_image(window)
+        layer = window.session.overlays[0]
+
+        # 開始拖曳轉換後的圖層時會再次選取它，不能因此撤銷。
+        window.canvas.layer_selected.emit(layer.id)
+
+        assert window.session.overlays == (layer,)
+    finally:
+        _close_without_prompt(window)
+
+
+def test_undo_after_unchanged_image_conversion_only_reverts_it(qtbot, tmp_path, monkeypatch):
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_first_image(window)
+
+        window.history_step(False)
+
+        assert window.session.overlays == ()
+        assert not window.session.dirty
+        assert not window.session.can_undo
+        assert not window.session.can_redo
+    finally:
+        _close_without_prompt(window)
+
+
+def test_selecting_text_reverts_conversion_and_reselects_text(qtbot, tmp_path, monkeypatch):
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_first_image(window)
+        run = next(r for r in window.page_data["runs"] if "品質" in r.text)
+
+        window.select_run(run)
+
+        assert window.session.overlays == ()
+        assert window.run is not None and "品質" in window.run.text
+    finally:
+        _close_without_prompt(window)
+
+
+def test_save_as_reverts_unchanged_image_conversion_first(qtbot, tmp_path, monkeypatch):
+    target = tmp_path / "另存.pdf"
+    monkeypatch.setattr(main_window.QFileDialog, "getSaveFileName",
+        lambda *args, **kwargs: (str(target), "PDF (*.pdf)"))
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_first_image(window)
+
+        window.save()
+
+        assert window.session.overlays == ()
+        assert target.exists()
+        assert not window.session.dirty
+    finally:
+        _close_without_prompt(window)
+
+
+def test_failed_image_click_reports_reason_in_status_bar(qtbot, tmp_path, monkeypatch):
+    def reject(*_args):
+        raise EditorError("STAMP_CONVERSION", "這張圖片在文件中重複使用，無法單獨編輯。")
+
+    monkeypatch.setattr(stamp_actions, "convert_image_at", reject)
+    monkeypatch.setattr(main_window.QMessageBox, "warning",
+        lambda *args: pytest.fail("點圖片失敗不應跳出對話框"))
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_first_image(window)
+
+        assert window.session.overlays == ()
+        assert "重複使用" in window.statusBar().currentMessage()
+        assert not window.busy
+    finally:
+        _close_without_prompt(window)
+
+
+def test_render_reuses_cached_editable_images_when_zooming(qtbot, tmp_path, monkeypatch):
+    calls = []
+    real_render = main_window.render_page
+
+    def spy_render(*args):
+        calls.append(args)
+        return real_render(*args)
+
+    monkeypatch.setattr(main_window, "render_page", spy_render)
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        images = window.page_data["images"]
+        assert images
+        calls.clear()
+
+        window.zoom_by(1)
+
+        assert calls and calls[-1][4] is False
+        assert window.page_data["images"] == images
+    finally:
+        _close_without_prompt(window)
+
+
+def test_unchanged_conversion_is_kept_when_history_was_trimmed(qtbot, tmp_path, monkeypatch):
+    window = _open_stamp_page_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_first_image(window)
+        monkeypatch.setattr(window.session, "can_discard", lambda count=1: False)
+
+        window.canvas.background_clicked.emit()
+
+        assert len(window.session.overlays) == 1
+        assert window.pending_conversion is None
+    finally:
+        _close_without_prompt(window)
 
 
 def test_window_converts_selected_legacy_stamp_into_layer(

@@ -1046,7 +1046,9 @@ class Canvas(QGraphicsView):
             self._show_highlight((r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy))
             event.accept()
             return
-        image=self._image_hover_target(self.mapToScene(event.position().toPoint()))
+        # 按住任何按鍵（拖曳圖層、捲動頁面）時不提示圖片，避免外框閃現並蓋掉拖曳游標。
+        image=(None if event.buttons()!=Qt.MouseButton.NoButton
+            else self._image_hover_target(self.mapToScene(event.position().toPoint())))
         if image is None:
             # 先清除提示，Qt 處理圖層游標時才不會存下圖片提示的游標當作原始游標。
             self.clear_image_hover()

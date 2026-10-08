@@ -1,4 +1,4 @@
-"""圖章與簽名：匯入、收藏、轉換既有圖章、多頁連續蓋章與圖層調整。"""
+"""圖章與簽名：匯入、收藏、點選或轉換既有圖片、多頁連續蓋章與圖層調整。"""
 import pymupdf
 from PySide6.QtWidgets import QFileDialog
 from dataclasses import replace
@@ -6,6 +6,7 @@ from pathlib import Path
 from pdf_editor.assets import AssetStore
 from pdf_editor.engine.overlay import flatten_overlays
 from pdf_editor.legacy_overlay_conversion import (
+    convert_image_at,
     convert_legacy_image,
     find_convertible_images,
 )
@@ -21,6 +22,71 @@ class StampActionsMixin:
         name,_=QFileDialog.getOpenFileName(self,"匯入圖章或簽名","","PNG (*.png)")
         if name:
             self.import_layer(Path(name),True)
+
+    def edit_image_at(self,image):
+        """直接點選頁面上的圖片：在背景轉成可拖曳、縮放的圖層。"""
+        if not self.session or self.busy or not self.session.access.can_edit:
+            return
+        token=self.token
+        revision=self.session.revision
+        self.busy=True
+        self.refresh_actions()
+        self.statusBar().showMessage("正在準備編輯圖片…")
+
+        def done(result):
+            self._apply_clicked_image(result,token,revision)
+
+        def failed(error):
+            self._finish_clicked_image_failure(error,token,revision)
+
+        self.jobs.submit(convert_image_at,(self.session.pdf,image,self.asset_root),done,failed)
+
+    def _apply_clicked_image(self,result,token,revision):
+        self.busy=False
+        if not self._legacy_stamp_context_is_current(token,revision):
+            self.refresh_actions()
+            return
+        base_pdf,layer=result
+        pending=self.pending_conversion
+        pending_ids=pending[1] if pending and pending[0]==revision else ()
+        self.session.apply_state(base_pdf,self.session.overlays+(layer,))
+        # 記下轉換後的版本；之後若沒有任何改動就離開，會自動撤銷轉換。
+        # 必須先記錄再選取，選取同一圖層時才不會被當成離開。
+        self.pending_conversion=(self.session.revision,pending_ids+(layer.id,))
+        self.clear_search_results()
+        self.select_layer(layer.id)
+        self.refresh_actions()
+        self.request_render("可拖曳圖片移動，或拖曳四角縮放；右側可勾選「去除白底」。")
+
+    def _finish_clicked_image_failure(self,error,token,revision):
+        self.busy=False
+        self.refresh_actions()
+        if self._legacy_stamp_context_is_current(token,revision):
+            # 點圖片失敗只在狀態列說明，不跳出對話框打斷操作。
+            self.statusBar().showMessage(error[1])
+
+    def discard_pending_conversion(self):
+        """點圖片轉換後若沒有任何改動，撤銷轉換且不留重做紀錄；回傳是否有撤銷。"""
+        if self.busy:
+            return False
+        pending,self.pending_conversion=self.pending_conversion,None
+        if pending is None or self.session is None:
+            return False
+        revision,layer_ids=pending
+        if self.session.revision!=revision:
+            return False
+        # 大型文件的轉換前狀態可能已被歷程上限裁掉；無法全部撤銷時保留轉換。
+        if not self.session.can_discard(len(layer_ids)):
+            return False
+        for _ in layer_ids:
+            self.session.discard_last()
+        if self.layer_id in layer_ids:
+            self.layer_id=None
+            self.panels.setCurrentWidget(self.text_panel)
+        self.clear_search_results()
+        self.refresh_actions()
+        self.request_render()
+        return True
 
     def convert_legacy_stamp(self):
         """掃描文件，讓使用者明確選取後將既有圖章抽離為工作層。"""
@@ -213,6 +279,9 @@ class StampActionsMixin:
         return ("略過：" + "；".join(parts)) if parts else ""
 
     def select_layer(self,id):
+        pending=self.pending_conversion
+        if pending and id not in pending[1]:
+            self.discard_pending_conversion()
         self.canvas.cancel_inline_editor()
         self.layer_id=id
         layer=next((o for o in self.session.overlays if o.id==id),None)

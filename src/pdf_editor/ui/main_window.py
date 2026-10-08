@@ -133,6 +133,10 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.run=None
         self.insertion_rect=None
         self.layer_id=None
+        # 點圖片轉換後尚未改動的狀態：(轉換後版本, 轉換出的圖層 ID)。
+        self.pending_conversion=None
+        # 可點選圖片清單：{(文件版本, 頁碼): images}，只保留目前文件版本的項目。
+        self._image_cache={}
         self.annotation=None
         self.crop_pages=()
         self.search_results=()
@@ -397,6 +401,8 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.canvas.annotation_delete_requested.connect(self.delete_selected_annotation)
         self.canvas.layer_selected.connect(self.select_layer)
         self.canvas.layer_moved.connect(self.move_layer)
+        self.canvas.image_clicked.connect(self.edit_image_at)
+        self.canvas.background_clicked.connect(self.discard_pending_conversion)
         self.canvas.crop_requested.connect(self.apply_direct_crop)
         self.canvas.crop_cancelled.connect(self.cancel_direct_crop)
         self.canvas.zoom_step_requested.connect(self.zoom_by)
@@ -731,6 +737,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
     def confirm_leave(self):
         if self.busy:
             return False
+        self.discard_pending_conversion()
         if self.session and self.session.dirty:
             result=QMessageBox.question(self,"尚未儲存","是否儲存目前變更？",
                 QMessageBox.StandardButton.Save|QMessageBox.StandardButton.Discard|QMessageBox.StandardButton.Cancel)
@@ -767,6 +774,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.clear_search_results(True)
         self.session=session
         self.token+=1
+        self.pending_conversion=None
         self.run=None
         self.annotation=None
         self.insertion_rect=None
@@ -923,6 +931,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
     def goto_page(self,page):
         if not self.session or not 0<=page<self.page_count or page==self.page:
             return
+        self.discard_pending_conversion()
         self.page=page
         if self.thumbs.currentRow()!=page:
             self.thumbs.blockSignals(True)
@@ -1190,9 +1199,17 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.statusBar().showMessage("正在更新頁面…")
         data=str(self.session.pdf_path)
         layers=self.session.overlays
+        image_key=(self.session.document_key,self.page)
+        cached_images=self._image_cache.get(image_key)
         def done(result):
             if self.closed or token!=self.token or serial!=self.render_serial:
                 return
+            if "images" in result:
+                self._image_cache={key:value for key,value in self._image_cache.items()
+                    if key[0]==image_key[0]}
+                self._image_cache[image_key]=result["images"]
+            else:
+                result["images"]=cached_images
             self.page_data=result
             try:
                 self.canvas.display(result,layers,self.layer_id)
@@ -1229,7 +1246,8 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
                 self.statusBar().showMessage(f"第 {self.page+1} / {self.page_count} 頁  ·  {status}")
             self.update_status_fields()
         pixel_ratio=float(self.canvas.devicePixelRatioF())
-        self.jobs.submit(render_page,(data,self.page,self.scale,pixel_ratio),done,self.error)
+        self.jobs.submit(render_page,(data,self.page,self.scale,pixel_ratio,cached_images is None),
+            done,self.error)
 
 
 
@@ -1260,6 +1278,9 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
     def history_step(self,redo):
         if not self.session or self.busy:
             return
+        # 尚未改動的圖片轉換：這次復原只撤銷轉換本身。
+        if self.discard_pending_conversion():
+            return
         self.cancel_editing_modes(crop=False)
         self.canvas.clear_annotation_selection()
         self.clear_selection_state()
@@ -1275,6 +1296,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         """直接覆蓋原檔；覆蓋前把原檔複製到備份資料夾。"""
         if not self.session or self.busy:
             return
+        self.discard_pending_conversion()
         source=self.session.source
         if not source.exists():
             QMessageBox.information(self,"找不到原檔",
@@ -1323,6 +1345,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
     def save(self):
         if not self.session or self.busy:
             return
+        self.discard_pending_conversion()
         if self.session.password_used:
             if QMessageBox.question(self,"輸出保護","另存的文件不保留密碼保護，是否繼續？")!=QMessageBox.StandardButton.Yes:
                 return
