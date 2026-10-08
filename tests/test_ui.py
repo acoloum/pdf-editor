@@ -1,12 +1,13 @@
 import hashlib
 import io
+from pathlib import Path
 from concurrent.futures import Future
 from dataclasses import replace
 import pytest
 import pymupdf
 from PIL import Image
 from PySide6.QtCore import Qt, QPoint, QPointF, QItemSelectionModel, QEvent, QCoreApplication
-from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QKeySequence, QMouseEvent
 from PySide6.QtWidgets import QAbstractItemView,QDialog,QToolBar
 from PySide6.QtTest import QSignalSpy
 from pdf_editor.ui.main_window import MainWindow
@@ -19,6 +20,7 @@ from pdf_editor.ui.signature_dialog import SignatureDialog
 from pdf_editor.ui.canvas import Canvas
 from pdf_editor.ui.text_panel import TextPanel
 from pdf_editor.engine.fonts import default_font
+from pdf_editor.errors import EditorError
 from pdf_editor.annotations import mark_text
 from pdf_editor.model import LegacyImageCandidate, Overlay
 from pdf_editor.ocr import OcrResult
@@ -29,6 +31,34 @@ def _legacy_candidate(page=0, xref=17, rect=(20, 30, 100, 70)):
     stream = io.BytesIO()
     Image.new("RGBA", (80, 40), (30, 70, 210, 255)).save(stream, format="PNG")
     return LegacyImageCandidate(xref, page, rect, stream.getvalue(), 80, 40)
+
+
+NOTO = Path(__file__).parents[1] / "resources/fonts/NotoSansCJKtc-Regular.otf"
+
+
+def _stamp_page_pdf():
+    """一頁含可編輯文字與唯一圖章（不與文字重疊）的 PDF。"""
+    buffer = io.BytesIO()
+    Image.new("RGB", (60, 40), (0, 60, 255)).save(buffer, format="PNG")
+    with pymupdf.open() as document:
+        page = document.new_page(width=500, height=400)
+        page.insert_font(fontname="noto", fontfile=str(NOTO))
+        page.insert_text((40, 80), "品質檢驗 ABC 123", fontname="noto", fontsize=16)
+        page.insert_image((210, 260, 270, 300), stream=buffer.getvalue())
+        document.subset_fonts(fallback=True)
+        return document.tobytes(garbage=4, deflate=True)
+
+
+def _view_point(canvas, x, y):
+    return canvas.mapFromScene(QPointF(*transform_point(canvas.matrix, x, y)))
+
+
+def _hover(canvas, point):
+    """送出無按鍵的滑鼠移動事件（qtbot.mouseMove 在此環境不會送達檢視區）。"""
+    event = QMouseEvent(QEvent.Type.MouseMove, QPointF(point),
+        QPointF(canvas.viewport().mapToGlobal(point)), Qt.MouseButton.NoButton,
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+    QCoreApplication.sendEvent(canvas.viewport(), event)
 
 
 def test_legacy_stamp_dialog_requires_explicit_candidate(qtbot):
@@ -207,6 +237,56 @@ def test_canvas_dragging_text_emits_moved_run(qtbot, pdf_bytes):
     qtbot.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=end)
     assert spy.count() == 1
     assert spy.at(0)[0].rect[0] > run.rect[0]
+
+
+def test_canvas_hover_and_click_on_editable_image(qtbot):
+    canvas = Canvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(700, 600)
+    canvas.show()
+    data = render_page(_stamp_page_pdf(), 0, 1.0)
+    canvas.display(data)
+    qtbot.waitExposed(canvas)
+    spy = QSignalSpy(canvas.image_clicked)
+    center = _view_point(canvas, 240, 280)
+
+    _hover(canvas, center)
+    assert canvas.image_hover is not None
+    assert canvas.viewport().cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+    qtbot.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=center)
+    assert spy.count() == 1
+    assert spy.at(0)[0] == data["images"][0]
+
+    _hover(canvas, _view_point(canvas, 450, 380))
+    assert canvas.image_hover is None
+    assert canvas.viewport().cursor().shape() != Qt.CursorShape.PointingHandCursor
+
+
+def test_canvas_prefers_text_over_image_and_reports_background_click(qtbot, pdf_bytes):
+    # 共用測試 PDF 的圖片實際範圍約 (101,40,329,120)（等比例置中），其上疊有文字。
+    canvas = Canvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(700, 600)
+    canvas.show()
+    data = render_page(pdf_bytes, 0, 1.0)
+    canvas.display(data)
+    qtbot.waitExposed(canvas)
+    assert data["images"]
+    images = QSignalSpy(canvas.image_clicked)
+    runs = QSignalSpy(canvas.run_selected)
+    blank = QSignalSpy(canvas.background_clicked)
+    run = next(r for r in data["runs"] if "品質" in r.text and r.rect[1] < 120)
+
+    qtbot.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton,
+        pos=_view_point(canvas, (run.rect[0] + run.rect[2]) / 2, (run.rect[1] + run.rect[3]) / 2))
+    assert (runs.count(), images.count()) == (1, 0)
+
+    qtbot.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=_view_point(canvas, 300, 110))
+    assert images.count() == 1
+
+    qtbot.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=_view_point(canvas, 450, 380))
+    assert blank.count() == 1
 
 
 def test_canvas_layer_uses_device_pixels_on_high_dpi(qtbot,pdf_bytes,tmp_path):

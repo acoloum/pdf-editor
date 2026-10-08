@@ -295,6 +295,8 @@ class Canvas(QGraphicsView):
     files_dropped=Signal(list)
     pointer_moved=Signal(object)
     context_menu_requested=Signal(object,object,object)
+    image_clicked=Signal(object)
+    background_clicked=Signal()
 
     def __init__(self):
         super().__init__()
@@ -305,6 +307,9 @@ class Canvas(QGraphicsView):
         self.matrix=(1,0,0,1,0,0)
         self.runs=[]
         self.annotations=[]
+        self.editable_images=()
+        self.image_hover=None
+        self._hover_image=None
         self.highlight=None
         self.annotation_highlight=None
         self.search_highlight=None
@@ -376,6 +381,10 @@ class Canvas(QGraphicsView):
         self.matrix=data["matrix"]
         self.runs=data["runs"]
         self.annotations=data.get("annotations",())
+        self.editable_images=data.get("images",())
+        self.image_hover=None
+        self._hover_image=None
+        self.viewport().unsetCursor()
         pix=QPixmap()
         pix.loadFromData(data["png"])
         pix.setDevicePixelRatio(data.get("pixel_ratio",1.0))
@@ -419,6 +428,50 @@ class Canvas(QGraphicsView):
             if x0<=x<=x1 and y0<=y<=y1:
                 return item
         return None
+
+    def _image_at(self,scene_pos):
+        """游標下可直接點選編輯的圖片（以 PDF 座標判斷）。"""
+        x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
+        for image in reversed(self.editable_images):
+            x0,y0,x1,y1=image.rect
+            if x0<=x<=x1 and y0<=y<=y1:
+                return image
+        return None
+
+    def _image_hover_target(self,scene_pos):
+        """只有在沒有圖層、文字或進行中模式時，才提示圖片可點選。"""
+        if (self._crop_mode or self._text_insertion or self._note_insertion
+                or self._annotation_selection or self._drag_run
+                or self.dragMode()!=QGraphicsView.DragMode.NoDrag):
+            return None
+        if isinstance(self.scene().itemAt(scene_pos,QTransform()),LayerItem):
+            return None
+        if self._run_at(scene_pos):
+            return None
+        return self._image_at(scene_pos)
+
+    def _update_image_hover(self,scene_pos):
+        image=self._image_hover_target(scene_pos)
+        if image==self._hover_image:
+            return
+        self.clear_image_hover()
+        if image is None:
+            return
+        r=transformed_rect(self.matrix,image.rect)
+        pen=QPen(QColor(COLORS["accent"]),2,Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        self.image_hover=self.scene().addRect(r[0],r[1],r[2]-r[0],r[3]-r[1],pen)
+        self.image_hover.setZValue(4)
+        self.image_hover.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self._hover_image=image
+        self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def clear_image_hover(self):
+        if self.image_hover is not None:
+            self.scene().removeItem(self.image_hover)
+        self.image_hover=None
+        self._hover_image=None
+        self.viewport().unsetCursor()
 
     def clear_text_selection(self):
         self.selected_run=None
@@ -883,6 +936,14 @@ class Canvas(QGraphicsView):
                 event.accept()
                 return
             self.clear_text_selection()
+            image=self._image_at(scene_pos)
+            if image and event.button()==Qt.MouseButton.LeftButton:
+                # 文字優先；沒點到文字才轉交圖片編輯。
+                self.clear_image_hover()
+                self.image_clicked.emit(image)
+                event.accept()
+                return
+            self.background_clicked.emit()
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         super().mousePressEvent(event)
 
@@ -957,6 +1018,8 @@ class Canvas(QGraphicsView):
 
     def leaveEvent(self,event):
         self.pointer_moved.emit(None)
+        if self.image_hover is not None:
+            self.clear_image_hover()
         super().leaveEvent(event)
 
     def mouseMoveEvent(self,event):
@@ -976,6 +1039,7 @@ class Canvas(QGraphicsView):
             self._show_highlight((r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy))
             event.accept()
             return
+        self._update_image_hover(self.mapToScene(event.position().toPoint()))
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self,event):
