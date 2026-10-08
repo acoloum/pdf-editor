@@ -56,6 +56,8 @@ class Overlay:
     asset_path: str
     rect: Rect
     angle: float = 0
+    # 把接近白色的像素變透明；資產檔不變，取消即可還原。
+    remove_white: bool = False
 
 
 @dataclass(frozen=True)
