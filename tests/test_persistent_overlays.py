@@ -297,3 +297,45 @@ def test_workspace_rejects_external_annotation_set_changes(tmp_path, change):
 
     with pytest.raises(EditorError, match="工作層無法驗證"):
         load_workspace(modified, tmp_path / "assets")
+
+
+def _white_stamp(tmp_path):
+    stamp = tmp_path / "白底章.png"
+    Image.new("RGBA", (20, 10), (255, 255, 255, 255)).save(stamp)
+    return stamp
+
+
+def _manifest_of(workspace):
+    with pymupdf.open(stream=workspace, filetype="pdf") as document:
+        return json.loads(document.embfile_get(MANIFEST_NAME).decode("utf-8"))
+
+
+def test_workspace_round_trips_remove_white(tmp_path, pdf_bytes):
+    layer = Overlay("章-1", 0, str(_white_stamp(tmp_path)), (100, 110, 140, 130), 0, True)
+    workspace = embed_workspace(pdf_bytes, (layer,))
+
+    assert _manifest_of(workspace)["overlays"][0]["remove_white"] is True
+    restored = load_workspace(workspace, tmp_path / "assets")
+    assert restored.overlays[0].remove_white is True
+
+
+def test_workspace_omits_remove_white_when_disabled(tmp_path, pdf_bytes):
+    layer = Overlay("章-1", 0, str(_white_stamp(tmp_path)), (100, 110, 140, 130))
+    workspace = embed_workspace(pdf_bytes, (layer,))
+
+    # 沒勾選時不寫入，舊版程式仍可讀取。
+    assert "remove_white" not in _manifest_of(workspace)["overlays"][0]
+    assert load_workspace(workspace, tmp_path / "assets").overlays[0].remove_white is False
+
+
+def test_workspace_rejects_non_boolean_remove_white(tmp_path, pdf_bytes):
+    layer = Overlay("章-1", 0, str(_white_stamp(tmp_path)), (100, 110, 140, 130))
+    workspace = embed_workspace(pdf_bytes, (layer,))
+    manifest = _manifest_of(workspace)
+    manifest["overlays"][0]["remove_white"] = "yes"
+    tampered = _embed_with_replaced_manifest(
+        workspace, json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+    )
+
+    with pytest.raises(EditorError, match="工作層無法驗證"):
+        load_workspace(tampered, tmp_path / "assets")

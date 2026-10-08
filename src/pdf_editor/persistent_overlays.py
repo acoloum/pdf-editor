@@ -23,6 +23,9 @@ BASE_NAME = "moye-pdf/base.pdf"
 ASSET_PREFIX = "moye-pdf/assets/"
 _WORKSPACE_ERROR = "圖章工作層無法驗證，已改以靜態 PDF 開啟。"
 _PDF_REFERENCE = re.compile(rb"(?<!\d)(\d+)\s+(\d+)\s+R")
+_OVERLAY_KEYS = {"id", "page", "rect", "angle", "asset_name", "asset_sha256"}
+# 選填欄位只在啟用時寫入，未使用的檔案與舊版程式完全相容。
+_OPTIONAL_OVERLAY_KEYS = {"remove_white"}
 
 
 @dataclass(frozen=True)
@@ -60,9 +63,9 @@ def has_only_workspace_embedded_files(document) -> bool:
 def _validated_overlay_data(item: object, names: set[str], document, page_bounds):
     """驗證圖層描述及資產內容，供載入與附件分類共用。"""
     try:
-        if not isinstance(item, dict) or set(item) != {
-            "id", "page", "rect", "angle", "asset_name", "asset_sha256"
-        }:
+        if not isinstance(item, dict) or not (
+            _OVERLAY_KEYS <= set(item) <= _OVERLAY_KEYS | _OPTIONAL_OVERLAY_KEYS
+        ):
             raise ValueError()
         identifier = item["id"]
         page = item["page"]
@@ -70,6 +73,7 @@ def _validated_overlay_data(item: object, names: set[str], document, page_bounds
         angle = item["angle"]
         asset_name = item["asset_name"]
         asset_sha256 = item["asset_sha256"]
+        remove_white = item.get("remove_white", False)
         page_count = len(page_bounds)
         if (
             not isinstance(identifier, str)
@@ -91,6 +95,7 @@ def _validated_overlay_data(item: object, names: set[str], document, page_bounds
             or not asset_name.startswith(ASSET_PREFIX)
             or not isinstance(asset_sha256, str)
             or asset_name not in names
+            or not isinstance(remove_white, bool)
         ):
             raise ValueError()
         x0, y0, x1, y1 = rect
@@ -106,7 +111,7 @@ def _validated_overlay_data(item: object, names: set[str], document, page_bounds
         _transformed, rendered_rect = transformed_png(content, tuple(rect), angle)
         if not pymupdf.Rect(0, 0, page_width, page_height).contains(rendered_rect):
             raise ValueError()
-        return identifier, page, tuple(rect), angle, asset_name, content
+        return identifier, page, tuple(rect), angle, asset_name, content, remove_white
     except Exception as exc:
         raise EditorError("WORKSPACE", _WORKSPACE_ERROR) from exc
 
@@ -192,16 +197,17 @@ def _prepare_assets(overlays: tuple[Overlay, ...]):
         digest = _sha256(content)
         name = f"{ASSET_PREFIX}{digest}.png"
         assets[name] = content
-        manifest_overlays.append(
-            {
-                "id": overlay.id,
-                "page": overlay.page,
-                "rect": list(overlay.rect),
-                "angle": overlay.angle,
-                "asset_name": name,
-                "asset_sha256": digest,
-            }
-        )
+        entry = {
+            "id": overlay.id,
+            "page": overlay.page,
+            "rect": list(overlay.rect),
+            "angle": overlay.angle,
+            "asset_name": name,
+            "asset_sha256": digest,
+        }
+        if overlay.remove_white:
+            entry["remove_white"] = True
+        manifest_overlays.append(entry)
     return assets, manifest_overlays
 
 
@@ -244,13 +250,13 @@ def _restore_overlay(
     created_assets: set[Path],
 ) -> Overlay:
     try:
-        identifier, page, rect, angle, _asset_name, content = _validated_overlay_data(
-            item, names, document, page_bounds
+        identifier, page, rect, angle, _asset_name, content, remove_white = (
+            _validated_overlay_data(item, names, document, page_bounds)
         )
         path = asset_store.import_png_bytes(content)
         if path not in existing_assets:
             created_assets.add(path)
-        return Overlay(identifier, page, str(path), rect, angle)
+        return Overlay(identifier, page, str(path), rect, angle, remove_white)
     except Exception as exc:
         raise EditorError("WORKSPACE", _WORKSPACE_ERROR) from exc
 
