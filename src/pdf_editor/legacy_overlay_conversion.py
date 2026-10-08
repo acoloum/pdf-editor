@@ -45,35 +45,69 @@ def find_convertible_images(pdf: bytes) -> tuple[LegacyImageCandidate, ...]:
         raise EditorError("STAMP_CONVERSION", "無法掃描文件中的既有圖章影像。") from exc
 
 
+_CANDIDATE_CHANGED = "圖章候選已變更，請重新掃描後再選取。"
+_IMAGE_CHANGED = "圖片位置已變更，請再點一次。"
+
+
 def convert_legacy_image(pdf: bytes, candidate: LegacyImageCandidate, asset_root) -> tuple[bytes, Overlay]:
     """原子地抽離候選影像，成功時才建立資產與工作層。"""
     try:
         current = {item.xref: item for item in find_convertible_images(pdf)}
         if current.get(candidate.xref) != candidate:
-            raise EditorError("STAMP_CONVERSION", "圖章候選已變更，請重新掃描後再選取。")
-
-        with pymupdf.open(stream=pdf, filetype="pdf") as document:
-            # 在實際刪除前重新確認此 xref 仍僅有一個使用位置。
-            uses = _image_uses(document)
-            if uses.get(candidate.xref) != [(candidate.page, candidate.rect)]:
-                raise EditorError("STAMP_CONVERSION", "圖章候選已變更，請重新掃描後再選取。")
-            document[candidate.page].delete_image(candidate.xref)
-            base_pdf = document.tobytes(garbage=4, deflate=True)
-
-        _verify_pdf(base_pdf, candidate)
-        if not _replacement_from_base_preserves_appearance(pdf, base_pdf, candidate):
-            raise EditorError(
-                "STAMP_CONVERSION",
-                "既有圖章受其他內容或繪圖狀態影響，無法安全轉換。",
-            )
-        asset = AssetStore(asset_root).import_png_bytes(candidate.png)
-        return base_pdf, Overlay(uuid.uuid4().hex, candidate.page, str(asset), candidate.rect)
+            raise EditorError("STAMP_CONVERSION", _CANDIDATE_CHANGED)
+        return _extract_candidate(pdf, candidate, asset_root, _CANDIDATE_CHANGED)
     except EditorError as exc:
         if exc.code == "STAMP_CONVERSION":
             raise
         raise EditorError("STAMP_CONVERSION", "既有圖章轉換失敗，文件未被變更。") from exc
     except Exception as exc:
         raise EditorError("STAMP_CONVERSION", "既有圖章轉換失敗，文件未被變更。") from exc
+
+
+def convert_image_at(pdf: bytes, image: EditableImage, asset_root) -> tuple[bytes, Overlay]:
+    """直接點選圖片時，只檢查並抽離這一張；任何條件不符都不改動文件。"""
+    try:
+        with pymupdf.open(stream=pdf, filetype="pdf") as document:
+            uses = _image_uses(document).get(image.xref, [])
+            if len(uses) > 1:
+                raise EditorError("STAMP_CONVERSION", "這張圖片在文件中重複使用，無法單獨編輯。")
+            # 頁面資料可能已過時；位置不符時不猜測，避免改到別張圖。
+            if uses != [(image.page, image.rect)]:
+                raise EditorError("STAMP_CONVERSION", _IMAGE_CHANGED)
+            page = document[image.page]
+            if not _is_not_page_scan(page, image.rect):
+                raise EditorError("STAMP_CONVERSION", "整頁掃描的圖片無法單獨編輯。")
+            if not _has_supported_placement(page, image.xref, image.rect):
+                raise EditorError("STAMP_CONVERSION", "旋轉或傾斜擺放的圖片無法單獨編輯。")
+            candidate = _candidate_from_use(document, image.xref, image.page, image.rect)
+        return _extract_candidate(pdf, candidate, asset_root, _IMAGE_CHANGED)
+    except EditorError as exc:
+        if exc.code == "STAMP_CONVERSION":
+            raise
+        raise EditorError("STAMP_CONVERSION", "圖片轉換失敗，文件未被變更。") from exc
+    except Exception as exc:
+        raise EditorError("STAMP_CONVERSION", "圖片轉換失敗，文件未被變更。") from exc
+
+
+def _extract_candidate(pdf: bytes, candidate: LegacyImageCandidate, asset_root,
+                       changed_message: str) -> tuple[bytes, Overlay]:
+    """從副本移除影像並驗證外觀；全部通過後才建立資產。"""
+    with pymupdf.open(stream=pdf, filetype="pdf") as document:
+        # 在實際刪除前重新確認此 xref 仍僅有一個使用位置。
+        uses = _image_uses(document)
+        if uses.get(candidate.xref) != [(candidate.page, candidate.rect)]:
+            raise EditorError("STAMP_CONVERSION", changed_message)
+        document[candidate.page].delete_image(candidate.xref)
+        base_pdf = document.tobytes(garbage=4, deflate=True)
+
+    _verify_pdf(base_pdf, candidate)
+    if not _replacement_from_base_preserves_appearance(pdf, base_pdf, candidate):
+        raise EditorError(
+            "STAMP_CONVERSION",
+            "這張圖片受其他內容或繪圖狀態影響，無法安全編輯。",
+        )
+    asset = AssetStore(asset_root).import_png_bytes(candidate.png)
+    return base_pdf, Overlay(uuid.uuid4().hex, candidate.page, str(asset), candidate.rect)
 
 
 def editable_images_on_page(document, page_number: int) -> tuple[EditableImage, ...]:

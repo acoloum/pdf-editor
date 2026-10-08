@@ -1,4 +1,5 @@
 import io
+from dataclasses import replace
 
 import pymupdf
 import pytest
@@ -9,6 +10,7 @@ from pdf_editor.engine.render import render_page
 from pdf_editor.errors import EditorError
 from pdf_editor.legacy_overlay_conversion import (
     _samples_match,
+    convert_image_at,
     convert_legacy_image,
     editable_images_on_page,
     find_convertible_images,
@@ -258,3 +260,46 @@ def test_render_page_includes_editable_images():
     images = render_page(_pdf_with_unique_stamp(), 0, 1.0)["images"]
 
     assert [(item.page, item.rect) for item in images] == [(0, (210, 260, 270, 300))]
+
+
+def test_convert_image_at_extracts_clicked_stamp(tmp_path):
+    source = _pdf_with_unique_stamp()
+    image = _editable_images(source)[0]
+
+    base_pdf, layer = convert_image_at(source, image, tmp_path / "assets")
+
+    assert _blue_stamp_pixels(base_pdf) == 0
+    assert (layer.page, layer.rect) == (0, image.rect)
+    assert _blue_stamp_pixels(flatten_overlays(base_pdf, (layer,))) > 0
+
+
+def test_convert_image_at_rejects_reused_image_without_changes(tmp_path):
+    source = _pdf_with_reused_image()
+    with pymupdf.open(stream=source, filetype="pdf") as document:
+        xref = document[0].get_images()[0][0]
+
+    with pytest.raises(EditorError, match="重複使用") as error:
+        convert_image_at(source, EditableImage(xref, 0, (210, 260, 270, 300)),
+                         tmp_path / "assets")
+
+    assert error.value.code == "STAMP_CONVERSION"
+    assert not (tmp_path / "assets").exists()
+
+
+def test_convert_image_at_rejects_stale_position(tmp_path):
+    source = _pdf_with_unique_stamp()
+    stale = replace(_editable_images(source)[0], rect=(0, 0, 10, 10))
+
+    with pytest.raises(EditorError, match="位置已變更"):
+        convert_image_at(source, stale, tmp_path / "assets")
+
+
+def test_convert_image_at_rejects_image_covered_by_vector(tmp_path):
+    source = _pdf_with_vector_covering_stamp()
+    # 快速清單樂觀列出，實際轉換時的外觀比對負責擋下。
+    image = _editable_images(source)[0]
+
+    with pytest.raises(EditorError, match="無法安全編輯"):
+        convert_image_at(source, image, tmp_path / "assets")
+
+    assert not (tmp_path / "assets").exists()
