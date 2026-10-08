@@ -436,6 +436,13 @@ class Canvas(QGraphicsView):
                 return item
         return None
 
+    def layer_at(self,view_pos):
+        """視窗座標下最上層的圖層；沒有時回傳 None。"""
+        for item in self.items(view_pos):
+            if isinstance(item,LayerItem):
+                return item.layer
+        return None
+
     def _image_at(self,scene_pos):
         """游標下可直接點選編輯的圖片（以 PDF 座標判斷）。"""
         x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())

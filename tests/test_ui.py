@@ -362,6 +362,21 @@ def test_canvas_layer_uses_device_pixels_on_high_dpi(qtbot,pdf_bytes,tmp_path):
     assert item.source_pixmap.width()==800
 
 
+def test_canvas_layer_at_returns_layer_under_view_point(qtbot, pdf_bytes, tmp_path):
+    stamp = tmp_path / "章.png"
+    Image.new("RGBA", (40, 40), (210, 35, 45, 255)).save(stamp)
+    layer = Overlay("layer-at", 0, str(stamp), (300, 200, 340, 240), 0)
+    canvas = Canvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(700, 600)
+    canvas.show()
+    canvas.display(render_page(pdf_bytes, 0, 1.0), (layer,))
+    qtbot.waitExposed(canvas)
+
+    assert canvas.layer_at(_view_point(canvas, 320, 220)) == layer
+    assert canvas.layer_at(_view_point(canvas, 450, 380)) is None
+
+
 def test_canvas_layer_corner_drag_resizes_with_original_ratio(qtbot,pdf_bytes,tmp_path):
     from PIL import Image
 
