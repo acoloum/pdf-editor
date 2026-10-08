@@ -69,13 +69,28 @@ class History:
         self._trim()
         self.index = len(self.items) - 1
 
+    def can_discard(self, count=1):
+        """目前是否位於最新一步，且往前至少還有 count 步可捨棄。"""
+        return self.index == len(self.items) - 1 and self.index >= count
+
     def discard_last(self):
         """撤銷最新一筆且不留重做紀錄，供未改動的暫時轉換使用。"""
-        if self.index <= 0 or self.index != len(self.items) - 1:
+        if not self.can_discard():
             raise ValueError("只能捨棄最新的一筆歷程。")
+        # 先更新狀態再刪檔，刪檔失敗也不會讓索引失效。
         path = self.items.pop()[0]
-        path.unlink(missing_ok=True)
         self.index -= 1
+        self._remove_file(path)
+
+    @staticmethod
+    def _remove_file(path):
+        """盡力刪除暫存檔。"""
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            # Windows 上檔案可能仍被背景工作開啟；殘留檔案不再被引用，
+            # 序號不會重複使用，關閉時由 close() 整個資料夾清除。
+            pass
 
     def _trim(self):
         """限制復原步數與暫存總容量，大型文件不會佔滿磁碟。"""
@@ -88,7 +103,7 @@ class History:
                 used -= removed.stat().st_size
             except OSError:
                 pass
-            removed.unlink(missing_ok=True)
+            self._remove_file(removed)
 
     @property
     def current(self):

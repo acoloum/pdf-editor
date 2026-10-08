@@ -41,17 +41,14 @@ def transformed_png(content, rect, angle, remove_white=False):
         image = source.convert("RGBA")
     if remove_white:
         image = _remove_white(image)
-    if math.isclose(angle % 360, 0, abs_tol=1e-9):
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        return buffer.getvalue(), rect
-    scale = min(3.0, 3000 / max(width, height))
-    image = image.resize((max(1, round(width * scale)),
-        max(1, round(height * scale))), Image.Resampling.LANCZOS)
-    image = image.rotate(-angle, expand=True, resample=Image.Resampling.BICUBIC)
-    w, h = image.width / scale, image.height / scale
-    cx, cy = (x0+x1)/2, (y0+y1)/2
-    rect = (cx-w/2, cy-h/2, cx+w/2, cy+h/2)
+    if not math.isclose(angle % 360, 0, abs_tol=1e-9):
+        scale = min(3.0, 3000 / max(width, height))
+        image = image.resize((max(1, round(width * scale)),
+            max(1, round(height * scale))), Image.Resampling.LANCZOS)
+        image = image.rotate(-angle, expand=True, resample=Image.Resampling.BICUBIC)
+        w, h = image.width / scale, image.height / scale
+        cx, cy = (x0+x1)/2, (y0+y1)/2
+        rect = (cx-w/2, cy-h/2, cx+w/2, cy+h/2)
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue(), rect

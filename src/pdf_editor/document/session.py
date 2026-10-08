@@ -95,6 +95,9 @@ class DocumentSession:
             self.history.index += 1
             self.revision += 1
 
+    def can_discard(self, count=1):
+        return self.history.can_discard(count)
+
     def discard_last(self):
         self.history.discard_last()
         self.revision += 1

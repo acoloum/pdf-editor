@@ -49,10 +49,16 @@ def test_remove_white_disabled_keeps_original_alpha():
 
 
 def test_remove_white_applies_to_rotated_layers():
-    png, _rect = transformed_png(SOURCE, (0, 0, 60, 10), 30, remove_white=True)
+    white = _row_png([(255, 255, 255, 255)] * 40)
 
-    with Image.open(io.BytesIO(png)) as image:
-        assert image.convert("RGBA").getpixel((0, 0))[3] == 0
+    def center_alpha(remove_white):
+        png, _rect = transformed_png(white, (0, 0, 40, 40), 30, remove_white=remove_white)
+        with Image.open(io.BytesIO(png)) as image:
+            rgba = image.convert("RGBA")
+            return rgba.getpixel((rgba.width // 2, rgba.height // 2))[3]
+
+    assert center_alpha(False) == 255
+    assert center_alpha(True) == 0
 
 
 def test_flatten_with_remove_white_shows_content_underneath(tmp_path):

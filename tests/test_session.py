@@ -229,3 +229,59 @@ def test_discard_last_refuses_when_not_at_latest_step(source_path):
         session.undo()
         with pytest.raises(ValueError):
             session.discard_last()
+
+
+def test_discard_last_stays_consistent_when_file_is_in_use(source_path):
+    with DocumentSession.open(source_path) as session:
+        original = session.pdf
+        session.apply_pdf(original + b"\n%discard")
+        # 背景縮圖／渲染工作可能仍開著暫存檔，Windows 上此時無法刪除。
+        reader = pymupdf.open(str(session.pdf_path))
+        try:
+            session.discard_last()
+        finally:
+            reader.close()
+
+        assert session.pdf == original
+        assert not session.can_redo
+        assert not session.dirty
+
+
+def test_trim_survives_file_in_use(source_path, monkeypatch):
+    monkeypatch.setattr("pdf_editor.document.history.MAX_ITEMS", 2)
+    with DocumentSession.open(source_path) as session:
+        reader = pymupdf.open(str(session.pdf_path))
+        try:
+            session.apply_pdf(session.pdf + b"\n%one")
+            session.apply_pdf(session.pdf + b"\n%two")
+        finally:
+            reader.close()
+
+        assert session.pdf.endswith(b"%two")
+        assert len(session.history.items) == 2
+
+
+def test_can_discard_reflects_position_and_available_steps(source_path):
+    with DocumentSession.open(source_path) as session:
+        assert not session.can_discard()
+        session.apply_pdf(session.pdf + b"\n%one")
+        session.apply_pdf(session.pdf + b"\n%two")
+        assert session.can_discard()
+        assert session.can_discard(2)
+        assert not session.can_discard(3)
+        session.undo()
+        assert not session.can_discard()
+
+
+def test_can_discard_false_when_older_state_was_trimmed(source_path, monkeypatch):
+    monkeypatch.setattr("pdf_editor.document.history.MAX_ITEMS", 2)
+    with DocumentSession.open(source_path) as session:
+        session.apply_pdf(session.pdf + b"\n%one")
+        session.apply_pdf(session.pdf + b"\n%two")
+
+        # 最初狀態已被限額清掉，只剩一步可捨棄。
+        assert not session.can_discard(2)
+        assert session.can_discard(1)
+        session.discard_last()
+        with pytest.raises(ValueError):
+            session.discard_last()
