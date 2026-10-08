@@ -17,12 +17,15 @@ class TextActionsMixin:
     def select_run(self,run,open_editor=True):
         if not self.session or not self.session.access.can_edit:
             return
-        if self.pending_conversion is not None:
-            # 撤銷轉換會重新渲染頁面；先登記，渲染完成後選回這段文字。
-            self._reselect_after_render=(self.page,tuple(run.rect),run.text)
+        if self._pending_conversion_is_live():
+            previous=self._reselect_after_render
+            # 撤銷轉換會重新渲染頁面；先登記，渲染完成後以一般方式重新選取這段文字。
+            self._reselect_after_render=(self.page,tuple(run.rect),run.text,True)
+            # 畫布已依過時的頁面資料開始拖曳文字；取消拖曳，放開時才不會套用移動。
+            self.canvas.cancel_text_drag()
             if self.discard_pending_conversion():
                 return
-            self._reselect_after_render=None
+            self._reselect_after_render=previous
         self.text_panel.cancel_pending_format()
         self.canvas.clear_conflicts()
         self.cancel_editing_modes(crop=False)
@@ -155,6 +158,9 @@ class TextActionsMixin:
 
     def move_run(self,run):
         if not self.session or not run.editable or self.busy:
+            return
+        # 只移動目前選取的文字：右側面板的內容屬於它；畫面資料過時時不套用，以免用舊內容取代文字。
+        if self.run is None or self.run.id!=run.id:
             return
         self.canvas.cancel_inline_editor()
         self.run=run
@@ -462,15 +468,20 @@ class TextActionsMixin:
         pending,self._reselect_after_render=self._reselect_after_render,None
         if not pending or not self.session or not self.session.access.can_edit:
             return
-        page,rect,text=pending
+        # 第 4 個元素 reopen：自動還原後重新選取，比照直接點選文字（含無法修改的文字）。
+        page,rect,text,*options=pending
+        reopen=bool(options and options[0])
         if result.get("page")!=page:
             return
         target=pymupdf.Rect(rect)+(-3,-3,3,3)
         wanted=text.replace("\n","").replace(" ","")
-        candidates=[run for run in result.get("runs",()) if run.editable
+        candidates=[run for run in result.get("runs",()) if (reopen or run.editable)
             and pymupdf.Rect(run.rect).intersects(target)
             and run.text.replace(" ","") and run.text.replace(" ","") in wanted]
         if not candidates:
             return
         best=max(candidates,key=lambda run:(pymupdf.Rect(run.rect)&target).get_area())
-        self.select_run(best,open_editor=False)
+        if reopen:
+            self.select_run(best)
+        else:
+            self.select_run(best,open_editor=False)

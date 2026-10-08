@@ -297,6 +297,8 @@ class Canvas(QGraphicsView):
     context_menu_requested=Signal(object,object,object)
     image_clicked=Signal(object)
     background_clicked=Signal()
+    # 每次在畫布上放開滑鼠後發出；主視窗用來補做拖曳期間延後的重繪。
+    mouse_released=Signal()
 
     def __init__(self):
         super().__init__()
@@ -318,6 +320,8 @@ class Canvas(QGraphicsView):
         self._drag_run=None
         self._drag_start_scene=QPointF()
         self._drag_original_rect=None
+        # 是否有從畫布開始、尚未放開的滑鼠按壓。
+        self.pointer_pressed=False
         self._text_insertion=False
         self._note_insertion=False
         self._annotation_selection=False
@@ -482,6 +486,11 @@ class Canvas(QGraphicsView):
         if self.highlight:
             self.scene().removeItem(self.highlight)
             self.highlight=None
+
+    def cancel_text_drag(self):
+        """取消進行中的文字拖曳並移除選取外框；頁面資料已過時（例如剛自動還原）時使用。"""
+        self._drag_run=None
+        self.clear_text_selection()
 
     def clear_annotation_selection(self):
         self.selected_annotation=None
@@ -877,6 +886,7 @@ class Canvas(QGraphicsView):
         self.highlight.setZValue(2)
 
     def mousePressEvent(self,event):
+        self.pointer_pressed=True
         if self.inline_editor is not None:
             self.inline_editor.commit()
             event.accept()
@@ -1057,6 +1067,13 @@ class Canvas(QGraphicsView):
             self._show_image_hover(image)
 
     def mouseReleaseEvent(self,event):
+        self._handle_mouse_release(event)
+        if event.buttons()==Qt.MouseButton.NoButton:
+            self.pointer_pressed=False
+        # 拖曳（含裁切與文字拖曳）結束後才通知，主視窗可在此補做延後的重繪。
+        self.mouse_released.emit()
+
+    def _handle_mouse_release(self,event):
         if self._crop_mode and self._crop_drag_handle:
             changed=self._crop_rect!=self._crop_start_rect
             self._crop_drag_handle=None

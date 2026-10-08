@@ -157,6 +157,8 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self._scroll_after_render=None
         self._fit_after_render=None
         self._reselect_after_render=None
+        # 拖曳中延後的重繪，放開滑鼠後補做。
+        self._render_after_release=False
         self.jobs=Jobs(self)
         self._thumb_queue=[]
         self._thumb_token=None
@@ -403,6 +405,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.canvas.layer_moved.connect(self.move_layer)
         self.canvas.image_clicked.connect(self.edit_image_at)
         self.canvas.background_clicked.connect(self.discard_pending_conversion)
+        self.canvas.mouse_released.connect(self.render_after_release)
         self.canvas.crop_requested.connect(self.apply_direct_crop)
         self.canvas.crop_cancelled.connect(self.cancel_direct_crop)
         self.canvas.zoom_step_requested.connect(self.zoom_by)
@@ -931,7 +934,8 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
     def goto_page(self,page):
         if not self.session or not 0<=page<self.page_count or page==self.page:
             return
-        self.discard_pending_conversion()
+        # 稍後會渲染新頁面，不必先重繪即將離開的頁面。
+        self.discard_pending_conversion(render=False)
         self.page=page
         if self.thumbs.currentRow()!=page:
             self.thumbs.blockSignals(True)
@@ -1191,9 +1195,23 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.statusBar().showMessage(
             f"搜尋結果 {self.search_index+1} / {len(self.search_results)}，第 {match.page+1} 頁")
 
+    def request_render_after_release(self):
+        """在畫布上按住滑鼠時（例如正在拖曳圖層）延到放開後才重繪，避免重建畫面打斷拖曳。"""
+        if self.canvas.pointer_pressed and QApplication.mouseButtons()!=Qt.MouseButton.NoButton:
+            self._render_after_release=True
+            return
+        self.request_render()
+
+    def render_after_release(self):
+        if self._render_after_release:
+            self._render_after_release=False
+            self.request_render()
+
     def request_render(self,completion_status=None,view_center=None):
         if not self.session:
             return
+        # 這次渲染會反映最新狀態，先前延後的重繪不必再做。
+        self._render_after_release=False
         self.render_serial+=1
         serial,token=self.render_serial,self.token
         self.statusBar().showMessage("正在更新頁面…")
@@ -1245,9 +1263,15 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
                 status=self.session.access.reason or ("有未儲存變更" if self.session.dirty else "可編輯")
                 self.statusBar().showMessage(f"第 {self.page+1} / {self.page_count} 頁  ·  {status}")
             self.update_status_fields()
+        def failed(error):
+            if self.closed or token!=self.token or serial!=self.render_serial:
+                # 已被較新的渲染取代（暫存檔可能已被復原或關閉刪除），只記錄不打擾使用者。
+                get_logger().warning("略過過時的頁面渲染失敗：%s %s",error[0],error[1])
+                return
+            self.error(error)
         pixel_ratio=float(self.canvas.devicePixelRatioF())
         self.jobs.submit(render_page,(data,self.page,self.scale,pixel_ratio,cached_images is None),
-            done,self.error)
+            done,failed)
 
 
 

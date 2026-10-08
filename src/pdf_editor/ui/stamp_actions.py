@@ -46,17 +46,21 @@ class StampActionsMixin:
         if not self._legacy_stamp_context_is_current(token,revision):
             self.refresh_actions()
             return
-        base_pdf,layer=result
-        pending=self.pending_conversion
-        pending_ids=pending[1] if pending and pending[0]==revision else ()
-        self.session.apply_state(base_pdf,self.session.overlays+(layer,))
-        # 記下轉換後的版本；之後若沒有任何改動就離開，會自動撤銷轉換。
-        # 必須先記錄再選取，選取同一圖層時才不會被當成離開。
-        self.pending_conversion=(self.session.revision,pending_ids+(layer.id,))
-        self.clear_search_results()
-        self.select_layer(layer.id)
-        self.refresh_actions()
-        self.request_render("可拖曳圖片移動，或拖曳四角縮放；右側可勾選「去除白底」。")
+        try:
+            base_pdf,layer=result
+            pending=self.pending_conversion
+            pending_ids=pending[1] if pending and pending[0]==revision else ()
+            self.session.apply_state(base_pdf,self.session.overlays+(layer,))
+            # 記下轉換後的版本；之後若沒有任何改動就離開，會自動撤銷轉換。
+            # 必須先記錄再選取，選取同一圖層時才不會被當成離開。
+            self.pending_conversion=(self.session.revision,pending_ids+(layer.id,))
+            self.clear_search_results()
+            self.select_layer(layer.id)
+            self.refresh_actions()
+            self.request_render("可拖曳圖片移動，或拖曳四角縮放；右側可勾選「去除白底」。")
+        except Exception as exc:
+            # 不讓例外離開背景工作回呼，否則同一輪排隊的其他回呼會被略過。
+            self.error((getattr(exc,"code","STAMP_CONVERSION"),str(exc),()))
 
     def _finish_clicked_image_failure(self,error,token,revision):
         self.busy=False
@@ -65,8 +69,17 @@ class StampActionsMixin:
             # 點圖片失敗只在狀態列說明，不跳出對話框打斷操作。
             self.statusBar().showMessage(error[1])
 
-    def discard_pending_conversion(self):
-        """點圖片轉換後若沒有任何改動，撤銷轉換且不留重做紀錄；回傳是否有撤銷。"""
+    def _pending_conversion_is_live(self):
+        """點圖片轉換後是否仍未有任何改動（文件版本與轉換當時相同）。"""
+        pending=self.pending_conversion
+        return (pending is not None and self.session is not None
+            and self.session.revision==pending[0])
+
+    def discard_pending_conversion(self,render=True):
+        """點圖片轉換後若沒有任何改動，撤銷轉換且不留重做紀錄；回傳是否有撤銷。
+
+        render=False 供呼叫端之後自行重繪（例如換頁），避免多送一次即將作廢的渲染。
+        """
         if self.busy:
             return False
         pending,self.pending_conversion=self.pending_conversion,None
@@ -85,7 +98,8 @@ class StampActionsMixin:
             self.panels.setCurrentWidget(self.text_panel)
         self.clear_search_results()
         self.refresh_actions()
-        self.request_render()
+        if render:
+            self.request_render_after_release()
         return True
 
     def convert_legacy_stamp(self):

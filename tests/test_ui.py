@@ -2360,6 +2360,306 @@ def test_unchanged_conversion_is_kept_when_history_was_trimmed(qtbot, tmp_path, 
         _close_without_prompt(window)
 
 
+class _DeferredJobs:
+    """把視窗的背景工作排隊，flush() 時才依序執行，用來重現非同步的時序問題。"""
+
+    def __init__(self, window):
+        self.queue = []
+        window.jobs.submit = self.submit
+
+    def submit(self, function, arguments, success, failure):
+        self.queue.append((function, arguments, success, failure))
+
+    def flush(self):
+        while self.queue:
+            function, arguments, success, failure = self.queue.pop(0)
+            try:
+                result = function(*arguments)
+            except Exception as exc:
+                failure((getattr(exc, "code", "ERROR"), str(exc), ()))
+                continue
+            success(result)
+
+
+def _two_stamp_pdf():
+    """第 1 頁有文字、兩張可編輯圖章與螢光標記，並留有未被引用的物件；第 2 頁只有文字。"""
+    with pymupdf.open() as document:
+        page = document.new_page(width=500, height=400)
+        page.insert_font(fontname="noto", fontfile=str(NOTO))
+        page.insert_text((40, 80), "品質檢驗 ABC 123", fontname="noto", fontsize=16)
+        for rect, color in (((210, 260, 270, 300), (0, 60, 255)), ((320, 260, 380, 300), (255, 60, 0))):
+            buffer = io.BytesIO()
+            Image.new("RGB", (60, 40), color).save(buffer, format="PNG")
+            page.insert_image(rect, stream=buffer.getvalue())
+        page.insert_text((40, 160), "MARKED TEXT", fontsize=16)
+        second = document.new_page(width=500, height=400)
+        second.insert_text((40, 80), "PAGE TWO", fontsize=16)
+        document.subset_fonts(fallback=True)
+        compact = document.tobytes(garbage=4, deflate=True)
+    with pymupdf.open(stream=compact, filetype="pdf") as document:
+        # 增量儲存的實際文件常留有未被引用的物件，且位於註解之前。
+        orphan = document.get_new_xref()
+        document.update_object(orphan, "<</Orphan true>>")
+        document[0].add_highlight_annot(pymupdf.Rect(38, 144, 160, 164))
+        document[0].add_text_annot((440, 40), "註解")
+        return document.tobytes(deflate=True)
+
+
+def _open_deferred_window(qtbot, tmp_path, monkeypatch):
+    path = tmp_path / "兩張圖章.pdf"
+    path.write_bytes(_two_stamp_pdf())
+    monkeypatch.setattr(main_window.Jobs, "submit", _submit_synchronously)
+    window = _open_window_for_legacy_stamp(qtbot, path)
+    window.resize(1000, 800)
+    window.show()
+    qtbot.waitExposed(window)
+    return window, _DeferredJobs(window)
+
+
+def _click_image_at(window, jobs, rect):
+    image = next(item for item in window.page_data["images"] if item.rect == rect)
+    window.canvas.image_clicked.emit(image)
+    jobs.flush()
+    return image
+
+
+def _close_deferred(window, jobs):
+    jobs.flush()
+    _close_without_prompt(window)
+
+
+def _page_text(pdf, page=0):
+    with pymupdf.open(stream=pdf, filetype="pdf") as document:
+        return document[page].get_text()
+
+
+FIRST_STAMP = (210, 260, 270, 300)
+SECOND_STAMP = (320, 260, 380, 300)
+
+
+def test_fast_text_drag_after_pending_conversion_keeps_text(qtbot, tmp_path, monkeypatch):
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_image_at(window, jobs, FIRST_STAMP)
+        run = next(r for r in window.page_data["runs"] if "品質" in r.text)
+        start = _view_point(window.canvas, (run.rect[0] + run.rect[2]) / 2,
+            (run.rect[1] + run.rect[3]) / 2)
+
+        # 在重新渲染前就按住文字拖曳並放開。
+        qtbot.mousePress(window.canvas.viewport(), Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseRelease(window.canvas.viewport(), Qt.MouseButton.LeftButton,
+            pos=start + QPoint(40, 30))
+        jobs.flush()
+
+        assert window.session.overlays == ()
+        assert "品質檢驗" in _page_text(window.session.pdf)
+        assert not window.session.dirty
+    finally:
+        _close_deferred(window, jobs)
+
+
+def test_move_run_ignores_run_that_is_not_selected(qtbot, tmp_path, monkeypatch):
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        run = next(r for r in window.page_data["runs"] if "品質" in r.text)
+        window.run = None
+
+        window.move_run(replace(run, rect=(80, 120, 260, 140)))
+        jobs.flush()
+
+        assert not window.session.dirty
+        assert "品質檢驗" in _page_text(window.session.pdf)
+    finally:
+        _close_deferred(window, jobs)
+
+
+def test_selecting_annotation_after_revert_keeps_same_annotation(qtbot, tmp_path, monkeypatch):
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        original = next(item for item in window.page_data["annotations"] if item.kind == "Highlight")
+        _click_image_at(window, jobs, FIRST_STAMP)
+        stale = next(item for item in window.page_data["annotations"] if item.kind == "Highlight")
+
+        window.select_annotation(stale)
+        jobs.flush()
+
+        assert window.session.overlays == ()
+        assert window.annotation is not None
+        assert (window.annotation.xref, window.annotation.kind) == (original.xref, "Highlight")
+    finally:
+        _close_deferred(window, jobs)
+
+
+def test_dragging_other_layer_while_conversion_pending_applies_move(qtbot, tmp_path, monkeypatch):
+    stamp = tmp_path / "其他章.png"
+    Image.new("RGBA", (40, 40), (210, 35, 45, 255)).save(stamp)
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        other = Overlay("other-stamp", 0, str(stamp), (300, 100, 340, 140), 0)
+        window.session.set_overlays((other,))
+        window.request_render()
+        jobs.flush()
+        before = window.session.history.index
+        _click_image_at(window, jobs, FIRST_STAMP)
+        canvas = window.canvas
+        start = _view_point(canvas, 320, 120)
+        end = _view_point(canvas, 370, 170)
+
+        qtbot.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=start)
+        _hover(canvas, end, Qt.MouseButton.LeftButton)
+        # 背景工作在拖曳途中完成，不能因此重建畫面而讓拖曳失效。
+        jobs.flush()
+        qtbot.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=end)
+        jobs.flush()
+
+        assert [layer.id for layer in window.session.overlays] == ["other-stamp"]
+        moved = window.session.overlays[0]
+        assert moved.rect[0] > other.rect[0] + 10 and moved.rect[1] > other.rect[1] + 10
+        assert window.session.history.index == before + 1
+        assert window.session.history.items[before][1] == (other,)
+        assert FIRST_STAMP in [item.rect for item in window.page_data["images"]]
+    finally:
+        _close_deferred(window, jobs)
+
+
+def test_stale_render_failure_is_only_logged(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(main_window.QMessageBox, "warning",
+        lambda *args: pytest.fail("過時的渲染失敗不應跳出對話框"))
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        window.request_render()
+        window.request_render()
+        stale_failure = jobs.queue[0][3]
+        window.busy = True
+
+        stale_failure(("RENDER", "暫存檔已被刪除", ()))
+
+        assert window.busy
+    finally:
+        window.busy = False
+        _close_deferred(window, jobs)
+
+
+def test_failure_applying_clicked_image_is_reported(qtbot, tmp_path, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(main_window.QMessageBox, "warning", lambda *args: warnings.append(args))
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        def broken_apply(*_args):
+            raise RuntimeError("寫入暫存檔失敗")
+
+        monkeypatch.setattr(window.session, "apply_state", broken_apply)
+
+        _click_image_at(window, jobs, FIRST_STAMP)
+
+        assert warnings
+        assert not window.busy
+        assert window.pending_conversion is None
+    finally:
+        monkeypatch.delattr(window.session, "apply_state")
+        _close_deferred(window, jobs)
+
+
+def test_text_click_revert_reopens_text_editor(qtbot, tmp_path, monkeypatch):
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_image_at(window, jobs, FIRST_STAMP)
+        run = next(r for r in window.page_data["runs"] if "品質" in r.text)
+
+        window.select_run(run)
+        jobs.flush()
+
+        assert window.session.overlays == ()
+        assert window.run is not None and "品質" in window.run.text
+        assert window.canvas.inline_editor is not None
+        assert not window.text_panel.info.text().startswith("已套用")
+    finally:
+        _close_deferred(window, jobs)
+
+
+def test_reopen_reselect_includes_non_editable_text(qtbot, tmp_path, monkeypatch):
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        run = replace(next(r for r in window.page_data["runs"] if "品質" in r.text), editable=False)
+        window._reselect_after_render = (0, tuple(run.rect), run.text, True)
+
+        window.reselect_text_after_render({"page": 0, "runs": (run,)})
+
+        assert window.run == run
+        assert "無法安全修改" in window.text_panel.info.text()
+    finally:
+        _close_deferred(window, jobs)
+
+
+def test_stale_pending_conversion_does_not_clear_other_reselect(qtbot, tmp_path, monkeypatch):
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_image_at(window, jobs, FIRST_STAMP)
+        layer = window.session.overlays[0]
+        window.move_layer(replace(layer, rect=(100, 100, 160, 140)))
+        jobs.flush()
+        run = next(r for r in window.page_data["runs"] if "品質" in r.text)
+        other = (0, (1, 2, 3, 4), "其他流程", False)
+        window._reselect_after_render = other
+
+        window.select_run(run)
+
+        assert window._reselect_after_render == other
+        assert window.session.overlays[0].rect == (100, 100, 160, 140)
+    finally:
+        window._reselect_after_render = None
+        _close_deferred(window, jobs)
+
+
+def test_two_clicked_images_are_both_reverted_by_blank_click(qtbot, tmp_path, monkeypatch):
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        before = window.session.history.index
+        _click_image_at(window, jobs, FIRST_STAMP)
+        _click_image_at(window, jobs, SECOND_STAMP)
+        assert len(window.session.overlays) == 2
+
+        window.canvas.background_clicked.emit()
+        jobs.flush()
+
+        assert window.session.overlays == ()
+        assert window.session.history.index == before
+        assert not window.session.can_redo
+        assert not window.session.dirty
+        assert {item.rect for item in window.page_data["images"]} == {FIRST_STAMP, SECOND_STAMP}
+    finally:
+        _close_deferred(window, jobs)
+
+
+def test_page_change_reverts_and_renders_only_new_page(qtbot, tmp_path, monkeypatch):
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    try:
+        _click_image_at(window, jobs, FIRST_STAMP)
+
+        window.goto_page(1)
+
+        assert window.session.overlays == ()
+        assert not window.session.dirty
+        renders = [item for item in jobs.queue if item[0] is main_window.render_page]
+        assert [item[1][1] for item in renders] == [1]
+        jobs.flush()
+        assert window.page_data["page"] == 1
+    finally:
+        _close_deferred(window, jobs)
+
+
+def test_closing_with_unchanged_conversion_does_not_prompt(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(main_window.QMessageBox, "question",
+        lambda *args, **kwargs: pytest.fail("未改動的圖片轉換不應詢問是否儲存"))
+    window, jobs = _open_deferred_window(qtbot, tmp_path, monkeypatch)
+    _click_image_at(window, jobs, FIRST_STAMP)
+    assert window.session.dirty
+
+    window.close()
+
+    assert window.closed
+
+
 def test_window_converts_selected_legacy_stamp_into_layer(
         qtbot, source_path, tmp_path, monkeypatch):
     candidate = _legacy_candidate()
