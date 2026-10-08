@@ -400,3 +400,97 @@ def test_editable_images_on_page_lists_stamp_on_scanned_page_but_not_scan():
     images = _editable_images(source)
 
     assert [item.rect for item in images] == [(210, 260, 270, 300)]
+
+
+def _pdf_with_annotation_using_image():
+    """第二頁的註解外觀串流引用第一頁的圖片資源。"""
+    with pymupdf.open() as document:
+        first = document.new_page(width=500, height=400)
+        first.insert_image((210, 260, 270, 300), stream=_png((60, 40), (0, 60, 255, 255)))
+        xref = first.get_images()[0][0]
+        second = document.new_page(width=500, height=400)
+        annotation = second.add_rect_annot((20, 20, 80, 60))
+        appearance = int(document.xref_get_key(annotation.xref, "AP/N")[1].split()[0])
+        document.update_stream(appearance, b"q 60 0 0 40 0 0 cm /ImX Do Q")
+        document.xref_set_key(appearance, "BBox", "[0 0 60 40]")
+        document.xref_set_key(appearance, "Resources", f"<</XObject<</ImX {xref} 0 R>>>>")
+        return document.tobytes(), xref
+
+
+def test_image_used_by_annotation_appearance_is_not_offered_for_conversion():
+    source, _xref = _pdf_with_annotation_using_image()
+
+    assert find_convertible_images(source) == ()
+
+
+def test_convert_image_at_rejects_image_used_by_annotation_appearance(tmp_path):
+    source, xref = _pdf_with_annotation_using_image()
+
+    with pytest.raises(EditorError, match="重複使用") as error:
+        convert_image_at(source, EditableImage(xref, 0, (210, 260, 270, 300)),
+                         tmp_path / "assets")
+
+    assert error.value.code == "STAMP_CONVERSION"
+    assert not (tmp_path / "assets").exists()
+
+
+def test_image_used_by_annotation_through_nested_form_is_rejected(tmp_path):
+    source, xref = _pdf_with_annotation_using_image()
+    with pymupdf.open(stream=source, filetype="pdf") as document:
+        annotation = document[1].first_annot
+        appearance = int(document.xref_get_key(annotation.xref, "AP/N")[1].split()[0])
+        form = document.get_new_xref()
+        document.update_object(form, f"<</Type/XObject/Subtype/Form/BBox[0 0 60 40]"
+                               f"/Resources<</XObject<</ImX {xref} 0 R>>>>>>")
+        document.update_stream(form, b"q 60 0 0 40 0 0 cm /ImX Do Q")
+        document.update_stream(appearance, b"/Fm Do")
+        document.xref_set_key(appearance, "Resources", f"<</XObject<</Fm {form} 0 R>>>>")
+        nested = document.tobytes()
+
+    assert find_convertible_images(nested) == ()
+    with pytest.raises(EditorError, match="重複使用"):
+        convert_image_at(nested, EditableImage(xref, 0, (210, 260, 270, 300)),
+                         tmp_path / "assets")
+
+
+def _pdf_with_clipped_image():
+    with pymupdf.open() as document:
+        page = document.new_page(width=500, height=400)
+        page.insert_image((210, 260, 270, 300), stream=_png((60, 40), (0, 60, 255, 255)))
+        stream = page.get_contents()[0]
+        content = document.xref_stream(stream)
+        # 裁切路徑只留下圖片中間一段（PDF 座標 y 軸向上）。
+        document.update_stream(stream, b"q 225 90 30 60 re W n\n" + content + b"\nQ")
+        return document.tobytes()
+
+
+def test_image_affected_by_clipping_path_is_not_offered_for_conversion():
+    assert find_convertible_images(_pdf_with_clipped_image()) == ()
+
+
+def test_convert_image_at_rejects_image_affected_by_clipping_path(tmp_path):
+    source = _pdf_with_clipped_image()
+    image = _editable_images(source)[0]
+
+    with pytest.raises(EditorError, match="無法安全編輯") as error:
+        convert_image_at(source, image, tmp_path / "assets")
+
+    assert error.value.code == "STAMP_CONVERSION"
+    assert not (tmp_path / "assets").exists()
+
+
+def test_convert_image_at_queries_clicked_page_placements_at_most_twice(tmp_path, monkeypatch):
+    source = _pdf_with_unique_stamp()
+    image = _editable_images(source)[0]
+    original = pymupdf.Page.get_image_rects
+    calls = []
+
+    def counting(self, *args, **kwargs):
+        calls.append(self.number)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "get_image_rects", counting)
+
+    convert_image_at(source, image, tmp_path / "assets")
+
+    assert len(calls) <= 2

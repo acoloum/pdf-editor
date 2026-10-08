@@ -1,6 +1,7 @@
 """掃描並安全轉換可單獨抽離的既有 PDF 圖章。"""
 
 import io
+import re
 import uuid
 
 import pymupdf
@@ -23,9 +24,10 @@ def find_convertible_images(pdf: bytes) -> tuple[LegacyImageCandidate, ...]:
     try:
         with pymupdf.open(stream=pdf, filetype="pdf") as document:
             uses = _image_uses(document)
+            annotation_xrefs = _annotation_reachable_xrefs(document)
             candidates = []
             for xref, locations in uses.items():
-                if len(locations) != 1:
+                if len(locations) != 1 or xref in annotation_xrefs:
                     continue
                 page_number, rect = locations[0]
                 if _use_rejection(document[page_number], xref, rect):
@@ -86,17 +88,24 @@ def convert_image_at(pdf: bytes, image: EditableImage, asset_root) -> tuple[byte
 
 def _candidate_for_click(document, image: EditableImage) -> LegacyImageCandidate:
     """確認點選的圖片只在該頁的該位置使用且可安全編輯；不符時丟出原因。"""
-    problem = _used_only_at(document, image)
+    page = document[image.page]
+    placements = page.get_image_rects(image.xref, transform=True)
+    problem = _reuse_problem(document, image, placements)
     if problem:
         raise EditorError("STAMP_CONVERSION", problem)
-    page = document[image.page]
-    problem = _use_rejection(page, image.xref, image.rect)
+    problem = _use_rejection(page, image.xref, image.rect, placements)
     if problem:
         raise EditorError("STAMP_CONVERSION", problem)
     return _candidate_from_use(document, image.xref, image.page, image.rect)
 
 
 def _used_only_at(document, image: EditableImage) -> str | None:
+    """實際刪除前的再次確認；不符時回傳原因。"""
+    placements = document[image.page].get_image_rects(image.xref, transform=True)
+    return _reuse_problem(document, image, placements)
+
+
+def _reuse_problem(document, image: EditableImage, placements) -> str | None:
     """只靠資源引用與該頁的繪製位置判斷是否單獨使用；不符時回傳原因。
 
     不掃描所有頁面的影像位置，大型掃描檔才不會因此變慢。
@@ -105,13 +114,44 @@ def _used_only_at(document, image: EditableImage) -> str | None:
         if number != image.page and any(
                 item[0] == image.xref for item in document.get_page_images(number, full=True)):
             return _IMAGE_REUSED
-    rects = document[image.page].get_image_rects(image.xref)
-    if len(rects) > 1:
+    if len(placements) > 1 or image.xref in _annotation_reachable_xrefs(document):
         return _IMAGE_REUSED
     # 頁面資料可能已過時；位置不符時不猜測，避免改到別張圖。
-    if [_rect_tuple(rect) for rect in rects] != [image.rect]:
+    if [_rect_tuple(rect) for rect, _matrix in placements] != [image.rect]:
         return _IMAGE_CHANGED
     return None
+
+
+_REFERENCE = re.compile(r"(\d+)\s+0\s+R")
+
+
+def _annotation_reachable_xrefs(document) -> set[int]:
+    """各頁註解外觀串流（含其資源與表單 XObject）遞迴引用到的物件編號。
+
+    刪除影像會替換該物件，若註解外觀也用到它，註解就會變空白；
+    因此這類影像一律視為重複使用。只檢視有註解的頁面，且不做渲染。
+    """
+    pending = []
+    for number in range(document.page_count):
+        kind, value = document.xref_get_key(document[number].xref, "Annots")
+        if kind == "null":
+            continue
+        if kind == "xref":
+            value = document.xref_object(int(value.split()[0]))
+        for annotation in _REFERENCE.findall(value):
+            ap_kind, ap_value = document.xref_get_key(int(annotation), "AP")
+            if ap_kind == "xref":
+                pending.append(int(ap_value.split()[0]))
+            elif ap_kind == "dict":
+                pending.extend(int(item) for item in _REFERENCE.findall(ap_value))
+    reached = set()
+    while pending:
+        xref = pending.pop()
+        if xref in reached or not 0 < xref < document.xref_length():
+            continue
+        reached.add(xref)
+        pending.extend(int(item) for item in _REFERENCE.findall(document.xref_object(xref)))
+    return reached
 
 
 def _extract_candidate(pdf: bytes, candidate: LegacyImageCandidate, asset_root,
