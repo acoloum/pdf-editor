@@ -2143,7 +2143,7 @@ def test_window_exposes_legacy_stamp_conversion_only_for_open_idle_document(
     window = MainWindow()
     qtbot.addWidget(window)
     try:
-        assert window.actions["convert_stamp"].text() == "轉換既有圖章"
+        assert window.actions["convert_stamp"].text() == "編輯既有圖片…"
         assert not window.actions["convert_stamp"].isEnabled()
 
         window.open_document(source_path)

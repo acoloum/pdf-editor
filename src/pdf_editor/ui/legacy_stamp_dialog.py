@@ -19,7 +19,7 @@ class LegacyStampDialog(QDialog):
     def __init__(self, candidates, parent=None):
         super().__init__(parent)
         self._candidates = tuple(candidates)
-        self.setWindowTitle("轉換既有圖章")
+        self.setWindowTitle("編輯既有圖片")
         self.resize(620, 430)
 
         layout = QVBoxLayout(self)
