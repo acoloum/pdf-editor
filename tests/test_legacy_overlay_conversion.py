@@ -494,3 +494,56 @@ def test_convert_image_at_queries_clicked_page_placements_at_most_twice(tmp_path
     convert_image_at(source, image, tmp_path / "assets")
 
     assert len(calls) <= 2
+
+
+def _pdf_with_two_stamps_and_annotation():
+    with pymupdf.open() as document:
+        page = document.new_page(width=500, height=400)
+        page.insert_image((210, 260, 270, 300), stream=_png((60, 40), (0, 60, 255, 255)))
+        page.insert_image((320, 260, 380, 300), stream=_png((60, 40), (255, 60, 0, 255)))
+        # 增量儲存的實際文件常留有未被引用的物件；清除它時不能讓後面的物件改編號。
+        orphan = document.get_new_xref()
+        document.update_object(orphan, "<</Orphan true>>")
+        page.insert_text((40, 80), "ANNOTATED", fontsize=16)
+        page.add_highlight_annot(pymupdf.Rect(38, 64, 160, 84))
+        page.add_text_annot((400, 60), "註解")
+        return document.tobytes(deflate=True)
+
+
+def _annotation_xrefs(pdf):
+    with pymupdf.open(stream=pdf, filetype="pdf") as document:
+        return [(item.xref, item.type[1]) for item in document[0].annots()]
+
+
+def test_convert_image_at_keeps_annotation_xrefs_stable(tmp_path):
+    # 未改動就還原時，畫面上的註解編號要能對回原文件，否則會選到（或刪到）別的註解。
+    source = _pdf_with_two_stamps_and_annotation()
+    image = _editable_images(source)[0]
+
+    base_pdf, _layer = convert_image_at(source, image, tmp_path / "assets")
+
+    assert _annotation_xrefs(base_pdf) == _annotation_xrefs(source)
+
+
+def test_second_image_on_same_page_can_be_converted_after_first(tmp_path):
+    source = _pdf_with_two_stamps_and_annotation()
+    first = _editable_images(source)[0]
+    base_pdf, _layer = convert_image_at(source, first, tmp_path / "assets")
+
+    second = next(item for item in _editable_images(base_pdf) if item.rect == (320, 260, 380, 300))
+    second_base, layer = convert_image_at(base_pdf, second, tmp_path / "assets")
+
+    assert layer.rect == (320, 260, 380, 300)
+    assert _editable_images(second_base) == ()
+
+
+def test_deleted_image_placeholder_is_not_offered_again(tmp_path):
+    # delete_image 會在原處留下 1×1 透明占位圖，不能再被當成可點選或可轉換的圖片。
+    source = _pdf_with_unique_stamp()
+    image = _editable_images(source)[0]
+    base_pdf, _layer = convert_image_at(source, image, tmp_path / "assets")
+
+    assert _editable_images(base_pdf) == ()
+    assert find_convertible_images(base_pdf) == ()
+    with pytest.raises(EditorError, match="位置已變更"):
+        convert_image_at(base_pdf, image, tmp_path / "assets")

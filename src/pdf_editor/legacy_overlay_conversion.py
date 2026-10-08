@@ -36,6 +36,8 @@ def find_convertible_images(pdf: bytes) -> tuple[LegacyImageCandidate, ...]:
                     candidate = _candidate_from_use(document, xref, page_number, rect)
                 except Exception:
                     continue
+                if _is_placeholder_size(candidate.width, candidate.height):
+                    continue
                 if _replacement_preserves_appearance(pdf, candidate):
                     candidates.append(candidate)
             return tuple(candidates)
@@ -89,6 +91,10 @@ def convert_image_at(pdf: bytes, image: EditableImage, asset_root) -> tuple[byte
 def _candidate_for_click(document, image: EditableImage) -> LegacyImageCandidate:
     """確認點選的圖片只在該頁的該位置使用且可安全編輯；不符時丟出原因。"""
     page = document[image.page]
+    info = next((item for item in page.get_images(full=True) if item[0] == image.xref), None)
+    # 已抽離圖片留下的透明占位圖（或已不存在的圖片）：畫面資料過時，請使用者重新點選。
+    if info is None or _is_placeholder_size(info[2], info[3]):
+        raise EditorError("STAMP_CONVERSION", _IMAGE_CHANGED)
     placements = page.get_image_rects(image.xref, transform=True)
     problem = _reuse_problem(document, image, placements)
     if problem:
@@ -162,7 +168,7 @@ def _extract_candidate(pdf: bytes, candidate: LegacyImageCandidate, asset_root,
         if not still_single_use(document):
             raise EditorError("STAMP_CONVERSION", changed_message)
         document[candidate.page].delete_image(candidate.xref)
-        base_pdf = document.tobytes(garbage=4, deflate=True)
+        base_pdf = _base_bytes(document)
 
     _verify_pdf(base_pdf, candidate)
     if not _replacement_from_base_preserves_appearance(pdf, base_pdf, candidate):
@@ -174,10 +180,28 @@ def _extract_candidate(pdf: bytes, candidate: LegacyImageCandidate, asset_root,
     return base_pdf, Overlay(uuid.uuid4().hex, candidate.page, str(asset), candidate.rect)
 
 
+def _base_bytes(document) -> bytes:
+    """輸出抽離影像後的基底。
+
+    只移除未被引用的物件、不重新編號（garbage=1）：其他物件（例如註解）的編號
+    在轉換前後保持一致，未改動就還原時，畫面上的註解仍對得到原文件；
+    再次點選同頁其他圖片時，也不會用到已改號的舊編號。
+    """
+    return document.tobytes(garbage=1, deflate=True)
+
+
+def _is_placeholder_size(width: int, height: int) -> bool:
+    """delete_image 會在原處留下 1×1 透明占位圖；這種圖片不提供編輯。"""
+    return width <= 1 or height <= 1
+
+
 def editable_images_on_page(document, page_number: int) -> tuple[EditableImage, ...]:
     """快速列出本頁可直接點選編輯的圖片；不做渲染比對，轉換時會再完整把關。"""
     page = document[page_number]
-    images = {image[0]: image for image in page.get_images(full=True) if image[0] > 0}
+    images = {
+        image[0]: image for image in page.get_images(full=True)
+        if image[0] > 0 and not _is_placeholder_size(image[2], image[3])
+    }
     if not images:
         return ()
     scan_sizes = _scan_image_sizes(page)
@@ -276,7 +300,7 @@ def _replacement_preserves_appearance(pdf: bytes, candidate: LegacyImageCandidat
     try:
         with pymupdf.open(stream=pdf, filetype="pdf") as document:
             document[candidate.page].delete_image(candidate.xref)
-            base_pdf = document.tobytes(garbage=4, deflate=True)
+            base_pdf = _base_bytes(document)
         return _replacement_from_base_preserves_appearance(pdf, base_pdf, candidate)
     except Exception:
         return False
