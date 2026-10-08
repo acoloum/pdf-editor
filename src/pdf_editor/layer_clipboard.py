@@ -55,7 +55,8 @@ def decode_layer(data: bytes) -> ClipboardLayer | None:
     """解析墨頁專用格式；版本不符或內容毀損時回傳 None，由呼叫端改用一般圖片。"""
     try:
         payload = json.loads(bytes(data).decode("utf-8"))
-        if not isinstance(payload, dict) or not _is_integer(payload.get("version"))                 or payload["version"] != FORMAT_VERSION:
+        if (not isinstance(payload, dict) or not _is_integer(payload.get("version"))
+                or payload["version"] != FORMAT_VERSION):
             return None
         values = (payload["width"], payload["height"], payload["angle"])
         remove_white = payload["remove_white"]

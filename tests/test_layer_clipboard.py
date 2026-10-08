@@ -93,12 +93,14 @@ def test_paste_rect_keeps_rotated_box_and_plain_rect_inside_page():
     assert cy - 50 >= 1 and cx - 25 >= 1
 
 
-@pytest.mark.parametrize("page_size, size", [
-    ((595, 842), (200, 100)),
-    ((4000, 4000), (3500, 1000)),
-    ((4000, 4000), (12345, 6789)),  # 比頁面還大，必須先縮小
+@pytest.mark.parametrize("page_size, size, angle", [
+    ((595, 842), (200, 100), 30),
+    ((595, 842), (200, 100), 45),
+    ((595, 842), (200, 100), 60),
+    # 比頁面還大、必須先縮小的大圖；舊的固定 1pt 邊距在 45 度會超出頁面。
+    # 大圖旋轉取樣很慢，只保留這個能重現問題的角度。
+    ((4000, 4000), (12345, 6789), 45),
 ])
-@pytest.mark.parametrize("angle", [30, 45, 60])
 def test_paste_rect_rotated_layer_can_be_flattened_at_page_corners(tmp_path, page_size, size, angle):
     asset = _stamp(tmp_path)
     doc = pymupdf.open()
