@@ -723,7 +723,8 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.actions["print"].setEnabled(active and not self.busy)
         self.actions["copy_page_text"].setEnabled(active)
         self.actions["copy_text"].setEnabled(active)
-        self.actions["paste_image"].setEnabled(edit)
+        # 唯讀或忙碌時仍可按 Ctrl+V，由貼上流程在狀態列說明無法貼上的原因。
+        self.actions["paste_image"].setEnabled(active)
         self.actions["fit_page"].setEnabled(active)
         self.actions["fit_width"].setEnabled(active)
         self.update_status_fields()

@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from pdf_editor.assets import AssetStore
 from pdf_editor.engine.overlay import flatten_overlays,transformed_image
+from pdf_editor.errors import EditorError
 from pdf_editor.layer_clipboard import MIME_TYPE,ClipboardLayer,decode_layer,encode_layer,paste_rect
 from pdf_editor.legacy_overlay_conversion import (
     convert_image_at,
@@ -18,6 +19,9 @@ from pdf_editor.ui.legacy_stamp_dialog import LegacyStampDialog
 from pdf_editor.ui.signature_dialog import SignatureDialog
 from pdf_editor.ui.stamp_pages_dialog import StampPagesDialog
 import uuid
+
+# 剪貼簿圖片的像素上限，與匯入 PNG 的限制相同。
+_MAX_PASTE_PIXELS=25_000_000
 
 
 class StampActionsMixin:
@@ -248,8 +252,9 @@ class StampActionsMixin:
             width=min(150,page_width*0.4)
             height=min(width*ratio,page_height*0.4)
             width=height/ratio
-        width=min(width,page_width-4)
-        height=min(height,page_height-4)
+        # 放不下時寬高以同一倍率縮小，保持圖片比例。
+        scale=min(1,(page_width-4)/width,(page_height-4)/height)
+        width,height=width*scale,height*scale
         x=max(0,min(x,page_width-width))
         y=max(0,min(y,page_height-height))
         return (x,y,x+width,y+height)
@@ -338,7 +343,10 @@ class StampActionsMixin:
         self.statusBar().showMessage("已複製圖片；按 Ctrl+V 貼在滑鼠位置，也可以貼到其他程式。")
 
     def clipboard_layer(self):
-        """讀取剪貼簿：優先墨頁專用格式，其次一般圖片；沒有圖片時回傳 None。"""
+        """讀取剪貼簿：優先墨頁專用格式，其次一般圖片；沒有圖片時回傳 None。
+
+        一般圖片超過像素上限時拋出 EditorError，避免把超大圖片轉成 PNG。
+        """
         mime=QApplication.clipboard().mimeData()
         if mime is None:
             return None
@@ -352,6 +360,8 @@ class StampActionsMixin:
         image=data.toImage() if isinstance(data,QPixmap) else QImage(data)
         if image.isNull():
             return None
+        if image.width()*image.height()>_MAX_PASTE_PIXELS:
+            raise EditorError("IMAGE","剪貼簿圖片太大（超過 2500 萬像素），無法貼上。")
         buffer=QBuffer()
         buffer.open(QIODevice.OpenModeFlag.WriteOnly)
         image.save(buffer,"PNG")
@@ -365,7 +375,10 @@ class StampActionsMixin:
         """Ctrl+V：以滑鼠位置為中心貼上；游標不在頁面上時貼在可見區域中央。"""
         if not self.session:
             return
-        point=self.canvas.page_point_at(self.canvas.viewport().mapFromGlobal(QCursor.pos()))
+        viewport=self.canvas.viewport()
+        view=viewport.mapFromGlobal(QCursor.pos())
+        # 游標在畫布外（例如縮圖清單上）時，即使對應到頁面也看不到，改貼在可見區域中央。
+        point=self.canvas.page_point_at(view) if viewport.rect().contains(view) else None
         self.paste_layer_at(point if point is not None else self.visible_page_center())
 
     def paste_layer_at(self,point):
@@ -378,12 +391,24 @@ class StampActionsMixin:
         if self.comparison_dialog is not None:
             self.statusBar().showMessage("頁面比較開啟中，無法貼上圖片。")
             return
-        item=self.clipboard_layer()
+        if self.page_data["page"]!=self.page:
+            # 剛換頁、新頁面尚未渲染完成，頁面大小仍是上一頁的。
+            self.statusBar().showMessage("頁面載入中，請稍後再貼上。")
+            return
+        try:
+            item=self.clipboard_layer()
+        except EditorError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
         if item is None:
             self.statusBar().showMessage("剪貼簿沒有可貼上的圖片。")
             return
         try:
-            asset=AssetStore(self.session.history.root/"assets").import_png_bytes(item.png)
+            try:
+                asset=AssetStore(self.session.history.root/"assets").import_png_bytes(item.png)
+            except EditorError as exc:
+                # AssetStore 的訊息針對內嵌圖章，貼上時改用剪貼簿的說法。
+                raise EditorError("IMAGE","剪貼簿的圖片不是有效 PNG 或超過 2500 萬像素。") from exc
             if item.width is None:
                 # 外部圖片沿用「蓋章」的大小規則（上次調整的寬度，或預設寬度），比例依原圖。
                 from PIL import Image
@@ -400,11 +425,15 @@ class StampActionsMixin:
         except Exception as exc:
             self.statusBar().showMessage("無法貼上圖片："+str(exc))
             return
-        self.session.set_overlays(self.session.overlays+(layer,))
-        self.select_layer(layer.id)
-        self.refresh_actions()
-        self.request_render("已貼上圖片，可拖曳移動或縮放。")
-        self.queue_thumbnails((layer.page,))
+        try:
+            self.session.set_overlays(self.session.overlays+(layer,))
+            self.select_layer(layer.id)
+            self.refresh_actions()
+            self.request_render("已貼上圖片，可拖曳移動或縮放。")
+            self.queue_thumbnails((layer.page,))
+        except Exception as exc:
+            # 與匯入圖章相同：歷程寫入失敗時顯示錯誤，不讓例外離開動作的處理函式。
+            self.error((getattr(exc,"code","IMAGE"),str(exc),()))
 
     def select_layer(self,id):
         self.last_selection="layer"

@@ -233,7 +233,15 @@ def test_ctrl_v_pastes_at_cursor_or_visible_center(qtbot, multi_page_path, red_s
         pasted = window.session.overlays[-1]
         assert ((pasted.rect[0] + pasted.rect[2]) / 2) == pytest.approx(
             min(max(center[0], 1 + _size(pasted.rect)[0] / 2), 299 - _size(pasted.rect)[0] / 2))
-        # 游標在頁面上：以游標位置為中心。
+        # 游標在頁面上：以游標位置為中心（游標固定在畫布中央，不受實際滑鼠位置影響）。
+        inside = window.canvas.viewport().mapToGlobal(window.canvas.viewport().rect().center())
+
+        class InsideCursor:
+            @staticmethod
+            def pos():
+                return inside
+
+        monkeypatch.setattr(stamp_actions, "QCursor", InsideCursor)
         monkeypatch.setattr(window.canvas, "page_point_at", lambda _pos: (150, 100))
         window.actions["paste_image"].trigger()
         pasted = window.session.overlays[-1]
@@ -347,5 +355,200 @@ def test_copy_paste_after_click_conversion_keeps_conversion(qtbot, tmp_path, mon
         window.canvas.background_clicked.emit()
 
         assert len(window.session.overlays) == 2
+    finally:
+        _close(window)
+
+
+def _tall_png(tmp_path):
+    path = tmp_path / "直長圖.png"
+    Image.new("RGBA", (100, 1000), (20, 120, 60, 255)).save(path)
+    return path
+
+
+def _assert_ratio_inside_page(rect, ratio, page_size=(300, 200)):
+    width, height = _size(rect)
+    assert height / width == pytest.approx(ratio)
+    assert 0 <= rect[0] < rect[2] <= page_size[0] and 0 <= rect[1] < rect[3] <= page_size[1]
+
+
+def test_paste_external_image_keeps_ratio_with_remembered_size(qtbot, multi_page_path):
+    window = _open(qtbot, multi_page_path)
+    try:
+        # 上次調整的寬度 150；直長圖依比例會超出頁高，必須等比例縮小而不是只截高度。
+        window.settings.set_stamp_geometry(None, (10, 10, 160, 60))
+        _set_clipboard_image(100, 1000)
+
+        window.paste_layer_at((150, 100))
+
+        _assert_ratio_inside_page(window.session.overlays[-1].rect, 10)
+    finally:
+        _close(window)
+
+
+def test_import_stamp_keeps_ratio_with_remembered_size(qtbot, multi_page_path, tmp_path):
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.settings.set_stamp_geometry(None, (10, 10, 160, 60))
+
+        window.import_layer(_tall_png(tmp_path), False)
+
+        _assert_ratio_inside_page(window.session.overlays[-1].rect, 10)
+    finally:
+        _close(window)
+
+
+def test_ctrl_v_with_cursor_outside_canvas_pastes_in_visible_area(qtbot, multi_page_path, red_stamp,
+                                                                  monkeypatch):
+    import pdf_editor.ui.stamp_actions as stamp_actions
+    from PySide6.QtCore import QPoint
+
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.show()
+        qtbot.waitExposed(window)
+        window.import_layer(red_stamp, False)
+        window.copy_selection()
+        window.zoom.setCurrentText("400%")
+        viewport = window.canvas.viewport()
+        qtbot.waitUntil(lambda: window.canvas.sceneRect().width() > viewport.width() + 200,
+                        timeout=30000)
+        bar = window.canvas.horizontalScrollBar()
+        bar.setValue((bar.minimum() + bar.maximum()) // 2)
+        # 游標在畫布左側（例如縮圖清單上）：該位置雖對應到頁面，但不在可見區域內。
+        outside = viewport.mapToGlobal(QPoint(-60, viewport.height() // 2))
+
+        class OutsideCursor:
+            @staticmethod
+            def pos():
+                return outside
+
+        monkeypatch.setattr(stamp_actions, "QCursor", OutsideCursor)
+        window.actions["paste_image"].trigger()
+
+        pasted = window.session.overlays[-1]
+        center = ((pasted.rect[0] + pasted.rect[2]) / 2, (pasted.rect[1] + pasted.rect[3]) / 2)
+        assert center == pytest.approx(window.visible_page_center(), abs=1)
+    finally:
+        _close(window)
+
+
+def test_ctrl_c_on_read_only_text_does_not_copy_previous_layer(qtbot, source_path, red_stamp):
+    from pdf_editor.model import DocumentAccess
+
+    window = _open(qtbot, source_path)
+    try:
+        window.import_layer(red_stamp, False)
+        window.session.access = DocumentAccess(False, False, "此文件僅供閱讀")
+        run = next(r for r in window.page_data["runs"] if "KEEP" in r.text)
+        # 畫布點選文字時會先記下選取的文字，再通知主視窗。
+        window.canvas.selected_run = run
+        window.select_run(run, open_editor=False)
+
+        window.actions["copy_text"].trigger()
+
+        assert QApplication.clipboard().text() == run.text
+        assert not QApplication.clipboard().mimeData().hasFormat(MIME_TYPE)
+    finally:
+        _close(window)
+
+
+def test_paste_waits_until_new_page_is_rendered(qtbot, multi_page_path, red_stamp, monkeypatch):
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.import_layer(red_stamp, False)
+        qtbot.waitUntil(lambda: window.page_data is not None and not window.busy, timeout=30000)
+        window.copy_selection()
+        queued = []
+        monkeypatch.setattr(window.jobs, "submit", lambda *args: queued.append(args))
+        window.goto_page(1)
+        assert window.page_data["page"] == 0
+
+        window.paste_layer_at((150, 100))
+
+        assert [o.page for o in window.session.overlays] == [0]
+        assert "頁面載入中" in window.statusBar().currentMessage()
+    finally:
+        _close(window)
+
+
+def test_paste_history_failure_shows_error_instead_of_raising(qtbot, multi_page_path, red_stamp,
+                                                              monkeypatch):
+    import pdf_editor.ui.main_window as main_window
+
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.import_layer(red_stamp, False)
+        window.copy_selection()
+        warnings = []
+        monkeypatch.setattr(main_window.QMessageBox, "warning",
+                            lambda _parent, title, message: warnings.append(message))
+
+        def fail(_overlays):
+            raise OSError("歷程寫入失敗")
+
+        monkeypatch.setattr(window.session, "set_overlays", fail)
+
+        window.paste_layer_at((150, 100))
+
+        assert len(window.session.overlays) == 1
+        assert warnings and "歷程寫入失敗" in warnings[0]
+    finally:
+        _close(window)
+
+
+def test_paste_rejects_oversized_clipboard_image(qtbot, multi_page_path, monkeypatch):
+    import pdf_editor.ui.stamp_actions as stamp_actions
+
+    window = _open(qtbot, multi_page_path)
+    try:
+        monkeypatch.setattr(stamp_actions, "_MAX_PASTE_PIXELS", 1000)
+        _set_clipboard_image(40, 40)
+
+        window.paste_layer_at((150, 100))
+
+        assert window.session.overlays == ()
+        assert window.statusBar().currentMessage() == "剪貼簿圖片太大（超過 2500 萬像素），無法貼上。"
+    finally:
+        _close(window)
+
+
+def test_paste_invalid_moye_image_shows_paste_message(qtbot, multi_page_path):
+    import base64
+    import json
+
+    from PySide6.QtCore import QMimeData
+
+    from pdf_editor.layer_clipboard import FORMAT_VERSION
+
+    window = _open(qtbot, multi_page_path)
+    try:
+        mime = QMimeData()
+        mime.setData(MIME_TYPE, json.dumps({
+            "version": FORMAT_VERSION, "width": 50, "height": 50, "angle": 0,
+            "remove_white": False, "png": base64.b64encode(b"not a png").decode()}).encode())
+        QApplication.clipboard().setMimeData(mime)
+
+        window.paste_layer_at((150, 100))
+
+        message = window.statusBar().currentMessage()
+        assert window.session.overlays == ()
+        assert message.startswith("無法貼上圖片：") and "內嵌圖章" not in message
+    finally:
+        _close(window)
+
+
+def test_ctrl_v_on_read_only_document_explains_why(qtbot, multi_page_path):
+    from pdf_editor.model import DocumentAccess
+
+    window = _open(qtbot, multi_page_path)
+    try:
+        _set_clipboard_image(40, 40)
+        window.session.access = DocumentAccess(False, False, "此文件僅供閱讀")
+        window.refresh_actions()
+
+        window.actions["paste_image"].trigger()
+
+        assert window.session.overlays == ()
+        assert window.statusBar().currentMessage() == "目前無法貼上圖片。"
     finally:
         _close(window)

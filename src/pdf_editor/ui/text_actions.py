@@ -15,9 +15,10 @@ import pymupdf
 
 class TextActionsMixin:
     def select_run(self,run,open_editor=True):
+        # 唯讀文件也能點選文字複製，因此在權限檢查之前記錄。
+        self.last_selection="text"
         if not self.session or not self.session.access.can_edit:
             return
-        self.last_selection="text"
         if self._pending_conversion_can_revert():
             previous=self._reselect_after_render
             # 撤銷轉換會重新渲染頁面；先登記，渲染完成後以一般方式重新選取這段文字。
