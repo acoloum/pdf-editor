@@ -272,6 +272,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             ("copy_text","複製",self.copy_selection,("Ctrl+C",),"複製選取的文字或圖片（Ctrl+C）"),
             ("copy_page_text","複製本頁全部文字",self.copy_page_text,("Ctrl+Shift+C",),
                 "複製目前頁面的全部文字（Ctrl+Shift+C）"),
+            ("paste_image","貼上圖片",self.paste_image,("Ctrl+V",),"在滑鼠位置貼上剪貼簿中的圖片（Ctrl+V）"),
             ("fit_page","適合頁面",lambda:self.zoom.setCurrentText("適合頁面"),(),"整頁顯示"),
             ("fit_width","適合寬度",lambda:self.zoom.setCurrentText("適合寬度"),(),"頁面寬度填滿畫布")]:
             action=QAction(label,self)
@@ -722,6 +723,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.actions["print"].setEnabled(active and not self.busy)
         self.actions["copy_page_text"].setEnabled(active)
         self.actions["copy_text"].setEnabled(active)
+        self.actions["paste_image"].setEnabled(edit)
         self.actions["fit_page"].setEnabled(active)
         self.actions["fit_width"].setEnabled(active)
         self.update_status_fields()

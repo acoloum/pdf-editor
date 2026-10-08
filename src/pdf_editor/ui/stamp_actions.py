@@ -1,13 +1,13 @@
 """圖章與簽名：匯入、收藏、點選或轉換既有圖片、多頁連續蓋章與圖層調整。"""
 import pymupdf
-from PySide6.QtCore import QMimeData
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QBuffer,QIODevice,QMimeData
+from PySide6.QtGui import QCursor,QImage,QPixmap
 from PySide6.QtWidgets import QApplication,QFileDialog
 from dataclasses import replace
 from pathlib import Path
 from pdf_editor.assets import AssetStore
 from pdf_editor.engine.overlay import flatten_overlays,transformed_image
-from pdf_editor.layer_clipboard import MIME_TYPE,encode_layer
+from pdf_editor.layer_clipboard import MIME_TYPE,ClipboardLayer,decode_layer,encode_layer,paste_rect
 from pdf_editor.legacy_overlay_conversion import (
     convert_image_at,
     convert_legacy_image,
@@ -336,6 +336,75 @@ class StampActionsMixin:
         mime.setImageData(QImage.fromData(png,"PNG"))
         QApplication.clipboard().setMimeData(mime)
         self.statusBar().showMessage("已複製圖片；按 Ctrl+V 貼在滑鼠位置，也可以貼到其他程式。")
+
+    def clipboard_layer(self):
+        """讀取剪貼簿：優先墨頁專用格式，其次一般圖片；沒有圖片時回傳 None。"""
+        mime=QApplication.clipboard().mimeData()
+        if mime is None:
+            return None
+        if mime.hasFormat(MIME_TYPE):
+            item=decode_layer(bytes(mime.data(MIME_TYPE)))
+            if item is not None:
+                return item
+        if not mime.hasImage():
+            return None
+        data=mime.imageData()
+        image=data.toImage() if isinstance(data,QPixmap) else QImage(data)
+        if image.isNull():
+            return None
+        buffer=QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buffer,"PNG")
+        return ClipboardLayer(bytes(buffer.data()))
+
+    def can_paste_image(self):
+        mime=QApplication.clipboard().mimeData()
+        return mime is not None and (mime.hasFormat(MIME_TYPE) or mime.hasImage())
+
+    def paste_image(self):
+        """Ctrl+V：以滑鼠位置為中心貼上；游標不在頁面上時貼在可見區域中央。"""
+        if not self.session:
+            return
+        point=self.canvas.page_point_at(self.canvas.viewport().mapFromGlobal(QCursor.pos()))
+        self.paste_layer_at(point if point is not None else self.visible_page_center())
+
+    def paste_layer_at(self,point):
+        """在目前頁面以 point 為中心貼上剪貼簿圖片，建立可復原的新圖層。"""
+        if not self.session or point is None or self.page_data is None:
+            return
+        if self.busy or not self.session.access.can_edit:
+            self.statusBar().showMessage("目前無法貼上圖片。")
+            return
+        if self.comparison_dialog is not None:
+            self.statusBar().showMessage("頁面比較開啟中，無法貼上圖片。")
+            return
+        item=self.clipboard_layer()
+        if item is None:
+            self.statusBar().showMessage("剪貼簿沒有可貼上的圖片。")
+            return
+        try:
+            asset=AssetStore(self.session.history.root/"assets").import_png_bytes(item.png)
+            if item.width is None:
+                # 外部圖片沿用「蓋章」的大小規則（上次調整的寬度，或預設寬度），比例依原圖。
+                from PIL import Image
+                with Image.open(asset) as image:
+                    ratio=image.height/image.width
+                x0,y0,x1,y1=self.new_stamp_rect(asset,ratio)
+                width,height=x1-x0,y1-y0
+            else:
+                width,height=item.width,item.height
+            rect=paste_rect(point,width,height,self.page_data["bounds"][2:],item.angle)
+            layer=Overlay(uuid.uuid4().hex,self.page,str(asset),rect,item.angle,item.remove_white)
+            # 先驗證能正常輸出，失敗時不寫入歷程。
+            flatten_overlays(self.session.pdf,(layer,))
+        except Exception as exc:
+            self.statusBar().showMessage("無法貼上圖片："+str(exc))
+            return
+        self.session.set_overlays(self.session.overlays+(layer,))
+        self.select_layer(layer.id)
+        self.refresh_actions()
+        self.request_render("已貼上圖片，可拖曳移動或縮放。")
+        self.queue_thumbnails((layer.page,))
 
     def select_layer(self,id):
         self.last_selection="layer"
