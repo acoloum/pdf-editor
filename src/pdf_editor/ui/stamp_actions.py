@@ -1,5 +1,7 @@
 """圖章與簽名：匯入、收藏、點選或轉換既有圖片、多頁連續蓋章與圖層調整。"""
+import io
 import pymupdf
+from PIL import Image
 from PySide6.QtCore import QBuffer,QIODevice,QMimeData,Qt,QThread
 from PySide6.QtGui import QCursor,QImage,QPainter,QPixmap
 from PySide6.QtWidgets import QApplication,QFileDialog
@@ -24,6 +26,11 @@ import uuid
 _MAX_PASTE_PIXELS=25_000_000
 # Qt 對應到 Windows 原生剪貼簿格式「PNG」的 MIME 名稱。
 WINDOWS_PNG_MIME='application/x-qt-windows-mime;value="PNG"'
+# 其他程式提供的 PNG 格式（保留透明度），貼上時優先於沒有透明度的點陣圖。
+_PNG_FORMATS=(WINDOWS_PNG_MIME,"image/png")
+# 給只讀點陣圖（CF_DIB）程式的備用圖最長邊。程式結束時 Qt 會把點陣圖轉成多種格式交給系統，
+# 實測 5000×5000 會讓結束多等約 4 秒；限制在 1600 像素後與不放點陣圖相近。PNG 仍保留原尺寸。
+_BITMAP_FALLBACK_MAX_SIDE=1600
 
 
 class StampActionsMixin:
@@ -360,6 +367,9 @@ class StampActionsMixin:
         mime.setData(WINDOWS_PNG_MIME,png)
         # 點陣圖（CF_DIB）沒有透明度，只讀這種格式的程式會把透明處顯示成黑色，先合成到白底上。
         source=QImage.fromData(png,"PNG")
+        if max(source.width(),source.height())>_BITMAP_FALLBACK_MAX_SIDE:
+            source=source.scaled(_BITMAP_FALLBACK_MAX_SIDE,_BITMAP_FALLBACK_MAX_SIDE,
+                Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation)
         flat=QImage(source.size(),QImage.Format.Format_RGB32)
         flat.fill(Qt.GlobalColor.white)
         painter=QPainter(flat)
@@ -369,9 +379,9 @@ class StampActionsMixin:
         return mime
 
     def clipboard_layer(self):
-        """讀取剪貼簿：優先墨頁專用格式，其次一般圖片；沒有圖片時回傳 None。
+        """讀取剪貼簿：依序採用墨頁專用格式、其他程式的 PNG、一般點陣圖；沒有圖片時回傳 None。
 
-        一般圖片超過像素上限時拋出 EditorError，避免把超大圖片轉成 PNG。
+        圖片超過像素上限時拋出 EditorError，避免處理超大圖片。
         """
         mime=QApplication.clipboard().mimeData()
         if mime is None:
@@ -380,6 +390,9 @@ class StampActionsMixin:
             item=decode_layer(bytes(mime.data(MIME_TYPE)))
             if item is not None:
                 return item
+        png=self.clipboard_png(mime)
+        if png is not None:
+            return ClipboardLayer(png)
         if not mime.hasImage():
             return None
         data=mime.imageData()
@@ -393,9 +406,30 @@ class StampActionsMixin:
         image.save(buffer,"PNG")
         return ClipboardLayer(bytes(buffer.data()))
 
+    @staticmethod
+    def clipboard_png(mime):
+        """其他程式（瀏覽器、Office 等）放的 PNG，保留透明度；沒有或不是有效 PNG 時回傳 None。"""
+        for name in _PNG_FORMATS:
+            if not mime.hasFormat(name):
+                continue
+            data=bytes(mime.data(name))
+            try:
+                # 只讀檔頭取得尺寸，不解碼整張圖。
+                with Image.open(io.BytesIO(data)) as image:
+                    if image.format!="PNG":
+                        continue
+                    pixels=image.width*image.height
+            except Exception:
+                continue
+            if pixels>_MAX_PASTE_PIXELS:
+                raise EditorError("IMAGE","剪貼簿圖片太大（超過 2500 萬像素），無法貼上。")
+            return data
+        return None
+
     def can_paste_image(self):
         mime=QApplication.clipboard().mimeData()
-        return mime is not None and (mime.hasFormat(MIME_TYPE) or mime.hasImage())
+        return mime is not None and (mime.hasImage()
+            or any(mime.hasFormat(name) for name in (MIME_TYPE,*_PNG_FORMATS)))
 
     def paste_image(self):
         """Ctrl+V：以滑鼠位置為中心貼上；游標不在頁面上時貼在可見區域中央。"""

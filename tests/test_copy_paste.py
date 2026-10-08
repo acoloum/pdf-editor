@@ -662,3 +662,81 @@ def test_paste_cancels_text_insertion_mode(qtbot, multi_page_path, red_stamp):
         assert not window.canvas._text_insertion
     finally:
         _close(window)
+
+def _half_transparent_png(width=80, height=40):
+    """左半透明、右半不透明紅色的 PNG。"""
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    for x in range(width // 2, width):
+        for y in range(height):
+            image.putpixel((x, y), (220, 30, 30, 255))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("png_format", [
+    'application/x-qt-windows-mime;value="PNG"',  # Windows 原生 PNG（瀏覽器、Office 等）
+    "image/png",
+])
+def test_paste_external_png_keeps_transparency(qtbot, multi_page_path, png_format):
+    from PySide6.QtCore import QMimeData
+
+    window = _open(qtbot, multi_page_path)
+    try:
+        mime = QMimeData()
+        mime.setData(png_format, _half_transparent_png())
+        # 同時附上沒有透明度的點陣圖（像只提供 CF_DIB 時那樣變成黑底），貼上時不應採用它。
+        black = QImage(80, 40, QImage.Format.Format_RGB32)
+        black.fill(QColor(0, 0, 0))
+        mime.setImageData(black)
+        QApplication.clipboard().setMimeData(mime)
+
+        window.paste_layer_at((150, 100))
+
+        pasted = window.session.overlays[-1]
+        with Image.open(pasted.asset_path) as image:
+            rgba = image.convert("RGBA")
+            assert rgba.getpixel((5, 20))[3] == 0
+            assert rgba.getpixel((75, 20)) == (220, 30, 30, 255)
+    finally:
+        _close(window)
+
+
+def test_paste_external_png_rejects_oversized_image(qtbot, multi_page_path, monkeypatch):
+    import pdf_editor.ui.stamp_actions as stamp_actions
+    from PySide6.QtCore import QMimeData
+
+    window = _open(qtbot, multi_page_path)
+    try:
+        monkeypatch.setattr(stamp_actions, "_MAX_PASTE_PIXELS", 1000)
+        mime = QMimeData()
+        mime.setData("image/png", _half_transparent_png())
+        QApplication.clipboard().setMimeData(mime)
+
+        window.paste_layer_at((150, 100))
+
+        assert window.session.overlays == ()
+        assert window.statusBar().currentMessage() == "剪貼簿圖片太大（超過 2500 萬像素），無法貼上。"
+    finally:
+        _close(window)
+
+
+def test_copy_layer_caps_bitmap_fallback_but_keeps_full_png(qtbot, multi_page_path, tmp_path):
+    wide = tmp_path / "長條章.png"
+    Image.new("RGBA", (3200, 100), (210, 35, 45, 255)).save(wide)
+    window = _open(qtbot, multi_page_path)
+    try:
+        window.import_layer(wide, False)
+
+        window.copy_selection()
+
+        mime = QApplication.clipboard().mimeData()
+        with Image.open(io.BytesIO(bytes(mime.data("image/png")))) as image:
+            assert image.size == (3200, 100)
+        # 點陣圖只給不支援 PNG 的舊程式；大圖會讓程式結束時多等好幾秒，因此限制尺寸。
+        data = mime.imageData()
+        bitmap = data.toImage() if hasattr(data, "toImage") else QImage(data)
+        assert max(bitmap.width(), bitmap.height()) == 1600
+        assert bitmap.width() / bitmap.height() == pytest.approx(32, rel=0.05)
+    finally:
+        _close(window)
