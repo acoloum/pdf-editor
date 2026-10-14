@@ -125,3 +125,29 @@ def test_missing_run_is_reported_as_stale(pdf_bytes, tmp_path):
         edit_selection(pdf_bytes, request, str(tmp_path))
 
     assert error.value.code == "STALE"
+
+
+def test_runs_sharing_a_font_embed_it_once_and_still_render(font_path, tmp_path):
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=500, height=400)
+        page.insert_font(fontname="noto", fontfile=font_path)
+        page.insert_text((40, 80), "品質檢驗", fontname="noto", fontsize=16)
+        page.insert_text((40, 160), "材料規格", fontname="noto", fontsize=16)
+        doc.subset_fonts(fallback=True)
+        pdf = doc.tobytes(garbage=4, deflate=True)
+    runs = extract_runs(pdf, 0)
+    assert len(runs) == 2
+
+    output = edit_selection(pdf, _request(pdf, runs, offset=(0, 20)), str(tmp_path))
+
+    with pymupdf.open(stream=output, filetype="pdf") as doc:
+        page = doc[0]
+        moved_fonts = {font[4] for font in page.get_fonts() if font[4].startswith("moved")}
+        # 兩段文字用同一字型：只子集化、嵌入一次。
+        assert len(moved_fonts) == 1
+        for run in runs:
+            clip = pymupdf.Rect(run.rect) + (0, 20, 0, 20)
+            pixmap = page.get_pixmap(clip=clip, dpi=72)
+            dark = sum(1 for index in range(0, len(pixmap.samples), pixmap.n)
+                if pixmap.samples[index] < 100)
+            assert dark > 20

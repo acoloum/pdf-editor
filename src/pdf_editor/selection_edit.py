@@ -133,12 +133,19 @@ def edit_selection(pdf: bytes, request: SelectionEdit, font_folder: str) -> byte
                 page.add_redact_annot(pymupdf.Rect(run.rect), fill=False, cross_out=False)
             page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
                 graphics=pymupdf.PDF_REDACT_LINE_ART_NONE, text=pymupdf.PDF_REDACT_TEXT_REMOVE)
+        # 同一字型的文字合併成一次子集化並共用同一個嵌入字型：
+        # 對 16MB 的 Noto CJK 每次子集化約需 1～2 秒，逐段處理會隨段數倍增。
+        combined = {}
+        for run, _rect, _size, font_path, _font, _fake_bold in texts:
+            combined[font_path] = combined.get(font_path, "") + run.text
+        embedded = {path: (subset_font(path, text), _font_resource_name("moved", path, text))
+            for path, text in combined.items()}
         needs_subset = False
         for run, rect, size, font_path, font, fake_bold in texts:
-            embed_path = subset_font(font_path, run.text)
+            embed_path, resource_name = embedded[font_path]
             needs_subset = needs_subset or embed_path == font_path
             shape = _new_text_shape(page, rect, run.text, embed_path, font, size, run.color,
-                "left", _font_resource_name("moved", font_path, run.text), fake_bold)
+                "left", resource_name, fake_bold)
             shape.commit()
         if needs_subset:
             doc.subset_fonts(fallback=True)
