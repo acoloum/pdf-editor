@@ -203,20 +203,6 @@ def test_window_renders_at_native_device_pixel_ratio(qtbot, source_path):
     assert window.page_data["pixel_ratio"] == pytest.approx(window.canvas.devicePixelRatioF())
     window.close()
 
-def test_canvas_pans_page_with_left_drag_on_background(qtbot, pdf_bytes):
-    canvas = Canvas()
-    qtbot.addWidget(canvas)
-    canvas.resize(300, 250)
-    canvas.show()
-    canvas.display(render_page(pdf_bytes, 0, 1.5))
-    qtbot.waitExposed(canvas)
-    before = (canvas.horizontalScrollBar().value(), canvas.verticalScrollBar().value())
-    qtbot.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(260, 210))
-    qtbot.mouseMove(canvas.viewport(), QPoint(220, 170))
-    qtbot.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(220, 170))
-    after = (canvas.horizontalScrollBar().value(), canvas.verticalScrollBar().value())
-    assert after != before
-
 def test_canvas_dragging_text_emits_moved_run(qtbot, pdf_bytes):
     canvas = Canvas()
     qtbot.addWidget(canvas)

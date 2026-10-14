@@ -1,13 +1,46 @@
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from PySide6.QtCore import Qt, Signal, QPointF, QTimer, QRectF, QEvent
 from PySide6.QtGui import (QPixmap,QPen,QColor,QTransform,QPainter,QKeyEvent,QBrush,
     QPainterPath)
 from PySide6.QtWidgets import (QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,
-    QGraphicsItem,QLabel,QTextEdit,QFrame)
+    QGraphicsItem,QLabel,QTextEdit,QFrame,QApplication)
 from PySide6.QtGui import QTextOption
 from pdf_editor.engine.geometry import transformed_rect, transform_point, inverse_transform
 from pdf_editor.engine.overlay import transformed_image
 from pdf_editor.ui.style import COLORS
+
+@dataclass(frozen=True)
+class CanvasSelection:
+    """以滑鼠圈選的物件：同一頁的圖層代碼、可修改的文字與註解。"""
+    page: int
+    layers: tuple = ()
+    runs: tuple = ()
+    annotations: tuple = ()
+    # 圈到但無法安全修改（例如直書）而略過的文字數。
+    skipped_runs: int = 0
+
+    @property
+    def count(self):
+        return len(self.layers)+len(self.runs)+len(self.annotations)
+
+    def shifted(self,dx,dy):
+        """位移後的選取內容，供重新渲染後依新位置找回同一批物件。"""
+        def moved(item):
+            r=item.rect
+            return replace(item,rect=(r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy))
+        return replace(self,runs=tuple(moved(run) for run in self.runs),
+            annotations=tuple(moved(item) for item in self.annotations))
+
+
+def _contains(outer,inner):
+    """inner 矩形是否完整落在 outer 內（頁面座標，容許 0.5 點誤差）。"""
+    return (inner[0]>=outer[0]-0.5 and inner[1]>=outer[1]-0.5
+        and inner[2]<=outer[2]+0.5 and inner[3]<=outer[3]+0.5)
+
+
+def _same_place(first,second,tolerance=1.5):
+    return abs(first[0]-second[0])<=tolerance and abs(first[1]-second[1])<=tolerance
+
 
 class LayerItem(QGraphicsPixmapItem):
     HANDLE_RADIUS=6
@@ -297,6 +330,10 @@ class Canvas(QGraphicsView):
     context_menu_requested=Signal(object,object,object)
     image_clicked=Signal(object)
     background_clicked=Signal()
+    # 圈選完成（CanvasSelection）、整批拖曳放開（選取內容, (dx, dy)）與按 Delete 刪除整批。
+    objects_selected=Signal(object)
+    selection_moved=Signal(object,object)
+    selection_delete_requested=Signal(object)
     # 每次在畫布上放開滑鼠後發出；主視窗用來補做拖曳期間延後的重繪。
     mouse_released=Signal()
 
@@ -354,6 +391,20 @@ class Canvas(QGraphicsView):
         self.setAcceptDrops(True)
         self.viewport().setMouseTracking(True)
         self._wheel_page_delta=0
+        self._page=None
+        # 圈選：按下的位置（場景與視窗座標）、是否已拖曳超過門檻、顯示中的虛線框。
+        self._marquee_start=None
+        self._marquee_press=None
+        self._marquee_active=False
+        self._marquee_item=None
+        # 在圖片上按下時先記住，放開時沒有拖曳才當作點選圖片。
+        self._pending_image=None
+        # 目前的整批選取與其外框；拖曳整批時記錄起點與各圖層原位置。
+        self.group=None
+        self._group_items=[]
+        self._group_drag_start=None
+        self._group_origins={}
+        self._group_hover=False
 
     def drawBackground(self,painter,rect):
         """繪製深色畫布與細點網格，營造工作區的科技感。"""
@@ -375,6 +426,11 @@ class Canvas(QGraphicsView):
         self.conflict_items=[]
         self._clear_crop_items()
         self._crop_mode=False
+        # 整批選取保留到重建畫面後，再依新資料找回仍存在的物件。
+        group=self.group
+        self._reset_pointer_tracking()
+        self.group=None
+        self._group_items=[]
         self.scene().clear()
         self.highlight=None
         self.annotation_highlight=None
@@ -383,6 +439,7 @@ class Canvas(QGraphicsView):
         self.selected_annotation=None
         self._drag_run=None
         self.matrix=data["matrix"]
+        self._page=data["page"]
         self.runs=data["runs"]
         self.annotations=data.get("annotations",())
         self.editable_images=data.get("images",())
@@ -418,7 +475,35 @@ class Canvas(QGraphicsView):
             item.setZValue(5)
             self.scene().addItem(item)
             item.setSelected(layer.id==selected_layer_id)
+        if group is not None and group.page==data["page"]:
+            self._restore_group(group,layers)
         self._position_inline_editor()
+
+    def _reset_pointer_tracking(self):
+        """重建畫面時放棄進行中的圈選與整批拖曳（相關圖形會隨場景一起清除）。"""
+        self._marquee_start=None
+        self._marquee_press=None
+        self._marquee_active=False
+        self._marquee_item=None
+        self._pending_image=None
+        self._group_drag_start=None
+        self._group_origins={}
+        if self._group_hover:
+            self._group_hover=False
+            self.viewport().unsetCursor()
+
+    def _restore_group(self,group,layers):
+        """以圖層代碼、文字內容與位置找回重新渲染後仍存在的選取物件。"""
+        layer_ids=tuple(layer.id for layer in layers
+            if layer.page==group.page and layer.id in group.layers)
+        runs=tuple(run for old in group.runs for run in self.runs
+            if run.editable and run.text==old.text and _same_place(run.rect,old.rect))
+        annotations=tuple(item for old in group.annotations for item in self.annotations
+            if item.kind==old.kind and _same_place(item.rect,old.rect))
+        restored=CanvasSelection(group.page,layer_ids,tuple(dict.fromkeys(runs)),
+            tuple(dict.fromkeys(annotations)))
+        if restored.count:
+            self.set_group_selection(restored)
 
     def _run_at(self, scene_pos):
         x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
@@ -458,9 +543,12 @@ class Canvas(QGraphicsView):
             return None
         if (self._crop_mode or self._text_insertion or self._note_insertion
                 or self._annotation_selection or self._drag_run
-                or self.dragMode()!=QGraphicsView.DragMode.NoDrag):
+                or self._marquee_start is not None or self._group_drag_start is not None):
             return None
         if isinstance(self.scene().itemAt(scene_pos,QTransform()),LayerItem):
+            return None
+        if self._group_contains(scene_pos):
+            # 整批選取的物件上顯示移動游標，不提示圖片。
             return None
         if self._run_at(scene_pos):
             return None
@@ -530,6 +618,7 @@ class Canvas(QGraphicsView):
         self.annotation_highlight.setZValue(4)
 
     def start_annotation_selection(self):
+        self.clear_group_selection()
         self.clear_text_selection()
         self.clear_annotation_selection()
         self.cancel_text_insertion()
@@ -549,6 +638,7 @@ class Canvas(QGraphicsView):
         self.insertion_hint.hide()
 
     def start_text_insertion(self):
+        self.clear_group_selection()
         self.clear_text_selection()
         self.cancel_annotation_selection()
         self.cancel_note_insertion()
@@ -569,6 +659,7 @@ class Canvas(QGraphicsView):
             self.text_insertion_cancelled.emit()
 
     def start_note_insertion(self):
+        self.clear_group_selection()
         self.clear_text_selection()
         self.cancel_annotation_selection()
         self.cancel_text_insertion()
@@ -589,6 +680,7 @@ class Canvas(QGraphicsView):
             self.note_insertion_cancelled.emit()
 
     def start_crop(self,page_rect):
+        self.clear_group_selection()
         self.cancel_inline_editor()
         self.cancel_text_insertion()
         self.cancel_note_insertion()
@@ -884,6 +976,177 @@ class Canvas(QGraphicsView):
         super().scrollContentsBy(dx,dy)
         self._position_inline_editor()
 
+    def _page_rect(self,scene_rect):
+        """場景矩形換算成頁面座標矩形 (x0, y0, x1, y1)。"""
+        inv=inverse_transform(self.matrix)
+        points=(scene_rect.topLeft(),scene_rect.topRight(),scene_rect.bottomLeft(),
+            scene_rect.bottomRight())
+        mapped=[transform_point(inv,point.x(),point.y()) for point in points]
+        xs=[point[0] for point in mapped]
+        ys=[point[1] for point in mapped]
+        return (min(xs),min(ys),max(xs),max(ys))
+
+    def _page_delta(self,delta):
+        """場景中的位移換算成頁面座標的位移。"""
+        inv=inverse_transform(self.matrix)
+        x,y=transform_point(inv,delta.x(),delta.y())
+        ox,oy=transform_point(inv,0,0)
+        return x-ox,y-oy
+
+    def _layer_items(self):
+        return [item for item in self.scene().items() if isinstance(item,LayerItem)]
+
+    def objects_in(self,scene_rect):
+        """完整落在圈選範圍內的圖層、可修改文字與註解。"""
+        area=self._page_rect(scene_rect)
+        layers=tuple(item.layer.id for item in reversed(self._layer_items())
+            if scene_rect.contains(item.mapRectToScene(item._content_rect())))
+        inside=[run for run in self.runs if _contains(area,run.rect)]
+        runs=tuple(run for run in inside if run.editable)
+        annotations=tuple(item for item in self.annotations if _contains(area,item.rect))
+        return CanvasSelection(self._page,layers,runs,annotations,len(inside)-len(runs))
+
+    def set_group_selection(self,selection):
+        """以虛線框標示整批選取的文字與註解；圖層顯示一般的選取外框。"""
+        self.clear_group_selection()
+        self.clear_text_selection()
+        self.clear_annotation_selection()
+        self.group=selection
+        for item in self._layer_items():
+            item.setSelected(item.layer.id in selection.layers)
+        for rect,color in ([(run.rect,COLORS["accent"]) for run in selection.runs]
+                +[(item.rect,COLORS["annotation"]) for item in selection.annotations]):
+            r=transformed_rect(self.matrix,rect)
+            pen=QPen(QColor(color),2,Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            fill=QColor(color)
+            fill.setAlpha(36)
+            frame=self.scene().addRect(r[0]-2,r[1]-2,r[2]-r[0]+4,r[3]-r[1]+4,pen,QBrush(fill))
+            frame.setZValue(4)
+            frame.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self._group_items.append(frame)
+
+    def keep_group(self,selection):
+        """下次重建畫面時改依 selection 找回整批選取（例如移動失敗、物件回到原位）。"""
+        if self.group is not None:
+            self.group=selection
+
+    def clear_group_selection(self):
+        if self.group is None and not self._group_items:
+            return
+        layer_ids=self.group.layers if self.group is not None else ()
+        self.group=None
+        for item in self._group_items:
+            try:
+                if item.scene() is self.scene():
+                    self.scene().removeItem(item)
+            except RuntimeError:
+                pass
+        self._group_items=[]
+        self._group_drag_start=None
+        self._group_origins={}
+        for item in self._layer_items():
+            if item.layer.id in layer_ids:
+                item.setSelected(False)
+        if self._group_hover:
+            self._group_hover=False
+            self.viewport().unsetCursor()
+
+    def _group_contains(self,scene_pos):
+        """游標是否落在整批選取的任一物件上。"""
+        group=self.group
+        if group is None:
+            return False
+        for item in self._layer_items():
+            if item.layer.id in group.layers and item.mapRectToScene(
+                    item._content_rect()).contains(scene_pos):
+                return True
+        x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
+        return any(r[0]<=x<=r[2] and r[1]<=y<=r[3]
+            for r in [run.rect for run in group.runs]+[item.rect for item in group.annotations])
+
+    def _begin_marquee(self,scene_pos,view_pos,image=None):
+        self._marquee_start=scene_pos
+        self._marquee_press=view_pos
+        self._marquee_active=False
+        self._pending_image=image
+
+    def _update_marquee(self,scene_pos,view_pos):
+        if not self._marquee_active:
+            moved=(view_pos-self._marquee_press).manhattanLength()
+            if moved<QApplication.startDragDistance():
+                return
+            # 拖曳超過門檻才算圈選；在圖片上開始拖曳時改為圈選，不再編輯該圖片。
+            self._marquee_active=True
+            self._pending_image=None
+            pen=QPen(QColor(COLORS["accent"]),1,Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            fill=QColor(COLORS["accent"])
+            fill.setAlpha(40)
+            self._marquee_item=self.scene().addRect(QRectF(),pen,QBrush(fill))
+            self._marquee_item.setZValue(30)
+            self._marquee_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self._marquee_item.setRect(QRectF(self._marquee_start,scene_pos).normalized())
+
+    def _finish_marquee(self,scene_pos):
+        start,active,image=self._marquee_start,self._marquee_active,self._pending_image
+        item=self._marquee_item
+        self._marquee_start=None
+        self._marquee_press=None
+        self._marquee_active=False
+        self._marquee_item=None
+        self._pending_image=None
+        if item is not None:
+            try:
+                if item.scene() is self.scene():
+                    self.scene().removeItem(item)
+            except RuntimeError:
+                pass
+        if not active:
+            if image is not None:
+                # 主視窗轉換期間會停用畫布，之後的放開處理不一定執行；這次按壓視為已結束。
+                self.pointer_pressed=False
+                self.image_clicked.emit(image)
+            return
+        selection=self.objects_in(QRectF(start,scene_pos).normalized())
+        if not selection.count:
+            if selection.skipped_runs:
+                # 只圈到無法修改的文字：讓主視窗說明原因。
+                self.objects_selected.emit(selection)
+            return
+        if selection.count==1 and selection.layers:
+            # 只圈到一個圖層時與直接點選相同，右側顯示圖層設定。
+            for layer_item in self._layer_items():
+                layer_item.setSelected(layer_item.layer.id==selection.layers[0])
+            self.layer_selected.emit(selection.layers[0])
+            return
+        self.set_group_selection(selection)
+        self.objects_selected.emit(selection)
+
+    def _start_group_drag(self,scene_pos):
+        self._group_drag_start=scene_pos
+        self._group_origins={item:item.pos() for item in self._layer_items()
+            if item.layer.id in self.group.layers}
+
+    def _drag_group(self,scene_pos):
+        delta=scene_pos-self._group_drag_start
+        for item,origin in self._group_origins.items():
+            item.setPos(origin+delta)
+        for item in self._group_items:
+            item.setPos(delta)
+
+    def _finish_group_drag(self,scene_pos):
+        delta=scene_pos-self._group_drag_start
+        self._group_drag_start=None
+        self._group_origins={}
+        dx,dy=self._page_delta(delta)
+        if abs(dx)+abs(dy)<=0.01:
+            return
+        group=self.group
+        # 先記下移動後的位置，重新渲染後才能在新位置找回同一批物件。
+        self.group=group.shifted(dx,dy)
+        self.selection_moved.emit(group,(dx,dy))
+
     def _show_highlight(self, rect):
         if self.highlight:
             self.scene().removeItem(self.highlight)
@@ -919,6 +1182,15 @@ class Canvas(QGraphicsView):
                 return
             event.accept()
             return
+        modal=self._text_insertion or self._note_insertion or self._annotation_selection
+        if self.group is not None and not modal and event.button()==Qt.MouseButton.LeftButton:
+            if self._group_contains(scene_pos):
+                # 按在整批選取的物件上：拖曳時整批一起移動。
+                self.setFocus()
+                self._start_group_drag(scene_pos)
+                event.accept()
+                return
+            self.clear_group_selection()
         item=self.scene().itemAt(scene_pos,QTransform())
         self.setFocus()
         if isinstance(item,LayerItem):
@@ -957,21 +1229,21 @@ class Canvas(QGraphicsView):
                 event.accept()
                 return
             self.clear_text_selection()
-            image=self._image_at(scene_pos)
-            if image and event.button()==Qt.MouseButton.LeftButton:
-                # 文字優先；沒點到文字才轉交圖片編輯。
-                # 注意：接收訊號的槽函式不可同步重建場景（畫面是非同步重繪）。
-                self.clear_image_hover()
-                # 主視窗轉換期間會停用畫布，放開事件不會送達；這次按壓視為已結束。
-                self.pointer_pressed=False
-                self.image_clicked.emit(image)
-                event.accept()
-                return
             if event.button()==Qt.MouseButton.LeftButton:
-                # 同上；右鍵（內容選單）與中鍵不算點空白處，不發訊號。
-                self.background_clicked.emit()
-            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+                # 文字優先；沒點到文字才看圖片。在圖片上按下時延到放開才轉交圖片編輯，
+                # 拖曳超過門檻則改為圈選。
+                # 注意：接收訊號的槽函式不可同步重建場景（畫面是非同步重繪）。
+                image=self._image_at(scene_pos)
+                if image:
+                    self.clear_image_hover()
+                else:
+                    # 右鍵（內容選單）與中鍵不算點空白處，不發訊號。
+                    self.background_clicked.emit()
+                self._begin_marquee(scene_pos,event.position(),image)
         super().mousePressEvent(event)
+        if self._marquee_start is not None:
+            # 空白處沒有圖形項目接收按壓；明確接受，後續的拖曳與放開才會送到畫布。
+            event.accept()
 
     @staticmethod
     def dropped_pdf_paths(mime):
@@ -1054,6 +1326,14 @@ class Canvas(QGraphicsView):
             self._drag_crop(self.mapToScene(event.position().toPoint()))
             event.accept()
             return
+        if self._marquee_start is not None:
+            self._update_marquee(self.mapToScene(event.position().toPoint()),event.position())
+            event.accept()
+            return
+        if self._group_drag_start is not None:
+            self._drag_group(self.mapToScene(event.position().toPoint()))
+            event.accept()
+            return
         if self._drag_run:
             scene_pos=self.mapToScene(event.position().toPoint())
             delta=scene_pos-self._drag_start_scene
@@ -1074,6 +1354,17 @@ class Canvas(QGraphicsView):
         super().mouseMoveEvent(event)
         if image is not None:
             self._show_image_hover(image)
+        elif event.buttons()==Qt.MouseButton.NoButton and self.group is not None:
+            self._update_group_hover(self.mapToScene(event.position().toPoint()))
+
+    def _update_group_hover(self,scene_pos):
+        """游標移到整批選取的物件上時顯示移動游標，提示可整批拖曳。"""
+        hovering=self._group_contains(scene_pos)
+        if hovering:
+            self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
+        elif self._group_hover:
+            self.viewport().unsetCursor()
+        self._group_hover=hovering
 
     def changeEvent(self,event):
         super().changeEvent(event)
@@ -1081,7 +1372,23 @@ class Canvas(QGraphicsView):
                 and self.pointer_pressed):
             # 按住期間被停用時收不到放開事件；視同放開，讓延後的重繪照常補做。
             self.pointer_pressed=False
+            self._abort_pointer_actions()
             self.mouse_released.emit()
+
+    def _abort_pointer_actions(self):
+        """放棄進行中的圈選與整批拖曳：移除虛線框，整批選取的物件回到原位。"""
+        item=self._marquee_item
+        if item is not None:
+            try:
+                if item.scene() is self.scene():
+                    self.scene().removeItem(item)
+            except RuntimeError:
+                pass
+        for layer_item,origin in self._group_origins.items():
+            layer_item.setPos(origin)
+        for frame in self._group_items:
+            frame.setPos(0,0)
+        self._reset_pointer_tracking()
 
     def mouseReleaseEvent(self,event):
         self._handle_mouse_release(event)
@@ -1091,6 +1398,14 @@ class Canvas(QGraphicsView):
         self.mouse_released.emit()
 
     def _handle_mouse_release(self,event):
+        if self._marquee_start is not None:
+            self._finish_marquee(self.mapToScene(event.position().toPoint()))
+            event.accept()
+            return
+        if self._group_drag_start is not None:
+            self._finish_group_drag(self.mapToScene(event.position().toPoint()))
+            event.accept()
+            return
         if self._crop_mode and self._crop_drag_handle:
             changed=self._crop_rect!=self._crop_start_rect
             self._crop_drag_handle=None
@@ -1118,9 +1433,16 @@ class Canvas(QGraphicsView):
             event.accept()
             return
         super().mouseReleaseEvent(event)
-        self.setDragMode(QGraphicsView.DragMode.NoDrag)
 
     def keyPressEvent(self,event: QKeyEvent):
+        if self.group is not None and event.key()==Qt.Key.Key_Delete:
+            self.selection_delete_requested.emit(self.group)
+            event.accept()
+            return
+        if self.group is not None and event.key()==Qt.Key.Key_Escape:
+            self.clear_group_selection()
+            event.accept()
+            return
         if event.key()==Qt.Key.Key_Escape and self._crop_mode:
             self.cancel_crop(True)
             event.accept()

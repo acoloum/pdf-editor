@@ -51,6 +51,7 @@ from pdf_editor.ui.page_actions import PageActionsMixin
 from pdf_editor.ui.text_actions import TextActionsMixin
 from pdf_editor.ui.stamp_actions import StampActionsMixin
 from pdf_editor.ui.print_actions import PrintActionsMixin
+from pdf_editor.ui.selection_actions import SelectionActionsMixin
 from pdf_editor.ui.info_panel import DocumentInfoPanel,describe_document
 from pdf_editor.ui.search_bar import SearchBar
 from pdf_editor.outline import read_outline,page_text
@@ -117,7 +118,8 @@ class ThumbnailList(QListWidget):
         event.accept()
         self.pages_dropped.emit(pages,destination)
 
-class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintActionsMixin,QMainWindow):
+class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintActionsMixin,
+        SelectionActionsMixin,QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("墨頁 PDF")
@@ -408,6 +410,9 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.canvas.layer_moved.connect(self.move_layer)
         self.canvas.image_clicked.connect(self.edit_image_at)
         self.canvas.background_clicked.connect(self.click_background)
+        self.canvas.objects_selected.connect(self.select_objects)
+        self.canvas.selection_moved.connect(self.move_objects)
+        self.canvas.selection_delete_requested.connect(self.delete_objects)
         self.canvas.mouse_released.connect(self.render_after_release)
         self.canvas.crop_requested.connect(self.apply_direct_crop)
         self.canvas.crop_cancelled.connect(self.cancel_direct_crop)
@@ -1335,6 +1340,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             return
         self.cancel_editing_modes(crop=False)
         self.canvas.clear_annotation_selection()
+        self.canvas.clear_group_selection()
         self.clear_selection_state()
         self.session.redo() if redo else self.session.undo()
         self.text_panel.setEnabled(False)

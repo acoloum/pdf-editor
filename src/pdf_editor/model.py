@@ -44,6 +44,16 @@ class TextInsertion:
     fit: str = "none"
 
 @dataclass(frozen=True)
+class SelectionEdit:
+    """圈選後一次刪除或移動同一頁的多段文字與註解。"""
+    document_hash: str
+    page: int
+    run_ids: tuple[str, ...]
+    annotation_xrefs: tuple[int, ...]
+    # None 表示刪除；否則為頁面座標的位移量 (dx, dy)。
+    offset: tuple[float, float] | None = None
+
+@dataclass(frozen=True)
 class DocumentAccess:
     can_edit: bool
     can_reorganize: bool
