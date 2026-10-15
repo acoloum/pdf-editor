@@ -1,4 +1,6 @@
 import hashlib
+from dataclasses import replace
+from pathlib import Path
 
 import pymupdf
 import pytest
@@ -336,3 +338,72 @@ def test_moved_text_lands_at_offset_on_cropped_page(rotation):
     assert moved.rect == pytest.approx(
         (run.rect[0] + 60, run.rect[1] + 90, run.rect[2] + 60, run.rect[3] + 90), abs=0.01)
     assert _ink(output, moved.rect) == _ink(pdf, run.rect)
+
+
+# ── 頁面原有的圖片（例如公司章）一起移動 ──
+
+import io
+
+from PIL import Image
+
+from pdf_editor.legacy_overlay_conversion import editable_images_on_page
+from pdf_editor.selection_edit import edit_selection_with_images
+
+STAMP_RECT = (320, 40, 380, 80)
+
+
+def _table_with_stamp_pdf():
+    buffer = io.BytesIO()
+    Image.new("RGB", (60, 40), (20, 60, 220)).save(buffer, format="PNG")
+    with pymupdf.open(stream=_table_pdf(), filetype="pdf") as doc:
+        doc[0].insert_image(STAMP_RECT, stream=buffer.getvalue())
+        return doc.tobytes()
+
+
+def _stamp_images(pdf):
+    with pymupdf.open(stream=pdf, filetype="pdf") as doc:
+        return editable_images_on_page(doc, 0)
+
+
+def test_move_converts_selected_page_image_and_shifts_it(tmp_path):
+    pdf = _table_with_stamp_pdf()
+    images = _stamp_images(pdf)
+    assert len(images) == 1
+    runs = extract_runs(pdf, 0)
+    request = _request(pdf, runs, offset=(0, 150))
+    request = SelectionEdit(request.document_hash, 0, request.run_ids, (), (0, 150),
+        selectable_drawings(pdf, 0))
+
+    output, layers = edit_selection_with_images(pdf, request, images, str(tmp_path))
+
+    assert len(layers) == 1
+    assert layers[0].rect == pytest.approx((320, 190, 380, 230), abs=0.5)
+    assert Path(layers[0].asset_path).exists()
+    # 圖片已從頁面抽離（改由圖層顯示），文字與格線一起往下。
+    assert _stamp_images(output) == ()
+    assert extract_runs(output, 0)[0].rect[1] == pytest.approx(runs[0].rect[1] + 150, abs=0.01)
+    assert all(rect[1] >= 190 for rect in selectable_drawings(output, 0))
+
+
+def test_delete_removes_selected_page_image(tmp_path):
+    pdf = _table_with_stamp_pdf()
+    request = SelectionEdit(hashlib.sha256(pdf).hexdigest(), 0, (), (), None)
+
+    output, layers = edit_selection_with_images(pdf, request, _stamp_images(pdf), str(tmp_path))
+
+    assert layers == ()
+    assert _stamp_images(output) == ()
+    blue = _ink(output, STAMP_RECT)
+    assert min(blue[2]) > 200
+
+
+def test_image_no_longer_on_page_is_reported_as_stale(tmp_path):
+    pdf = _table_with_stamp_pdf()
+    image = _stamp_images(pdf)[0]
+    moved = replace(image, rect=(10, 10, 20, 20))
+    request = SelectionEdit(hashlib.sha256(pdf).hexdigest(), 0, (), (), (0, 10))
+
+    with pytest.raises(EditorError) as error:
+        edit_selection_with_images(pdf, request, (moved,), str(tmp_path))
+
+    assert error.value.code == "STALE"

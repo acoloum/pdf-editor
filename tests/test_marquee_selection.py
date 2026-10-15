@@ -400,3 +400,99 @@ def test_dragging_table_moves_grid_with_text_in_one_undo_step(qtbot, tmp_path, m
         assert _black_lines(window.session.pdf) == before
     finally:
         _close(window)
+
+
+# ── 表格與頁面原有的圖章一起移動 ──
+
+import io
+
+STAMP = (320, 40, 380, 80)
+
+
+def _open_table_and_stamp_window(qtbot, tmp_path, monkeypatch):
+    buffer = io.BytesIO()
+    Image.new("RGB", (60, 40), (20, 60, 220)).save(buffer, format="PNG")
+    with pymupdf.open(stream=_table_pdf(), filetype="pdf") as document:
+        document[0].insert_image(STAMP, stream=buffer.getvalue())
+        pdf = document.tobytes()
+    path = tmp_path / "表格與章.pdf"
+    path.write_bytes(pdf)
+    monkeypatch.setattr(main_window.Jobs, "submit", _submit_synchronously)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1000, 800)
+    window.show()
+    window.open_document(path)
+    qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+    qtbot.waitExposed(window)
+    return window
+
+
+def _drag_group(qtbot, canvas, start, end):
+    qtbot.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=start)
+    _move(canvas, end)
+    qtbot.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=end)
+
+
+def test_table_and_page_stamp_move_together(qtbot, tmp_path, monkeypatch):
+    window = _open_table_and_stamp_window(qtbot, tmp_path, monkeypatch)
+    try:
+        canvas = window.canvas
+        _drag(qtbot, canvas, _view_point(canvas, 30, 30), _view_point(canvas, 390, 110))
+        assert len(canvas.group.images) == 1
+        assert "1 個圖章或圖片" in window.statusBar().currentMessage()
+        undo_index = window.session.history.index
+
+        # 按在圖章上拖曳。
+        _drag_group(qtbot, canvas, _view_point(canvas, 350, 60), _view_point(canvas, 350, 210))
+
+        assert window.session.history.index == undo_index + 1
+        (layer,) = window.session.overlays
+        assert layer.rect[1] == pytest.approx(STAMP[1] + 150, abs=1.5)
+        runs = {r.text: r.rect for r in window.page_data["runs"]}
+        assert runs["CELL"][1] > 220
+        # 移動後圖章以圖層身分留在整批選取中，可以繼續一起拖曳。
+        assert canvas.group.layers == (layer.id,)
+        assert canvas.group.images == ()
+        assert len(canvas.group.runs) == 2
+
+        window.history_step(False)
+        assert window.session.overlays == ()
+        assert len(window.page_data["images"]) == 1
+    finally:
+        _close(window)
+
+
+def test_stamp_clicked_first_stays_in_marquee_selection(qtbot, tmp_path, monkeypatch):
+    window = _open_table_and_stamp_window(qtbot, tmp_path, monkeypatch)
+    try:
+        canvas = window.canvas
+        # 先點圖章（轉成圖層、尚未改動），再拉框把表格和圖章一起圈起來。
+        qtbot.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton,
+            pos=_view_point(canvas, 350, 60))
+        qtbot.waitUntil(lambda: len(window.session.overlays) == 1, timeout=10000)
+        (layer,) = window.session.overlays
+
+        _drag(qtbot, canvas, _view_point(canvas, 30, 30), _view_point(canvas, 390, 110))
+
+        # 開始圈選時不能把剛轉換的圖章撤銷掉。
+        assert window.session.overlays == (layer,)
+        assert canvas.group.layers == (layer.id,)
+        _drag_group(qtbot, canvas, _view_point(canvas, 200, 70.2), _view_point(canvas, 200, 220.2))
+        assert window.session.overlays[0].rect[1] == pytest.approx(STAMP[1] + 150, abs=1.5)
+    finally:
+        _close(window)
+
+
+def test_background_click_is_reported_on_release_and_not_for_marquee(qtbot, pdf_bytes):
+    canvas, _data = _canvas(qtbot, pdf_bytes)
+    blank = QSignalSpy(canvas.background_clicked)
+    point = _view_point(canvas, 450, 380)
+
+    qtbot.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=point)
+    assert blank.count() == 0
+    qtbot.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=point)
+    assert blank.count() == 1
+
+    _drag(qtbot, canvas, _view_point(canvas, 20, 150), _view_point(canvas, 480, 390))
+    assert blank.count() == 1

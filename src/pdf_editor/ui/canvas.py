@@ -11,7 +11,8 @@ from pdf_editor.ui.style import COLORS
 
 @dataclass(frozen=True)
 class CanvasSelection:
-    """以滑鼠圈選的物件：同一頁的圖層代碼、可修改的文字、註解與格線等向量圖形外框。"""
+    """以滑鼠圈選的物件：同一頁的圖層代碼、可修改的文字、註解、格線等向量圖形外框，
+    以及頁面原有、可轉成圖層的圖片（例如公司章）。"""
     page: int
     layers: tuple = ()
     runs: tuple = ()
@@ -19,10 +20,12 @@ class CanvasSelection:
     # 圈到但無法安全修改（例如直書）而略過的文字數。
     skipped_runs: int = 0
     drawings: tuple = ()
+    images: tuple = ()
 
     @property
     def count(self):
-        return len(self.layers)+len(self.runs)+len(self.annotations)+len(self.drawings)
+        return (len(self.layers)+len(self.runs)+len(self.annotations)+len(self.drawings)
+            +len(self.images))
 
     def shifted(self,dx,dy):
         """位移後的選取內容，供重新渲染後依新位置找回同一批物件。"""
@@ -32,7 +35,8 @@ class CanvasSelection:
             return replace(item,rect=moved_rect(item.rect))
         return replace(self,runs=tuple(moved(run) for run in self.runs),
             annotations=tuple(moved(item) for item in self.annotations),
-            drawings=tuple(moved_rect(rect) for rect in self.drawings))
+            drawings=tuple(moved_rect(rect) for rect in self.drawings),
+            images=tuple(moved(image) for image in self.images))
 
 
 def _contains(outer,inner):
@@ -512,8 +516,11 @@ class Canvas(QGraphicsView):
             if item.kind==old.kind and _same_place(item.rect,old.rect))
         drawings=tuple(rect for old in group.drawings for rect in self.drawings
             if _same_rect(rect,old))
+        images=tuple(image for old in group.images for image in self.editable_images
+            if _same_rect(image.rect,old.rect))
         restored=CanvasSelection(group.page,layer_ids,tuple(dict.fromkeys(runs)),
-            tuple(dict.fromkeys(annotations)),drawings=tuple(dict.fromkeys(drawings)))
+            tuple(dict.fromkeys(annotations)),drawings=tuple(dict.fromkeys(drawings)),
+            images=tuple(dict.fromkeys(images)))
         if restored.count:
             self.set_group_selection(restored)
 
@@ -1017,7 +1024,9 @@ class Canvas(QGraphicsView):
         runs=tuple(run for run in inside if run.editable)
         annotations=tuple(item for item in self.annotations if _contains(area,item.rect))
         drawings=tuple(rect for rect in self.drawings if _contains(area,rect))
-        return CanvasSelection(self._page,layers,runs,annotations,len(inside)-len(runs),drawings)
+        images=tuple(image for image in self.editable_images if _contains(area,image.rect))
+        return CanvasSelection(self._page,layers,runs,annotations,len(inside)-len(runs),drawings,
+            images)
 
     def set_group_selection(self,selection):
         """以虛線框標示整批選取的文字與註解；圖層顯示一般的選取外框。"""
@@ -1027,7 +1036,9 @@ class Canvas(QGraphicsView):
         self.group=selection
         for item in self._layer_items():
             item.setSelected(item.layer.id in selection.layers)
+        # 頁面原有的圖片與文字同樣以虛線框標示；移動或刪除時才轉成圖層。
         for rect,color in ([(run.rect,COLORS["accent"]) for run in selection.runs]
+                +[(image.rect,COLORS["accent"]) for image in selection.images]
                 +[(item.rect,COLORS["annotation"]) for item in selection.annotations]):
             r=transformed_rect(self.matrix,rect)
             pen=QPen(QColor(color),2,Qt.PenStyle.DashLine)
@@ -1088,7 +1099,8 @@ class Canvas(QGraphicsView):
                 return True
         x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
         if any(r[0]<=x<=r[2] and r[1]<=y<=r[3]
-                for r in [run.rect for run in group.runs]+[item.rect for item in group.annotations]):
+                for r in [run.rect for run in group.runs]+[item.rect for item in group.annotations]
+                    +[image.rect for image in group.images]):
             return True
         # 格線很細：容許游標偏離約 4 像素。
         slack=4/self.view_scale()
@@ -1137,6 +1149,8 @@ class Canvas(QGraphicsView):
                 # 主視窗轉換期間會停用畫布，之後的放開處理不一定執行；這次按壓視為已結束。
                 self.pointer_pressed=False
                 self.image_clicked.emit(image)
+            else:
+                self.background_clicked.emit()
             return
         selection=self.objects_in(QRectF(start,scene_pos).normalized())
         if not selection.count:
@@ -1263,12 +1277,11 @@ class Canvas(QGraphicsView):
                 # 文字優先；沒點到文字才看圖片。在圖片上按下時延到放開才轉交圖片編輯，
                 # 拖曳超過門檻則改為圈選。
                 # 注意：接收訊號的槽函式不可同步重建場景（畫面是非同步重繪）。
+                # 點空白處的通知也延到放開：開始圈選時不能先撤銷剛點選轉換的圖片，
+                # 否則它來不及被圈進來。右鍵（內容選單）與中鍵不算點空白處。
                 image=self._image_at(scene_pos)
                 if image:
                     self.clear_image_hover()
-                else:
-                    # 右鍵（內容選單）與中鍵不算點空白處，不發訊號。
-                    self.background_clicked.emit()
                 self._begin_marquee(scene_pos,event.position(),image)
         super().mousePressEvent(event)
         if self._marquee_start is not None:

@@ -1,5 +1,6 @@
 """圈選物件的批次編輯：一次刪除或移動同一頁的多段文字、註解與表格格線，只產生一個新版本。"""
 from collections import Counter
+from dataclasses import replace
 import hashlib
 import math
 
@@ -270,3 +271,42 @@ def edit_selection(pdf: bytes, request: SelectionEdit) -> bytes:
             finally:
                 source.close()
         return doc.tobytes(garbage=4, deflate=True)
+
+
+def _same_rect(first, second, tolerance=0.5):
+    return all(abs(a - b) <= tolerance for a, b in zip(first, second))
+
+
+def edit_selection_with_images(pdf: bytes, request: SelectionEdit, images, asset_root):
+    """整批編輯並一併處理圈選到的頁面原有圖片（例如公司章）；回傳 (PDF, 新圖層)。
+
+    先刪除或移動文字、註解與格線，再把選取的圖片轉成圖層：移動時圖層跟著位移，
+    刪除時不保留圖層（等於刪除圖片）。任何一張圖片無法安全轉換時，整批都不套用。
+    """
+    from pdf_editor.engine.overlay import flatten_overlays
+    from pdf_editor.legacy_overlay_conversion import convert_image_at, editable_images_on_page
+
+    if request.run_ids or request.annotation_xrefs or request.drawing_rects:
+        result = edit_selection(pdf, request)
+    elif hashlib.sha256(pdf).hexdigest() != request.document_hash:
+        raise EditorError("STALE", "文件已變更，請重新圈選。")
+    else:
+        result = pdf
+    layers = []
+    if images:
+        # 前一步輸出時物件會重新編號，依位置找回同一張圖片；轉換本身不會改動其他編號。
+        with pymupdf.open(stream=result, filetype="pdf") as doc:
+            current = editable_images_on_page(doc, request.page)
+        for image in images:
+            match = next((item for item in current if _same_rect(item.rect, image.rect)), None)
+            if match is None:
+                raise EditorError("STALE", "選取的圖片已變更，請重新圈選。")
+            result, layer = convert_image_at(result, match, asset_root)
+            layers.append(layer)
+    if request.offset is not None and layers:
+        dx, dy = request.offset
+        layers = [replace(layer, rect=(layer.rect[0] + dx, layer.rect[1] + dy,
+            layer.rect[2] + dx, layer.rect[3] + dy)) for layer in layers]
+        # 先驗證新位置能正常輸出。
+        flatten_overlays(result, tuple(layers))
+    return result, (tuple(layers) if request.offset is not None else ())
