@@ -55,6 +55,8 @@ ICON_GLYPHS = {
     "page_menu": "\ue7c3",
     "markup_menu": "\ue932",
     "search": "\ue721",
+    # Segoe MDL2 \u7684\u300c\u91cd\u65b0\u547d\u540d\u300d\u5716\u793a\uff0c\u8868\u793a\u628a\u6587\u5b57\u63db\u6210\u53e6\u4e00\u6bb5\u3002
+    "batch_replace": "\ue8ac",
     "search_previous": "\ue76b",
     "search_next": "\ue76c",
     "zoom_out": "\ue738",

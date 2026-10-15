@@ -52,6 +52,7 @@ from pdf_editor.ui.text_actions import TextActionsMixin
 from pdf_editor.ui.stamp_actions import StampActionsMixin
 from pdf_editor.ui.print_actions import PrintActionsMixin
 from pdf_editor.ui.selection_actions import SelectionActionsMixin
+from pdf_editor.ui.batch_replace_actions import BatchReplaceActionsMixin
 from pdf_editor.ui.info_panel import DocumentInfoPanel,describe_document
 from pdf_editor.ui.search_bar import SearchBar
 from pdf_editor.outline import read_outline,page_text
@@ -121,7 +122,7 @@ class ThumbnailList(QListWidget):
         self.pages_dropped.emit(pages,destination)
 
 class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintActionsMixin,
-        SelectionActionsMixin,QMainWindow):
+        SelectionActionsMixin,BatchReplaceActionsMixin,QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("墨頁 PDF")
@@ -190,6 +191,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             ("undo","復原",lambda:self.history_step(False),"Ctrl+Z"),
             ("redo","重做",lambda:self.history_step(True),"Ctrl+Y"),
             ("add_text","新增文字",self.start_text_insertion,"Ctrl+T"),
+            ("batch_replace","批次取代…",self.show_batch_replace_dialog,"Ctrl+H"),
             ("stamp","蓋章",self.add_stamp,None),
             ("convert_stamp","編輯既有圖片…",self.convert_legacy_stamp,None),
             ("stamp_pages","蓋到多個頁面",self.stamp_to_pages,None),
@@ -269,7 +271,8 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             ("first_page","第一頁",lambda:self.goto_page_with_scroll(0,"top"),("Ctrl+Home",),"第一頁（Ctrl+Home）"),
             ("last_page","最後一頁",lambda:self.goto_page_with_scroll(self.page_count-1,"top"),
                 ("Ctrl+End",),"最後一頁（Ctrl+End）"),
-            ("search","搜尋",self.focus_search,("Ctrl+F",),"搜尋全文（Ctrl+F）"),
+            ("search","搜尋",self.focus_search,("Ctrl+F",),
+                "搜尋全文（Ctrl+F）；點右側箭頭可批次取代文字（Ctrl+H）"),
             ("search_previous","上一筆",lambda:self.next_search_result(-1),("Shift+F3",),"上一筆結果（Shift+F3）"),
             ("search_next","下一筆",self.next_search_result,("F3",),"下一筆結果（F3）"),
             ("print","列印",self.print_document,("Ctrl+P",),"預覽並列印文件（Ctrl+P），圖章與簽名會一併印出"),
@@ -314,7 +317,11 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
                     toolbar.addAction(self.actions[item])
                 else:
                     toolbar.addWidget(item)
-        for name in ("open","save"):
+        # 工具列已無空間再加按鈕：批次取代放在「搜尋」右側的箭頭選單（與 Office 的尋找／取代相同位置）。
+        self.search_menu=QMenu("搜尋選項",self)
+        self.search_menu.addAction(self.actions["batch_replace"])
+        self.actions["search"].setMenu(self.search_menu)
+        for name in ("open","save","search"):
             toolbar.widgetForAction(self.actions[name]).setPopupMode(
                 QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         tips={
@@ -324,6 +331,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
             "undo":"復原上一步（Ctrl+Z）",
             "redo":"重做（Ctrl+Y）",
             "add_text":"在頁面上點選位置新增文字（Ctrl+T）",
+            "batch_replace":"把整份文件中內容相同的文字一次換掉（Ctrl+H），可先預覽並逐筆勾選",
             "stamp":"匯入 PNG 圖章；點右側箭頭可使用常用圖章或編輯既有圖片",
             "collection":"從收藏中選擇常用圖章或簽名",
             "convert_stamp":"列出文件中可單獨編輯的圖片，選取後即可移動、縮放（也可直接在頁面上點圖片）",
@@ -677,8 +685,8 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
     def refresh_actions(self):
         active=self.session is not None
         edit=active and self.session.access.can_edit and not self.busy
-        for name in ("save","save_as","add_text","stamp","convert_stamp","signature","collection",
-                "page_marks","header_footer"):
+        for name in ("save","save_as","add_text","batch_replace","stamp","convert_stamp","signature",
+                "collection","page_marks","header_footer"):
             self.actions[name].setEnabled(edit)
         self.actions["undo"].setEnabled(edit and self.session.can_undo)
         self.actions["redo"].setEnabled(edit and self.session.can_redo)
