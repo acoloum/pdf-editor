@@ -3,8 +3,9 @@ from PySide6.QtCore import Qt, Signal, QPointF, QTimer, QRectF, QEvent
 from PySide6.QtGui import (QPixmap,QPen,QColor,QTransform,QPainter,QKeyEvent,QBrush,
     QPainterPath)
 from PySide6.QtWidgets import (QGraphicsView,QGraphicsScene,QGraphicsPixmapItem,
-    QGraphicsItem,QLabel,QTextEdit,QFrame,QApplication)
+    QGraphicsItem,QLabel,QTextEdit,QFrame,QApplication,QGraphicsOpacityEffect)
 from PySide6.QtGui import QTextOption
+from pdf_editor.ui import alignment_guides
 from pdf_editor.engine.geometry import transformed_rect, transform_point, inverse_transform
 from pdf_editor.engine.overlay import transformed_image
 from pdf_editor.ui.style import COLORS
@@ -81,6 +82,11 @@ class LayerItem(QGraphicsPixmapItem):
 
     def _content_rect(self):
         return super().boundingRect()
+
+    def scene_image_rect(self):
+        """圖片實際範圍（場景座標）；boundingRect 四邊各多留 0.5 像素，對齊時不能用。"""
+        size=self.pixmap().deviceIndependentSize()
+        return self.mapRectToScene(QRectF(self.offset(),size))
 
     def boundingRect(self):
         return self._content_rect().adjusted(-self.HANDLE_RADIUS,-self.HANDLE_RADIUS,
@@ -172,11 +178,17 @@ class LayerItem(QGraphicsPixmapItem):
             self.resize_scale=1.0
             event.accept()
             return
+        self.canvas.prepare_guides(layers=(self.layer.id,))
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self,event):
         if not self.resize_corner:
             super().mouseMoveEvent(event)
+            # Qt 依按下位置算出新位置後，再吸附到對齊位置。
+            rect=self.scene_image_rect()
+            dx,dy=self.canvas.snap_drag(rect,self.pos()-self.start,event.modifiers())
+            if dx or dy:
+                self.setPos(self.pos()+QPointF(dx,dy))
             return
         rect=self._resized_rect(event.scenePos())
         self.resize_scale=rect.width()/self.resize_start.width()
@@ -200,6 +212,7 @@ class LayerItem(QGraphicsPixmapItem):
                 self.canvas.layer_moved.emit(resized)
             event.accept()
             return
+        self.canvas.clear_guides()
         super().mouseReleaseEvent(event)
         delta=self.pos()-self.start
         inv=inverse_transform(self.canvas.matrix)
@@ -418,6 +431,10 @@ class Canvas(QGraphicsView):
         self._group_drag_start=None
         self._group_origins={}
         self._group_hover=False
+        self._group_bounds=None
+        # 拖曳時的對齊位置與顯示中的輔助線。
+        self._guide_targets=None
+        self._guide_items=[]
 
     def drawBackground(self,painter,rect):
         """繪製深色畫布與細點網格，營造工作區的科技感。"""
@@ -444,6 +461,8 @@ class Canvas(QGraphicsView):
         self._reset_pointer_tracking()
         self.group=None
         self._group_items=[]
+        self._guide_items=[]
+        self._guide_targets=None
         self.scene().clear()
         self.highlight=None
         self.annotation_highlight=None
@@ -451,6 +470,7 @@ class Canvas(QGraphicsView):
         self.selected_run=None
         self.selected_annotation=None
         self._drag_run=None
+        self._set_inline_editor_transparent(False)
         self.matrix=data["matrix"]
         self._page=data["page"]
         self.runs=data["runs"]
@@ -502,6 +522,7 @@ class Canvas(QGraphicsView):
         self._pending_image=None
         self._group_drag_start=None
         self._group_origins={}
+        self._group_bounds=None
         if self._group_hover:
             self._group_hover=False
             self.viewport().unsetCursor()
@@ -1015,6 +1036,61 @@ class Canvas(QGraphicsView):
     def _layer_items(self):
         return [item for item in self.scene().items() if isinstance(item,LayerItem)]
 
+    def prepare_guides(self,runs=(),layers=(),images=(),annotations=(),drawings=()):
+        """開始拖曳時記下頁面與其他物件的對齊位置；傳入的是正在移動、不列入比對的物件。"""
+        rects=[transformed_rect(self.matrix,rect) for rect in
+            [run.rect for run in self.runs if run not in runs]
+            +[image.rect for image in self.editable_images if image not in images]
+            +[item.rect for item in self.annotations if item not in annotations]
+            +[rect for rect in self.drawings if rect not in drawings]]
+        for item in self._layer_items():
+            if item.layer.id not in layers:
+                r=item.scene_image_rect()
+                rects.append((r.left(),r.top(),r.right(),r.bottom()))
+        page=self.sceneRect()
+        self._guide_targets=alignment_guides.alignment_targets((page.width(),page.height()),rects)
+
+    def snap_drag(self,rect,moved,modifiers=Qt.KeyboardModifier.NoModifier):
+        """拖曳中物件的外框 rect（場景座標）吸附到對齊位置並顯示輔助線，回傳吸附位移。
+        moved 為目前的拖曳位移；未超過拖曳門檻或按住 Alt 時不吸附。"""
+        self._remove_guide_lines()
+        if (self._guide_targets is None or modifiers & Qt.KeyboardModifier.AltModifier
+                or moved.manhattanLength()<QApplication.startDragDistance()):
+            return 0.0,0.0
+        offset,guides=alignment_guides.snap((rect.left(),rect.top(),rect.right(),rect.bottom()),
+            self._guide_targets)
+        for guide in guides:
+            # 對齊頁面中線或邊緣畫實線，對齊其他物件畫虛線。
+            pen=QPen(QColor(COLORS["guide"]),2,
+                Qt.PenStyle.SolidLine if guide.page else Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            if guide.axis=="x":
+                line=self.scene().addLine(guide.value,guide.start,guide.value,guide.end,pen)
+            else:
+                line=self.scene().addLine(guide.start,guide.value,guide.end,guide.value,pen)
+            line.setZValue(31)
+            line.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self._guide_items.append(line)
+        return offset
+
+    def guides(self):
+        """目前顯示中的輔助線（場景座標的線段）。"""
+        return [item.line() for item in self._guide_items]
+
+    def _remove_guide_lines(self):
+        for item in self._guide_items:
+            try:
+                if item.scene() is self.scene():
+                    self.scene().removeItem(item)
+            except RuntimeError:
+                pass
+        self._guide_items=[]
+
+    def clear_guides(self):
+        """拖曳結束：移除輔助線並放棄對齊位置。"""
+        self._remove_guide_lines()
+        self._guide_targets=None
+
     def objects_in(self,scene_rect):
         """完整落在圈選範圍內的圖層、可修改文字、註解與格線等向量圖形。"""
         area=self._page_rect(scene_rect)
@@ -1168,21 +1244,42 @@ class Canvas(QGraphicsView):
         self.objects_selected.emit(selection)
 
     def _start_group_drag(self,scene_pos):
+        group=self.group
         self._group_drag_start=scene_pos
         self._group_origins={item:item.pos() for item in self._layer_items()
-            if item.layer.id in self.group.layers}
+            if item.layer.id in group.layers}
+        # 整批物件的外框，拖曳時以它對齊。
+        rects=[transformed_rect(self.matrix,rect) for rect in
+            [run.rect for run in group.runs]+[item.rect for item in group.annotations]
+            +[image.rect for image in group.images]+list(group.drawings)]
+        for item in self._group_origins:
+            r=item.scene_image_rect()
+            rects.append((r.left(),r.top(),r.right(),r.bottom()))
+        self._group_bounds=(QRectF(QPointF(min(r[0] for r in rects),min(r[1] for r in rects)),
+            QPointF(max(r[2] for r in rects),max(r[3] for r in rects))) if rects else None)
+        self.prepare_guides(group.runs,group.layers,group.images,group.annotations,group.drawings)
 
-    def _drag_group(self,scene_pos):
+    def _group_delta(self,scene_pos,modifiers):
+        """整批拖曳的場景位移（已吸附到對齊位置）。"""
         delta=scene_pos-self._group_drag_start
+        if self._group_bounds is None:
+            return delta
+        dx,dy=self.snap_drag(self._group_bounds.translated(delta),delta,modifiers)
+        return delta+QPointF(dx,dy)
+
+    def _drag_group(self,scene_pos,modifiers=Qt.KeyboardModifier.NoModifier):
+        delta=self._group_delta(scene_pos,modifiers)
         for item,origin in self._group_origins.items():
             item.setPos(origin+delta)
         for item in self._group_items:
             item.setPos(delta)
 
-    def _finish_group_drag(self,scene_pos):
-        delta=scene_pos-self._group_drag_start
+    def _finish_group_drag(self,scene_pos,modifiers=Qt.KeyboardModifier.NoModifier):
+        delta=self._group_delta(scene_pos,modifiers)
+        self.clear_guides()
         self._group_drag_start=None
         self._group_origins={}
+        self._group_bounds=None
         dx,dy=self._page_delta(delta)
         if abs(dx)+abs(dy)<=0.01:
             return
@@ -1190,6 +1287,26 @@ class Canvas(QGraphicsView):
         # 先記下移動後的位置，重新渲染後才能在新位置找回同一批物件。
         self.group=group.shifted(dx,dy)
         self.selection_moved.emit(group,(dx,dy))
+
+    def _set_inline_editor_transparent(self,transparent):
+        """以透明度暫時藏起輸入框；不用 hide()，否則輸入框失去焦點會提前套用文字。"""
+        editor=self.inline_editor
+        if editor is None:
+            return
+        if transparent and editor.graphicsEffect() is None:
+            effect=QGraphicsOpacityEffect(editor)
+            effect.setOpacity(0.0)
+            editor.setGraphicsEffect(effect)
+        elif not transparent and editor.graphicsEffect() is not None:
+            editor.setGraphicsEffect(None)
+
+    def _run_drag_delta(self,scene_pos,modifiers):
+        """拖曳文字的頁面座標位移（已吸附到對齊位置）。"""
+        delta=scene_pos-self._drag_start_scene
+        r=transformed_rect(self.matrix,self._drag_original_rect)
+        rect=QRectF(QPointF(r[0],r[1]),QPointF(r[2],r[3])).translated(delta)
+        dx,dy=self.snap_drag(rect,delta,modifiers)
+        return self._page_delta(delta+QPointF(dx,dy))
 
     def _show_highlight(self, rect):
         if self.highlight:
@@ -1268,6 +1385,7 @@ class Canvas(QGraphicsView):
                 self._drag_run=run
                 self._drag_start_scene=scene_pos
                 self._drag_original_rect=run.rect
+                self.prepare_guides(runs=(run,))
                 self._show_highlight(run.rect)
                 self.run_selected.emit(run)
                 event.accept()
@@ -1374,18 +1492,18 @@ class Canvas(QGraphicsView):
             event.accept()
             return
         if self._group_drag_start is not None:
-            self._drag_group(self.mapToScene(event.position().toPoint()))
+            self._drag_group(self.mapToScene(event.position().toPoint()),event.modifiers())
             event.accept()
             return
         if self._drag_run:
             scene_pos=self.mapToScene(event.position().toPoint())
-            delta=scene_pos-self._drag_start_scene
-            inv=inverse_transform(self.matrix)
-            x,y=transform_point(inv,delta.x(),delta.y())
-            ox,oy=transform_point(inv,0,0)
-            dx,dy=x-ox,y-oy
+            dx,dy=self._run_drag_delta(scene_pos,event.modifiers())
             r=self._drag_original_rect
             self._show_highlight((r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy))
+            # 按下文字時已在原位開啟輸入框，拖曳中暫時透明，才不會遮住輔助線。
+            dragging=((scene_pos-self._drag_start_scene).manhattanLength()
+                >=QApplication.startDragDistance())
+            self._set_inline_editor_transparent(dragging)
             event.accept()
             return
         # 按住任何按鍵（拖曳圖層、捲動頁面）時不提示圖片，避免外框閃現並蓋掉拖曳游標。
@@ -1431,6 +1549,7 @@ class Canvas(QGraphicsView):
             layer_item.setPos(origin)
         for frame in self._group_items:
             frame.setPos(0,0)
+        self.clear_guides()
         self._reset_pointer_tracking()
 
     def mouseReleaseEvent(self,event):
@@ -1446,7 +1565,7 @@ class Canvas(QGraphicsView):
             event.accept()
             return
         if self._group_drag_start is not None:
-            self._finish_group_drag(self.mapToScene(event.position().toPoint()))
+            self._finish_group_drag(self.mapToScene(event.position().toPoint()),event.modifiers())
             event.accept()
             return
         if self._crop_mode and self._crop_drag_handle:
@@ -1461,18 +1580,17 @@ class Canvas(QGraphicsView):
             event.accept()
             return
         if self._drag_run:
-            scene_pos=self.mapToScene(event.position().toPoint())
-            delta=scene_pos-self._drag_start_scene
-            inv=inverse_transform(self.matrix)
-            x,y=transform_point(inv,delta.x(),delta.y())
-            ox,oy=transform_point(inv,0,0)
-            dx,dy=x-ox,y-oy
+            dx,dy=self._run_drag_delta(self.mapToScene(event.position().toPoint()),
+                event.modifiers())
+            self.clear_guides()
             r=self._drag_original_rect
             moved=replace(self._drag_run,rect=(r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy))
             self._drag_run=None
             if abs(dx)+abs(dy)>0.01:
                 self.selected_run=moved
                 self.run_moved.emit(moved)
+            # 移動套用時主視窗會關閉輸入框；沒有移動或未套用時讓它重新出現。
+            self._set_inline_editor_transparent(False)
             event.accept()
             return
         super().mouseReleaseEvent(event)

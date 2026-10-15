@@ -29,6 +29,8 @@ COLORS = {
     "danger": "#f87171",
     "annotation": "#a78bfa",
     "search": "#fbbf24",
+    # 拖曳時的對齊輔助線，與青色選取框有明顯區隔。
+    "guide": "#e0218a",
 }
 
 ICON_FONT = "Segoe MDL2 Assets"
