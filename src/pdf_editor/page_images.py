@@ -1,11 +1,11 @@
 import math
 import os
-import tempfile
 from pathlib import Path
 
 import pymupdf
 
 from pdf_editor.errors import EditorError
+from pdf_editor.folder_access import create_temp
 
 
 def export_pages_as_png(pdf,pages,folder,stem,dpi=150):
@@ -33,10 +33,8 @@ def export_pages_as_png(pdf,pages,folder,stem,dpi=150):
             scale=resolution/72
             for page,target in zip(selected,targets):
                 pix=doc[page].get_pixmap(matrix=pymupdf.Matrix(scale,scale),alpha=False)
-                fd,name=tempfile.mkstemp(prefix=".pdf-editor-",suffix=".png",
-                    dir=target_folder)
+                fd,temp=create_temp(target_folder,suffix=".png")
                 os.close(fd)
-                temp=Path(name)
                 temporary.append(temp)
                 temp.write_bytes(pix.tobytes("png"))
             for temp,target in zip(temporary,targets):

@@ -11,6 +11,10 @@ def _invoke(fn, args):
         if code is None:
             # 非預期例外保留完整堆疊，方便日後排查。
             get_logger().exception("背景工作 %s 發生未預期錯誤",getattr(fn,"__name__",fn))
+        elif exc.__cause__ is not None:
+            # 給使用者的訊息是概括說明；紀錄檔另外保留實際的例外與堆疊，才查得出真正原因。
+            get_logger().warning("背景工作 %s 失敗：%s %s（實際例外：%r）",getattr(fn,"__name__",fn),
+                code,exc,exc.__cause__,exc_info=exc.__cause__)
         else:
             get_logger().warning("背景工作 %s 失敗：%s %s",getattr(fn,"__name__",fn),code,exc)
         return False, (code or "ERROR", str(exc),

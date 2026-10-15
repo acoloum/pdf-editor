@@ -64,6 +64,8 @@ ERROR_TITLES={
     "OPEN":"無法開啟文件",
     "PASSWORD":"密碼錯誤",
     "PRINT":"列印失敗",
+    "FOLDER_BLOCKED":"Windows 封鎖了存檔",
+    "FILE_IN_USE":"檔案正被使用",
     "WORKER":"背景工作中斷",
     "ERROR":"發生未預期的錯誤",
 }

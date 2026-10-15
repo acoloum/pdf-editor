@@ -1,8 +1,8 @@
 import os
-import tempfile
 from pathlib import Path
 import pymupdf
 from pdf_editor.errors import EditorError, BatchPublishError
+from pdf_editor.folder_access import FolderBlockedError, create_temp
 from pdf_editor.persistent_overlays import embed_workspace
 
 def same_file(a, b):
@@ -31,14 +31,20 @@ def write_pdf(pdf, target, overwrite=False, sources=(), allow_source=False):
     temp = None
     try:
         data = validated_bytes(pdf)
-        fd, name = tempfile.mkstemp(prefix=".pdf-editor-", suffix=".tmp", dir=target.parent)
-        temp = Path(name)
+        fd, temp = create_temp(target.parent)
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         if overwrite:
-            os.replace(temp, target)
+            try:
+                os.replace(temp, target)
+            except PermissionError as exc:
+                # 暫存檔已寫入同一資料夾，資料夾本身可寫；多半是目標檔正被其他程式開啟或設為唯讀。
+                raise EditorError("FILE_IN_USE",
+                    f"無法覆蓋「{target.name}」，原檔未被修改。檔案可能正被其他程式"
+                    "（例如 PDF 閱讀器、瀏覽器或 OneDrive 同步）開啟，或被設為唯讀。"
+                    "請關閉該程式後再存一次，或改用「另存新檔」。") from exc
         else:
             # Windows rename 不會覆寫競爭期間出現的目標。
             os.rename(temp, target)
@@ -72,8 +78,8 @@ def publish_batch(documents, targets, sources=()):
     try:
         for pdf, target in zip(documents, targets):
             data = validated_bytes(pdf)
-            fd, name = tempfile.mkstemp(prefix=".pdf-editor-", dir=target.parent)
-            staged.append(Path(name))
+            fd, temp = create_temp(target.parent, suffix="")
+            staged.append(temp)
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
                 f.flush()
@@ -82,6 +88,9 @@ def publish_batch(documents, targets, sources=()):
             os.rename(temp, target)
             completed.append(target)
         return tuple(completed)
+    except FolderBlockedError:
+        # 暫存階段就被封鎖，尚未輸出任何檔案：直接說明處理方式。
+        raise
     except Exception as exc:
         raise BatchPublishError("批次輸出未全部完成，請檢查已完成清單。", completed) from exc
     finally:
