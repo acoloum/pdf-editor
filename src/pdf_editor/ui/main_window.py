@@ -139,7 +139,7 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         self.pending_conversion=None
         # 最後選取的對象（"layer"／"text"／"annotation"），決定 Ctrl+C 複製圖片還是文字。
         self.last_selection=None
-        # 可點選圖片清單：{(文件版本, 頁碼): images}，只保留目前文件版本的項目。
+        # 頁面分析結果：{(文件版本, 頁碼): (可點選圖片, 可圈選格線)}，只保留目前文件版本的項目。
         self._image_cache={}
         self.annotation=None
         self.crop_pages=()
@@ -1247,20 +1247,21 @@ class MainWindow(PageActionsMixin,TextActionsMixin,StampActionsMixin,PrintAction
         data=str(self.session.pdf_path)
         layers=self.session.overlays
         image_key=(self.session.document_key,self.page)
-        # 唯讀文件不能編輯圖片：不分析、不快取，也不提供可點選的圖片（避免懸停提示與誤導的點擊）。
+        # 唯讀文件不能編輯：不分析、不快取，也不提供可點選的圖片與可圈選的格線
+        #（避免懸停提示與誤導的點擊）。
         can_edit=self.session.access.can_edit
-        cached_images=self._image_cache.get(image_key) if can_edit else ()
+        cached_images=self._image_cache.get(image_key) if can_edit else ((),())
         def done(result):
             if self.closed or token!=self.token or serial!=self.render_serial:
                 return
             if not can_edit:
-                result["images"]=()
+                result["images"],result["drawings"]=(),()
             elif "images" in result:
                 self._image_cache={key:value for key,value in self._image_cache.items()
                     if key[0]==image_key[0]}
-                self._image_cache[image_key]=result["images"]
+                self._image_cache[image_key]=(result["images"],result.get("drawings",()))
             else:
-                result["images"]=cached_images
+                result["images"],result["drawings"]=cached_images
             self.page_data=result
             try:
                 self.canvas.display(result,layers,self.layer_id)

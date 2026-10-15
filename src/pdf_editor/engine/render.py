@@ -4,6 +4,7 @@ from pdf_editor.engine.overlay import draw_overlay
 from pdf_editor.engine.text import extract_runs
 from pdf_editor.annotations import list_annotations
 from pdf_editor.legacy_overlay_conversion import editable_images_on_page
+from pdf_editor.selection_edit import selectable_drawings
 
 
 def open_document(source):
@@ -31,10 +32,20 @@ def render_page(pdf, page, scale, pixel_ratio=1.0, include_images=True):
             "rotation":p.rotation, "bounds": (0,0,p.cropbox.width,p.cropbox.height),
             "runs":extract_runs(content,page),
             "annotations":list_annotations(content,page), "page":page}
-        # 縮放等只需重畫的情況可略過，避免重複分析圖片。
+        # 縮放等只需重畫的情況可略過，避免重複分析圖片與格線。
         if include_images:
             data["images"]=_editable_images(doc,page)
+            data["drawings"]=_selectable_drawings(content,page)
         return data
+
+def _selectable_drawings(content, page):
+    """可圈選的格線等向量圖形；分析失敗時不影響頁面顯示。"""
+    try:
+        return selectable_drawings(content, page)
+    except Exception:
+        from pdf_editor.logs import get_logger
+        get_logger().exception("分析第 %s 頁可圈選的格線失敗", page + 1)
+        return ()
 
 def _editable_images(document, page):
     """可直接點選編輯的圖片；分析失敗時不影響頁面顯示。"""

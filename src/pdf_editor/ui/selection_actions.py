@@ -1,4 +1,4 @@
-"""圈選多個物件：整批刪除或移動圖層、文字與註解，只留下一筆可復原的紀錄。"""
+"""圈選多個物件：整批刪除或移動圖層、文字、註解與表格格線，只留下一筆可復原的紀錄。"""
 import hashlib
 from dataclasses import replace
 
@@ -8,7 +8,21 @@ from pdf_editor.selection_edit import edit_selection
 
 # 這些錯誤只是位置或內容不適合，在狀態列說明即可，不跳出對話框。
 RECOVERABLE_SELECTION_ERRORS=("OVERLAP","GEOMETRY","UNSUPPORTED_TEXT","STALE","TEXT_OVERFLOW",
-    "FONT_MISSING_GLYPH","REDACTIONS")
+    "FONT_MISSING_GLYPH","REDACTIONS","GRAPHICS")
+
+
+def describe_selection(selection):
+    """以使用者看得懂的方式列出選取內容，例如「3 段文字、格線等 12 個圖形」。"""
+    parts=[]
+    if selection.runs:
+        parts.append(f"{len(selection.runs)} 段文字")
+    if selection.layers:
+        parts.append(f"{len(selection.layers)} 個圖章或圖片")
+    if selection.annotations:
+        parts.append(f"{len(selection.annotations)} 個註解")
+    if selection.drawings:
+        parts.append(f"格線等 {len(selection.drawings)} 個圖形")
+    return "、".join(parts)
 
 
 class SelectionActionsMixin:
@@ -28,7 +42,7 @@ class SelectionActionsMixin:
         self.clear_selection_state(disable_panel=True)
         self.layer_id=None
         self.refresh_actions()
-        message=f"已圈選 {selection.count} 個物件：拖曳可一起移動，按 Delete 刪除，Esc 取消選取。"
+        message=f"已圈選{describe_selection(selection)}：拖曳可一起移動，按 Delete 刪除，Esc 取消選取。"
         if selection.skipped_runs:
             message+=f"（{selection.skipped_runs} 段文字無法修改，已略過）"
         self.statusBar().showMessage(message)
@@ -63,23 +77,24 @@ class SelectionActionsMixin:
                 self._selection_edit_failed((getattr(exc,"code","GEOMETRY"),str(exc),()),selection)
                 return
             overlays=tuple(moved.get(o.id,o) for o in overlays)
-        count=selection.count
-        if not selection.runs and not selection.annotations:
+        summary=describe_selection(selection)
+        if not selection.runs and not selection.annotations and not selection.drawings:
             try:
                 self.session.set_overlays(overlays)
             except Exception as exc:
                 self._selection_edit_failed((getattr(exc,"code","GEOMETRY"),str(exc),()),selection)
                 return
-            self._finish_selection_edit(layer_ids,offset,f"已{verb} {count} 個物件。")
+            self._finish_selection_edit(layer_ids,offset,f"已{verb}{summary}。")
             return
         pdf=self.session.pdf
         request=SelectionEdit(hashlib.sha256(pdf).hexdigest(),self.page,
             tuple(run.id for run in selection.runs),
-            tuple(item.xref for item in selection.annotations),offset)
+            tuple(item.xref for item in selection.annotations),offset,
+            tuple(tuple(rect) for rect in selection.drawings))
         revision,token=self.session.revision,self.token
         self.busy=True
         self.refresh_actions()
-        self.statusBar().showMessage(f"正在{verb} {count} 個物件…")
+        self.statusBar().showMessage(f"正在{verb}{summary}…")
 
         def done(result):
             self.busy=False
@@ -91,7 +106,7 @@ class SelectionActionsMixin:
             except Exception as exc:
                 self._selection_edit_failed((getattr(exc,"code","ERROR"),str(exc),()),selection)
                 return
-            self._finish_selection_edit(layer_ids,offset,f"已{verb} {count} 個物件。")
+            self._finish_selection_edit(layer_ids,offset,f"已{verb}{summary}。")
 
         def failed(error):
             if self.closed or token!=self.token:

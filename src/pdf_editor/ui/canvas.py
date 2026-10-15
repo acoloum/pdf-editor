@@ -11,25 +11,28 @@ from pdf_editor.ui.style import COLORS
 
 @dataclass(frozen=True)
 class CanvasSelection:
-    """以滑鼠圈選的物件：同一頁的圖層代碼、可修改的文字與註解。"""
+    """以滑鼠圈選的物件：同一頁的圖層代碼、可修改的文字、註解與格線等向量圖形外框。"""
     page: int
     layers: tuple = ()
     runs: tuple = ()
     annotations: tuple = ()
     # 圈到但無法安全修改（例如直書）而略過的文字數。
     skipped_runs: int = 0
+    drawings: tuple = ()
 
     @property
     def count(self):
-        return len(self.layers)+len(self.runs)+len(self.annotations)
+        return len(self.layers)+len(self.runs)+len(self.annotations)+len(self.drawings)
 
     def shifted(self,dx,dy):
         """位移後的選取內容，供重新渲染後依新位置找回同一批物件。"""
+        def moved_rect(r):
+            return (r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy)
         def moved(item):
-            r=item.rect
-            return replace(item,rect=(r[0]+dx,r[1]+dy,r[2]+dx,r[3]+dy))
+            return replace(item,rect=moved_rect(item.rect))
         return replace(self,runs=tuple(moved(run) for run in self.runs),
-            annotations=tuple(moved(item) for item in self.annotations))
+            annotations=tuple(moved(item) for item in self.annotations),
+            drawings=tuple(moved_rect(rect) for rect in self.drawings))
 
 
 def _contains(outer,inner):
@@ -40,6 +43,10 @@ def _contains(outer,inner):
 
 def _same_place(first,second,tolerance=1.5):
     return abs(first[0]-second[0])<=tolerance and abs(first[1]-second[1])<=tolerance
+
+
+def _same_rect(first,second,tolerance=0.5):
+    return all(abs(a-b)<=tolerance for a,b in zip(first,second))
 
 
 class LayerItem(QGraphicsPixmapItem):
@@ -347,6 +354,8 @@ class Canvas(QGraphicsView):
         self.runs=[]
         self.annotations=[]
         self.editable_images=()
+        # 可圈選的格線等向量圖形外框（頁面座標）。
+        self.drawings=()
         self.image_hover=None
         self._hover_image=None
         self.highlight=None
@@ -443,6 +452,7 @@ class Canvas(QGraphicsView):
         self.runs=data["runs"]
         self.annotations=data.get("annotations",())
         self.editable_images=data.get("images",())
+        self.drawings=data.get("drawings",())
         # scene().clear() 已移除舊外框；只有提示曾設定游標時才還原，避免蓋掉拖曳中的游標。
         had_hover=self._hover_image is not None
         self.image_hover=None
@@ -500,8 +510,10 @@ class Canvas(QGraphicsView):
             if run.editable and run.text==old.text and _same_place(run.rect,old.rect))
         annotations=tuple(item for old in group.annotations for item in self.annotations
             if item.kind==old.kind and _same_place(item.rect,old.rect))
+        drawings=tuple(rect for old in group.drawings for rect in self.drawings
+            if _same_rect(rect,old))
         restored=CanvasSelection(group.page,layer_ids,tuple(dict.fromkeys(runs)),
-            tuple(dict.fromkeys(annotations)))
+            tuple(dict.fromkeys(annotations)),drawings=tuple(dict.fromkeys(drawings)))
         if restored.count:
             self.set_group_selection(restored)
 
@@ -997,14 +1009,15 @@ class Canvas(QGraphicsView):
         return [item for item in self.scene().items() if isinstance(item,LayerItem)]
 
     def objects_in(self,scene_rect):
-        """完整落在圈選範圍內的圖層、可修改文字與註解。"""
+        """完整落在圈選範圍內的圖層、可修改文字、註解與格線等向量圖形。"""
         area=self._page_rect(scene_rect)
         layers=tuple(item.layer.id for item in reversed(self._layer_items())
             if scene_rect.contains(item.mapRectToScene(item._content_rect())))
         inside=[run for run in self.runs if _contains(area,run.rect)]
         runs=tuple(run for run in inside if run.editable)
         annotations=tuple(item for item in self.annotations if _contains(area,item.rect))
-        return CanvasSelection(self._page,layers,runs,annotations,len(inside)-len(runs))
+        drawings=tuple(rect for rect in self.drawings if _contains(area,rect))
+        return CanvasSelection(self._page,layers,runs,annotations,len(inside)-len(runs),drawings)
 
     def set_group_selection(self,selection):
         """以虛線框標示整批選取的文字與註解；圖層顯示一般的選取外框。"""
@@ -1025,6 +1038,18 @@ class Canvas(QGraphicsView):
             frame.setZValue(4)
             frame.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
             self._group_items.append(frame)
+        # 格線以青色覆蓋原線條標示；細線至少畫 2 像素寬，才看得出已選取。
+        color=QColor(COLORS["accent"])
+        color.setAlpha(200)
+        for rect in selection.drawings:
+            r=transformed_rect(self.matrix,rect)
+            width,height=max(2.0,r[2]-r[0]),max(2.0,r[3]-r[1])
+            cx,cy=(r[0]+r[2])/2,(r[1]+r[3])/2
+            line=self.scene().addRect(cx-width/2,cy-height/2,width,height,
+                QPen(Qt.PenStyle.NoPen),QBrush(color))
+            line.setZValue(4)
+            line.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self._group_items.append(line)
 
     def keep_group(self,selection):
         """下次重建畫面時改依 selection 找回整批選取（例如移動失敗、物件回到原位）。"""
@@ -1062,8 +1087,13 @@ class Canvas(QGraphicsView):
                     item._content_rect()).contains(scene_pos):
                 return True
         x,y=transform_point(inverse_transform(self.matrix),scene_pos.x(),scene_pos.y())
-        return any(r[0]<=x<=r[2] and r[1]<=y<=r[3]
-            for r in [run.rect for run in group.runs]+[item.rect for item in group.annotations])
+        if any(r[0]<=x<=r[2] and r[1]<=y<=r[3]
+                for r in [run.rect for run in group.runs]+[item.rect for item in group.annotations]):
+            return True
+        # 格線很細：容許游標偏離約 4 像素。
+        slack=4/self.view_scale()
+        return any(r[0]-slack<=x<=r[2]+slack and r[1]-slack<=y<=r[3]+slack
+            for r in group.drawings)
 
     def _begin_marquee(self,scene_pos,view_pos,image=None):
         self._marquee_start=scene_pos

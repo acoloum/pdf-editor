@@ -52,6 +52,8 @@ class SelectionEdit:
     annotation_xrefs: tuple[int, ...]
     # None 表示刪除；否則為頁面座標的位移量 (dx, dy)。
     offset: tuple[float, float] | None = None
+    # 選取的向量圖形（例如表格格線）外框。
+    drawing_rects: tuple[tuple[float, float, float, float], ...] = ()
 
 @dataclass(frozen=True)
 class DocumentAccess:

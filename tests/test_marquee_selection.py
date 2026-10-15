@@ -218,7 +218,7 @@ def test_window_deletes_marquee_selection_in_one_undo_step(qtbot, tmp_path, monk
         canvas = window.canvas
         _drag(qtbot, canvas, _view_point(canvas, 20, 130), _view_point(canvas, 400, 215))
         assert canvas.group is not None and canvas.group.count == 4
-        assert "已圈選 4 個物件" in window.statusBar().currentMessage()
+        assert "已圈選2 段文字、1 個圖章或圖片、1 個註解" in window.statusBar().currentMessage()
         undo_index = window.session.history.index
 
         qtbot.keyClick(canvas, Qt.Key.Key_Delete)
@@ -317,3 +317,86 @@ def test_disabling_canvas_mid_drag_abandons_marquee(qtbot, pdf_bytes):
     _move(canvas, point + QPoint(20, 10))
     qtbot.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=point + QPoint(20, 10))
     assert moved.count() == 1
+
+
+# ── 表格格線跟著文字一起移動 ──
+
+def _table_pdf():
+    with pymupdf.open() as document:
+        page = document.new_page(width=500, height=400)
+        page.draw_rect((40, 40, 300, 100), color=None, fill=(1, 1, 1))
+        for y in (40, 70, 100):
+            page.draw_rect((40, y, 300, y + 0.5), color=None, fill=(0, 0, 0))
+        page.draw_line((40, 40), (40, 100), color=(0, 0, 0), width=0.8)
+        page.draw_line((300, 40), (300, 100), color=(0, 0, 0), width=0.8)
+        page.insert_text((50, 62), "HEAD", fontsize=12)
+        page.insert_text((50, 92), "CELL", fontsize=12)
+        page.insert_text((50, 300), "OUTSIDE", fontsize=12)
+        return document.tobytes()
+
+
+def _black_lines(pdf):
+    with pymupdf.open(stream=pdf, filetype="pdf") as document:
+        return sorted(tuple(round(v, 1) for v in d["rect"]) for d in document[0].get_drawings()
+            if d.get("fill") == (0.0, 0.0, 0.0) or d["type"] == "s")
+
+
+def _open_table_window(qtbot, tmp_path, monkeypatch):
+    path = tmp_path / "表格.pdf"
+    path.write_bytes(_table_pdf())
+    monkeypatch.setattr(main_window.Jobs, "submit", _submit_synchronously)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.resize(1000, 800)
+    window.show()
+    window.open_document(path)
+    qtbot.waitUntil(lambda: window.page_data is not None, timeout=30000)
+    qtbot.waitExposed(window)
+    return window
+
+
+def test_marquee_selects_grid_lines_and_highlights_them(qtbot, tmp_path, monkeypatch):
+    window = _open_table_window(qtbot, tmp_path, monkeypatch)
+    try:
+        canvas = window.canvas
+        assert len(window.page_data["drawings"]) == 5
+        _drag(qtbot, canvas, _view_point(canvas, 30, 30), _view_point(canvas, 320, 110))
+
+        assert len(canvas.group.drawings) == 5
+        assert [run.text for run in canvas.group.runs] == ["HEAD", "CELL"]
+        # 兩段文字的虛線框加上五條格線的青色標示。
+        assert len(canvas._group_items) == 7
+        assert "格線等 5 個圖形" in window.statusBar().currentMessage()
+    finally:
+        _close(window)
+
+
+def test_dragging_table_moves_grid_with_text_in_one_undo_step(qtbot, tmp_path, monkeypatch):
+    window = _open_table_window(qtbot, tmp_path, monkeypatch)
+    try:
+        canvas = window.canvas
+        before = _black_lines(window.session.pdf)
+        _drag(qtbot, canvas, _view_point(canvas, 30, 30), _view_point(canvas, 320, 110))
+        # 按在格線上（不是文字上）也能拖曳整批。
+        start = _view_point(canvas, 200, 70.2)
+        end = _view_point(canvas, 210, 220.2)
+        undo_index = window.session.history.index
+
+        qtbot.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=start)
+        _move(canvas, end)
+        qtbot.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, pos=end)
+
+        assert window.session.history.index == undo_index + 1
+        after = _black_lines(window.session.pdf)
+        assert len(after) == len(before)
+        for old, new in zip(before, after):
+            assert new[1] == pytest.approx(old[1] + 150, abs=1.5)
+        runs = {r.text: r.rect for r in window.page_data["runs"]}
+        assert runs["CELL"][1] > 220 and runs["OUTSIDE"][1] < 300
+        # 移動後仍選取同一批（含格線），可繼續拖曳。
+        assert len(canvas.group.drawings) == 5
+
+        window.history_step(False)
+        assert _black_lines(window.session.pdf) == before
+    finally:
+        _close(window)
