@@ -1,4 +1,4 @@
-"""Windows 安全性的「受控制資料夾存取」（勒索軟體防護）：偵測存檔被封鎖，改以明確的處理步驟提示。
+"""Windows 安全性的「受控資料夾存取權」（勒索軟體防護）：偵測存檔被封鎖，改以明確的處理步驟提示。
 
 被封鎖時建立檔案會失敗，Python 收到的是 FileNotFoundError 或 PermissionError，
 與一般的路徑或權限問題無法區分；因此在資料夾確實存在、且系統啟用封鎖模式時才判定為被封鎖。"""
@@ -28,20 +28,25 @@ def blocked_program():
 class FolderBlockedError(EditorError):
     def __init__(self, folder, program=None):
         program = program or blocked_program()
+        # 用語與 Windows 11 繁體中文介面一致（「受控資料夾存取權」）。
         super().__init__("FOLDER_BLOCKED", (
-            "Windows 的「受控制資料夾存取」（勒索軟體防護）不允許墨頁 PDF 寫入這個資料夾，原檔未被修改：\n"
+            "Windows 的「受控資料夾存取權」（勒索軟體防護）不允許墨頁 PDF 寫入這個資料夾，原檔未被修改：\n"
             f"{folder}\n\n"
-            "請擇一處理：\n"
+            "請擇一處理（可按 Ctrl+C 複製這段訊息）：\n"
             "1. 允許墨頁 PDF 寫入（需要系統管理員權限）：開啟「Windows 安全性」→「病毒與威脅防護」→"
-            "「勒索軟體防護」下的「管理勒索軟體防護」→「允許應用程式通過受控制資料夾存取」→"
+            "「勒索軟體防護」下的「管理勒索軟體防護」→「允許應用程式通過受控資料夾存取權」→"
             "「新增允許的應用程式」→「最近封鎖的應用程式」，允許下列程式後再存一次：\n"
             f"{program}\n"
-            "2. 改用「另存新檔」，存到不受保護的資料夾（桌面、文件、圖片等資料夾預設受保護）。"))
+            "若該頁顯示「您不具適當權限」，請在開始功能表搜尋 PowerShell，按右鍵選「以系統管理員身分執行」，"
+            "再執行：\n"
+            f"Add-MpPreference -ControlledFolderAccessAllowedApplications \"{program}\"\n"
+            "2. 改用「另存新檔」，存到不受保護的資料夾（桌面、文件、圖片等資料夾預設受保護；"
+            "OneDrive 中這些資料夾以外的位置不受保護）。"))
         self.folder = str(folder)
 
 
 def controlled_folder_access_enabled():
-    """系統是否以封鎖模式啟用受控制資料夾存取；一般使用者即可讀取這項設定。"""
+    """系統是否以封鎖模式啟用受控資料夾存取權；一般使用者即可讀取這項設定。"""
     if sys.platform != "win32":
         return False
     import winreg
@@ -56,7 +61,7 @@ def controlled_folder_access_enabled():
 
 
 def create_temp(folder, prefix=".pdf-editor-", suffix=".tmp"):
-    """在目標資料夾建立暫存檔，回傳 (fd, 路徑)；被受控制資料夾存取封鎖時丟出 FolderBlockedError。"""
+    """在目標資料夾建立暫存檔，回傳 (fd, 路徑)；被受控資料夾存取權封鎖時丟出 FolderBlockedError。"""
     folder = Path(folder)
     try:
         fd, name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=folder)

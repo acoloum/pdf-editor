@@ -1,4 +1,4 @@
-"""存檔被 Windows「受控制資料夾存取」封鎖或目標檔被占用時，顯示明確原因並記錄實際例外。"""
+"""存檔被 Windows「受控資料夾存取權」封鎖或目標檔被占用時，顯示明確原因並記錄實際例外。"""
 import sys
 
 import pymupdf
@@ -17,7 +17,7 @@ from pdf_editor.workers import _invoke
 
 
 def _blocked(monkeypatch, enabled=True):
-    """模擬受控制資料夾存取：建立檔案時收到 FileNotFoundError（實機觀察到的行為）。"""
+    """模擬受控資料夾存取權：建立檔案時收到 FileNotFoundError（實機觀察到的行為）。"""
     def refuse(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory")
     monkeypatch.setattr(folder_access.tempfile, "mkstemp", refuse)
@@ -37,9 +37,13 @@ def test_blocked_overwrite_explains_how_to_allow_the_program(monkeypatch, source
 
     message = str(error.value)
     assert error.value.code == "FOLDER_BLOCKED"
-    assert "受控制資料夾存取" in message and "原檔未被修改" in message
+    assert "受控資料夾存取權" in message and "原檔未被修改" in message
     assert str(source_path.parent) in message and blocked_program() in message
     assert "最近封鎖的應用程式" in message and "另存新檔" in message
+    # 沒有系統管理員權限開不了「Windows 安全性」的允許清單：改提供可直接執行的指令。
+    assert "您不具適當權限" in message and "以系統管理員身分執行" in message
+    assert (f'Add-MpPreference -ControlledFolderAccessAllowedApplications "{blocked_program()}"'
+        in message)
     assert source_path.read_bytes() == original
     assert _files(source_path.parent) == [source_path.name]
 
@@ -111,7 +115,7 @@ def test_background_job_logs_the_actual_exception(monkeypatch, source_path):
     assert "Traceback" in log and "mkstemp" not in message
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="只有 Windows 有受控制資料夾存取")
+@pytest.mark.skipif(sys.platform != "win32", reason="只有 Windows 有受控資料夾存取權")
 @pytest.mark.parametrize("policy,user,expected", [
     (None, 1, True),      # 使用者在 Windows 安全性中開啟
     (None, 2, False),     # 稽核模式只記錄、不封鎖
