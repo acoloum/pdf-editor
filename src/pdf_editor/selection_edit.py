@@ -5,38 +5,14 @@ import math
 
 import pymupdf
 
-from pdf_editor.engine.fonts import (checked_font, default_font, embedded_font, similar_font,
-    subset_font)
-from pdf_editor.engine.text import (_font_resource_name, _new_text_shape, _resolve_bold,
-    extract_runs, fit_text_box, overlaps)
+from pdf_editor.engine.text import extract_runs, overlaps
 from pdf_editor.errors import EditorError
-from pdf_editor.model import SelectionEdit, TextReplacement
+from pdf_editor.model import SelectionEdit
 
 
 def _preview(text):
     text = text.strip()
     return text if len(text) <= 12 else text[:12] + "…"
-
-
-def _run_font(pdf, page, run, folder):
-    """移動文字時沿用原字型；無法使用時改用相近字型，最後才用內建中文字型。"""
-    candidates = []
-    try:
-        original = embedded_font(pdf, page, run, folder)
-    except Exception:
-        original = None
-    if original:
-        candidates.append(str(original))
-    similar = similar_font(run.font_name, run.text)
-    if similar:
-        candidates.append(similar[1])
-    candidates.append(str(default_font()))
-    for path in candidates:
-        try:
-            return path, checked_font(path, run.text)
-        except EditorError:
-            continue
-    raise EditorError("FONT_MISSING_GLYPH", f"找不到能顯示「{_preview(run.text)}」的字型。")
 
 
 def _shift_annotation(doc, page, annotation, dx, dy):
@@ -175,7 +151,38 @@ def _remove_drawings(page, drawings):
     return collateral
 
 
-def edit_selection(pdf: bytes, request: SelectionEdit, font_folder: str) -> bytes:
+def _selected_text_copy(pdf, page_number, unselected):
+    """另開一份副本，該頁只留下選取的文字；其餘文字、圖片與向量圖形全部移除。"""
+    copy = pymupdf.open(stream=pdf, filetype="pdf")
+    page = copy[page_number]
+    for run in unselected:
+        page.add_redact_annot(pymupdf.Rect(run.rect), fill=False, cross_out=False)
+    if unselected:
+        page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
+            graphics=pymupdf.PDF_REDACT_LINE_ART_NONE, text=pymupdf.PDF_REDACT_TEXT_REMOVE)
+    # 涵蓋整個頁面（含裁切框外）的遮蔽：移除所有圖片與線條，只保留文字。
+    page.add_redact_annot(pymupdf.Rect(-1e4, -1e4, 1e4, 1e4), fill=False, cross_out=False)
+    page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_REMOVE,
+        graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED, text=pymupdf.PDF_REDACT_TEXT_NONE)
+    return copy
+
+
+def _place_original_text(doc, page, source, page_number, clip, dx, dy):
+    """把副本中 clip 範圍的原始文字內容貼到新位置，沿用原本的字型與字形。"""
+    source_page = source[page_number]
+    rotation = page.rotation
+    # 兩頁都暫時轉正，clip 與目標範圍才會和文字座標一致。
+    if rotation:
+        page.set_rotation(0)
+        source_page.set_rotation(0)
+    try:
+        page.show_pdf_page(clip + (dx, dy, dx, dy), source, page_number, clip=clip)
+    finally:
+        if rotation:
+            page.set_rotation(rotation)
+
+
+def edit_selection(pdf: bytes, request: SelectionEdit) -> bytes:
     if hashlib.sha256(pdf).hexdigest() != request.document_hash:
         raise EditorError("STALE", "文件已變更，請重新圈選。")
     offset = request.offset
@@ -196,22 +203,6 @@ def edit_selection(pdf: bytes, request: SelectionEdit, font_folder: str) -> byte
         if any(overlaps(run.rect, other) for other in others):
             raise EditorError("OVERLAP",
                 f"「{_preview(run.text)}」與未選取的文字重疊，請一併圈選或個別修改。")
-    placements = []
-    if offset is not None and selected:
-        dx, dy = offset
-        shifted = {run.id: (run.rect[0] + dx, run.rect[1] + dy, run.rect[2] + dx,
-            run.rect[3] + dy) for run in selected}
-        for run in selected:
-            font_path, font = _run_font(pdf, request.page, run, font_folder)
-            bold_path, fake_bold = _resolve_bold(TextReplacement(request.document_hash,
-                request.page, run.id, run.text, shifted[run.id], font_path, run.size, run.color,
-                "left", run.bold))
-            if bold_path != font_path:
-                try:
-                    font_path, font = bold_path, checked_font(bold_path, run.text)
-                except EditorError:
-                    fake_bold = True
-            placements.append((run, shifted[run.id], font_path, font, fake_bold))
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         if not 0 <= request.page < doc.page_count:
             raise EditorError("RANGE", "頁碼超出文件範圍。")
@@ -230,22 +221,16 @@ def edit_selection(pdf: bytes, request: SelectionEdit, font_folder: str) -> byte
                 raise EditorError("STALE", "選取的註解已變更，請重新圈選。")
             targets.append(annotations[xref])
         bounds = pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
-        # 先計算所有新位置並檢查，全部通過才動手修改。
-        texts = []
-        for run, rect, font_path, font, fake_bold in placements:
-            neighbours = others + [other for other_run, other, *_ in placements
-                if other_run.id != run.id]
-            fitted, size = fit_text_box(rect, run.text, font, run.size, "expand", "left",
-                neighbours, bounds)
-            fitted = pymupdf.Rect(fitted)
-            if not bounds.contains(fitted):
-                raise EditorError("GEOMETRY", f"「{_preview(run.text)}」移動後超出頁面範圍。")
-            if any(overlaps(fitted, other) for other in others):
-                raise EditorError("OVERLAP",
-                    f"「{_preview(run.text)}」移動後會與其他文字重疊，請換個位置。")
-            texts.append((run, fitted, size, font_path, font, fake_bold))
+        # 先檢查所有新位置，全部通過才動手修改。
         if offset is not None:
             dx, dy = offset
+            for run in selected:
+                moved = pymupdf.Rect(run.rect) + (dx, dy, dx, dy)
+                if not (bounds + (-0.5, -0.5, 0.5, 0.5)).contains(moved):
+                    raise EditorError("GEOMETRY", f"「{_preview(run.text)}」移動後超出頁面範圍。")
+                if any(overlaps(moved, other) for other in others):
+                    raise EditorError("OVERLAP",
+                        f"「{_preview(run.text)}」移動後會與其他文字重疊，請換個位置。")
             for drawing in drawings:
                 moved = pymupdf.Rect(drawing["rect"]) + (dx, dy, dx, dy)
                 if not (bounds + (-0.5, -0.5, 0.5, 0.5)).contains(moved):
@@ -258,6 +243,11 @@ def edit_selection(pdf: bytes, request: SelectionEdit, font_folder: str) -> byte
                 page.delete_annot(item)
             else:
                 _shift_annotation(doc, page, item, *offset)
+        # 移動文字時不重新排字：先在副本中只留下選取的文字，之後整塊貼到新位置。
+        source = None
+        if offset is not None and selected:
+            source = _selected_text_copy(pdf, request.page,
+                [run for run in runs if run.id not in chosen])
         if selected:
             for run in selected:
                 page.add_redact_annot(pymupdf.Rect(run.rect), fill=False, cross_out=False)
@@ -269,20 +259,14 @@ def edit_selection(pdf: bytes, request: SelectionEdit, font_folder: str) -> byte
             _redraw(page, collateral, 0, 0, overlay=False)
             if offset is not None:
                 _redraw(page, drawings, *offset)
-        # 同一字型的文字合併成一次子集化並共用同一個嵌入字型：
-        # 對 16MB 的 Noto CJK 每次子集化約需 1～2 秒，逐段處理會隨段數倍增。
-        combined = {}
-        for run, _rect, _size, font_path, _font, _fake_bold in texts:
-            combined[font_path] = combined.get(font_path, "") + run.text
-        embedded = {path: (subset_font(path, text), _font_resource_name("moved", path, text))
-            for path, text in combined.items()}
-        needs_subset = False
-        for run, rect, size, font_path, font, fake_bold in texts:
-            embed_path, resource_name = embedded[font_path]
-            needs_subset = needs_subset or embed_path == font_path
-            shape = _new_text_shape(page, rect, run.text, embed_path, font, size, run.color,
-                "left", resource_name, fake_bold)
-            shape.commit()
-        if needs_subset:
-            doc.subset_fonts(fallback=True)
+        if source is not None:
+            try:
+                clip = pymupdf.Rect()
+                for run in selected:
+                    clip |= pymupdf.Rect(run.rect)
+                # 略為放大，避免切掉超出文字外框的筆畫（例如下伸部或斜體）。
+                _place_original_text(doc, page, source, request.page,
+                    clip + (-2, -2, 2, 2), *offset)
+            finally:
+                source.close()
         return doc.tobytes(garbage=4, deflate=True)

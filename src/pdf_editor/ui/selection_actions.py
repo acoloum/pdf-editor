@@ -113,7 +113,7 @@ class SelectionActionsMixin:
                 return
             self._selection_edit_failed(error,selection)
 
-        self.jobs.submit(edit_selection,(pdf,request,str(self.session.history.root)),done,failed)
+        self.jobs.submit(edit_selection,(pdf,request),done,failed)
 
     def _finish_selection_edit(self,layer_ids,offset,status):
         if offset is None:
