@@ -116,6 +116,10 @@ def _install_qt_translations(app):
 def main(argv=None):
     multiprocessing.freeze_support()
     args=list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] in ("--create-desktop-shortcut","--remove-desktop-shortcut"):
+        # 安裝程式呼叫：不開視窗，處理完桌面捷徑即結束。
+        from pdf_editor.desktop_shortcut import run_shortcut_command
+        return run_shortcut_command(args)
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import QTimer
     from pdf_editor.document.history import cleanup_stale

@@ -102,8 +102,21 @@ begin
       mbInformation, MB_OK, IDOK);
 end;
 
-{ 桌面捷徑改由程式碼建立：Windows「受控資料夾存取權」會封鎖寫入桌面，
-  失敗時只提示使用者，不中斷安裝。 }
+{ 由墨頁 PDF 自己處理桌面捷徑：安裝程式在暫存資料夾以隨機路徑執行，無法加入允許清單；
+  墨頁 PDF 已加入允許清單時可寫入受保護的桌面。Flag 為 --create-desktop-shortcut 或
+  --remove-desktop-shortcut，程式只處理桌面上的「{#AppName}.lnk」。 }
+function RunDesktopShortcutCommand(const Flag: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := Exec(ExpandConstant('{app}\LocalPDFEditor.exe'), Flag, ExpandConstant('{app}'),
+    SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+  if not Result then
+    Log('墨頁 PDF 處理桌面捷徑失敗（' + Flag + '），結果碼：' + IntToStr(ResultCode));
+end;
+
+{ 桌面捷徑改由程式碼建立：Windows「受控資料夾存取權」會封鎖安裝程式寫入桌面，
+  此時改由墨頁 PDF 建立；仍失敗時只提示使用者，不中斷安裝。 }
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   LinkPath: String;
@@ -113,16 +126,32 @@ begin
   if (CurStep = ssPostInstall) and WizardIsTaskSelected('desktopicon') then
   begin
     LinkPath := ExpandConstant('{userdesktop}\{#AppName}.lnk');
+    { 已知會被封鎖時先請墨頁 PDF 建立，避免安裝程式寫入桌面時跳出「未經授權的變更已遭封鎖」。 }
+    if ControlledFolderAccessEnabled and RunDesktopShortcutCommand('--create-desktop-shortcut')
+        and FileExists(LinkPath) then
+    begin
+      Log('已由墨頁 PDF 建立桌面捷徑。');
+      exit;
+    end;
     try
       CreateShellLink(LinkPath, '{#AppName}', ExpandConstant('{app}\LocalPDFEditor.exe'),
         '', ExpandConstant('{app}'), '', 0, SW_SHOWNORMAL);
     except
-      Log('無法建立桌面捷徑：' + GetExceptionMessage);
-      if not WizardSilent then
-        MsgBox('無法在桌面建立捷徑，可能被 Windows 安全性的「受控資料夾存取權」封鎖。' + #13#10#13#10 +
-          '墨頁 PDF 已正常安裝，可從開始功能表開啟；如需桌面捷徑，可在開始功能表的「墨頁 PDF」按右鍵手動建立。',
-          mbInformation, MB_OK);
+      Log('安裝程式無法建立桌面捷徑：' + GetExceptionMessage);
     end;
+    if FileExists(LinkPath) then
+      exit;
+    if (not ControlledFolderAccessEnabled) and RunDesktopShortcutCommand('--create-desktop-shortcut')
+        and FileExists(LinkPath) then
+    begin
+      Log('已改由墨頁 PDF 建立桌面捷徑。');
+      exit;
+    end;
+    if not WizardSilent then
+      MsgBox('無法在桌面建立捷徑，可能被 Windows 安全性的「受控資料夾存取權」封鎖。' + #13#10#13#10 +
+        '墨頁 PDF 已正常安裝，可從開始功能表開啟。重新執行安裝程式並一併勾選「允許墨頁 PDF 存檔到桌面、' +
+        '文件等受保護資料夾」，即可自動建立桌面捷徑。',
+        mbInformation, MB_OK);
   end;
 end;
 
@@ -133,6 +162,9 @@ var
   ExePath: String;
   ResultCode: Integer;
 begin
+  { 程式檔案移除前，先由墨頁 PDF 移除桌面捷徑（解除安裝程式同樣會被封鎖寫入桌面）。 }
+  if (CurUninstallStep = usUninstall) and FileExists(ExpandConstant('{userdesktop}\{#AppName}.lnk')) then
+    RunDesktopShortcutCommand('--remove-desktop-shortcut');
   if CurUninstallStep <> usPostUninstall then
     exit;
   if not RegQueryStringValue(HKCU, AppStateKey, CfaStateValue, ExePath) then
