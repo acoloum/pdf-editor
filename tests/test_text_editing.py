@@ -55,6 +55,25 @@ def test_expand_grows_right_until_neighbour(layout_pdf):
     assert "右側只剩" in str(error.value)
 
 
+def test_expand_shrinks_slightly_when_squeezed_between_neighbours():
+    """一行被拆成多段後改中間一段：左右緊貼其他文字，稍長的文字改縮小字級而不是拒絕。"""
+    font = pymupdf.Font("helv")
+    width = font.text_length("ASTM B221", fontsize=10)
+    box = (100, 50, 100 + width, 60)
+    obstacles = [(60, 50, 100, 60), (100 + width, 50, 200, 60)]
+    bounds = pymupdf.Rect(0, 0, 400, 300)
+    rect, size = fit_text_box(box, "ASTM-B221", font, 10, "expand", "left", obstacles, bounds)
+    assert 8.5 <= size < 10
+    assert rect[2] <= 100 + width + 0.01
+    assert font.text_length("ASTM-B221", fontsize=size) <= rect[2] - rect[0] + 0.01
+    # 寬度剛好放得下時不因右側 1 點留白而拒絕。
+    rect, size = fit_text_box(box, "ASTM B212", font, 10, "expand", "left", obstacles, bounds)
+    assert size == 10 and rect[2] <= 100 + width + 0.01
+    with pytest.raises(EditorError) as error:
+        fit_text_box(box, "ASTM B221 MUCH LONGER", font, 10, "expand", "left", obstacles, bounds)
+    assert "右側只剩" in str(error.value)
+
+
 def test_none_fit_keeps_previous_overflow_behaviour(layout_pdf):
     run = next(r for r in extract_runs(layout_pdf, 0) if r.text == "LEFT")
     with pytest.raises(EditorError) as error:

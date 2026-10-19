@@ -104,6 +104,8 @@ def find_table_cell(pdf: bytes, page: int, rect,
 
 FITS = ("none", "expand", "shrink")
 MIN_SHRINK_RATIO = 0.7
+# expand 加寬受阻時可縮小字級的下限（與同行其他文字的落差不明顯）。
+MIN_EXPAND_SHRINK_RATIO = 0.85
 LINE_HEIGHT = 1.25
 
 
@@ -128,6 +130,7 @@ def fit_text_box(rect, text, font, size, fit, alignment, obstacles, bounds):
     """依 fit 設定調整文字框或字級，回傳（文字框, 字級）。
 
     expand：向右（置中時向兩側）加寬、向下加高，但不跨越其他文字與頁面邊界；
+    寬度仍不夠時字級最多縮小到原本的 85%。
     shrink：維持文字框，字級最多縮小到原本的 70%。
     """
     box = pymupdf.Rect(rect)
@@ -143,7 +146,6 @@ def fit_text_box(rect, text, font, size, fit, alignment, obstacles, bounds):
         raise EditorError("TEXT_OVERFLOW",
             f"文字太長，縮小到 {size * MIN_SHRINK_RATIO:.1f} 點仍放不進儲存格，請縮短文字。")
     margin = 2.0
-    need_width = max(box.width, width + 1.0)
     need_height = max(box.height, height + 0.5)
     band = [pymupdf.Rect(o) for o in obstacles
         if min(o[3], box.y0 + need_height) - max(o[1], box.y0) > 0.5]
@@ -151,16 +153,28 @@ def fit_text_box(rect, text, font, size, fit, alignment, obstacles, bounds):
     left = max([o.x1 for o in band if o.x1 <= box.x0 + 0.5] + [bounds.x0 + margin])
     if alignment in ("hcenter", "center"):
         center = (box.x0 + box.x1) / 2
-        half = min(center - left, right - center)
-        available = half * 2
-        x0, x1 = center - need_width / 2, center + need_width / 2
+        available = min(center - left, right - center) * 2
     else:
         available = right - box.x0
+    if width > available + 0.01:
+        # 左右緊貼其他文字（例如一行被拆成多段後改中間一段）時無處加寬，
+        # 改為小幅縮小字級；縮太多會與同行文字落差明顯，因此設下限。
+        new_size = math.floor(size * max(0, available) / width * 10) / 10
+        if new_size < size * MIN_EXPAND_SHRINK_RATIO:
+            side = "左右" if alignment in ("hcenter", "center") else "右側"
+            raise EditorError("TEXT_OVERFLOW",
+                f"文字太長：需要 {width:.0f} 點寬，{side}只剩 {max(0, available):.0f} 點，"
+                f"縮小到 {size * MIN_EXPAND_SHRINK_RATIO:.1f} 點仍放不下。"
+                "請縮短文字、減小字級或手動調整文字框。")
+        size = new_size
+        width, height = _text_extent(font, text, size)
+        need_height = max(box.height, height + 0.5)
+    # 右側多留 1 點避免字尾貼線；空間不足時省略這段留白。
+    need_width = max(box.width, min(width + 1.0, available))
+    if alignment in ("hcenter", "center"):
+        x0, x1 = center - need_width / 2, center + need_width / 2
+    else:
         x0, x1 = box.x0, box.x0 + need_width
-    if need_width > available + 0.01:
-        raise EditorError("TEXT_OVERFLOW",
-            f"文字太長：需要 {need_width:.0f} 點寬，右側只剩 {max(0, available):.0f} 點。"
-            "請縮短文字、減小字級或手動調整文字框。")
     column = [pymupdf.Rect(o) for o in obstacles
         if min(o[2], x1) - max(o[0], x0) > 0.5 and o[1] >= box.y1 - 0.5]
     bottom = min([o.y0 for o in column] + [bounds.y1 - margin])
