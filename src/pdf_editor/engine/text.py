@@ -301,9 +301,46 @@ def _span_is_bold(span):
     return bool(span.get("flags", 0) & pymupdf.TEXT_FONT_BOLD) or any(hint in name for hint in BOLD_NAME_HINTS)
 
 
+# 同一行被拆到不同區塊時的合併條件，以字級為單位：基線差、片段間距上限、
+# 以及間距大到視為原本有空格的門檻。表格相鄰欄位的文字間隔遠大於上限，不會被合併。
+JOIN_BASELINE_TOLERANCE = 0.1
+JOIN_MAX_GAP = 0.25
+JOIN_SPACE_GAP = 0.15
+
+
+def _join_split_lines(pieces):
+    """把基線相同、首尾相接的片段合成一行，回傳依原順序排列的片段群組。
+
+    材證產生程式常先寫整頁中文、再寫英文數字，同一行因此落在不同區塊；
+    不合併的話只能一段一段改，中間的片段左右緊貼其他文字而無處加寬。
+    """
+    groups, buckets = [], {}
+    for piece in sorted(pieces, key=lambda item: item["rect"].x0):
+        target = None
+        key = round(piece["baseline"])
+        if piece["editable"]:
+            candidates = [group for k in (key - 1, key, key + 1) for group in buckets.get(k, ())]
+            for group in candidates:
+                last = group[-1]
+                size = max(last["size"], piece["size"])
+                gap = piece["rect"].x0 - last["rect"].x1
+                if (abs(last["baseline"] - piece["baseline"]) <= size * JOIN_BASELINE_TOLERANCE
+                        and -0.5 <= gap <= size * JOIN_MAX_GAP
+                        and min(last["size"], piece["size"]) >= size * 0.75):
+                    target = group
+                    break
+        if target is None:
+            target = []
+            groups.append(target)
+            if piece["editable"]:
+                buckets.setdefault(key, []).append(target)
+        target.append(piece)
+    return sorted(groups, key=lambda group: group[0]["order"])
+
+
 def extract_runs(pdf: bytes, page: int) -> list[TextRun]:
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
-        result = []
+        pieces = []
         for bi, block in enumerate(doc[page].get_text("dict")["blocks"]):
             for li, line in enumerate(block.get("lines", [])):
                 spans = line["spans"]
@@ -314,14 +351,29 @@ def extract_runs(pdf: bytes, page: int) -> list[TextRun]:
                 for span in spans[1:]:
                     rect |= pymupdf.Rect(span["bbox"])
                 editable = line["dir"] == (1.0, 0.0) and "\ufffd" not in text
-                color = spans[0]["color"]
-                # 過半文字為粗體（字型旗標或字型名稱）時視為粗體段落。
-                bold_chars = sum(len(span["text"]) for span in spans if _span_is_bold(span))
-                result.append(TextRun(f"{bi}:{li}", text, tuple(rect),
-                    spans[0]["font"], max(span["size"] for span in spans), editable,
-                    None if editable else "此區段方向或文字編碼不支援修改。",
-                    (((color >> 16) & 255) / 255, ((color >> 8) & 255) / 255, (color & 255) / 255),
-                    bold_chars * 2 > len(text)))
+                pieces.append({"id": f"{bi}:{li}", "order": len(pieces), "spans": spans,
+                    "text": text, "rect": rect, "baseline": spans[0]["origin"][1],
+                    "size": max(span["size"] for span in spans), "editable": editable})
+        result = []
+        for group in _join_split_lines(pieces):
+            text, rect = group[0]["text"], pymupdf.Rect(group[0]["rect"])
+            for previous, piece in zip(group, group[1:]):
+                gap = piece["rect"].x0 - previous["rect"].x1
+                if (gap >= piece["size"] * JOIN_SPACE_GAP
+                        and not text[-1].isspace() and not piece["text"][0].isspace()):
+                    text += " "
+                text += piece["text"]
+                rect |= piece["rect"]
+            spans = [span for piece in group for span in piece["spans"]]
+            editable = all(piece["editable"] for piece in group)
+            color = spans[0]["color"]
+            # 過半文字為粗體（字型旗標或字型名稱）時視為粗體段落。
+            bold_chars = sum(len(span["text"]) for span in spans if _span_is_bold(span))
+            result.append(TextRun("+".join(piece["id"] for piece in group), text, tuple(rect),
+                spans[0]["font"], max(piece["size"] for piece in group), editable,
+                None if editable else "此區段方向或文字編碼不支援修改。",
+                (((color >> 16) & 255) / 255, ((color >> 8) & 255) / 255, (color & 255) / 255),
+                bold_chars * 2 > len(text)))
         return result
 
 def replace_text(pdf: bytes, request: TextReplacement) -> bytes:

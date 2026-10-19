@@ -152,6 +152,50 @@ def test_find_table_cell_skips_cell_shared_by_two_lines(font_path):
         text = result[0].get_text()
         assert "ASTM B221 longer" in text and "NOTE" in text and "B210" not in text
 
+def split_line_pdf():
+    """材證產生程式先寫整頁中文、再寫英文數字：同一行在 PDF 中被拆到不同區塊。"""
+    doc = pymupdf.open()
+    page = doc.new_page(width=500, height=200)
+    pieces = [("材料結果", "china-t"), ("(ASTM B210)", "helv"), ("依據", "china-t"),
+        ("ASTM B210", "helv"), ("規範", "china-t")]
+    x, positions = 60, []
+    for text, font in pieces:
+        positions.append(x)
+        x += pymupdf.Font(font).text_length(text, fontsize=8)
+    for (text, font), x in zip(pieces, positions):
+        if font == "china-t":
+            page.insert_text((x, 80), text, fontname=font, fontsize=8)
+    page.insert_text((60, 96), "備註", fontname="china-t", fontsize=8)
+    for (text, font), x in zip(pieces, positions):
+        if font == "helv":
+            page.insert_text((x, 80), text, fontname=font, fontsize=8)
+    # 不同欄位的數字：彼此有明顯間隔，不可併成同一段。
+    page.insert_text((60, 140), "28.96", fontsize=8)
+    page.insert_text((120, 140), "28.98", fontsize=8)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+def test_extract_runs_joins_line_split_across_blocks():
+    runs = extract_runs(split_line_pdf(), 0)
+    texts = [run.text for run in runs]
+    assert "材料結果(ASTM B210)依據ASTM B210規範" in texts
+    assert "備註" in texts and "28.96" in texts and "28.98" in texts
+    line = next(run for run in runs if run.text.startswith("材料"))
+    assert line.rect[0] == pytest.approx(60, abs=0.5)
+    assert line.rect[2] > 200
+
+def test_replace_whole_split_line(font_path):
+    data = split_line_pdf()
+    run = next(r for r in extract_runs(data, 0) if r.text.startswith("材料"))
+    new = run.text.replace("B210", "B221").replace("(ASTM", "(6061/ASTM")
+    request = TextReplacement(hashlib.sha256(data).hexdigest(), 0, run.id, new, run.rect,
+        font_path, run.size, (0, 0, 0), "left", fit="expand")
+    out = replace_text(data, request)
+    texts = [r.text for r in extract_runs(out, 0)]
+    assert new in texts and "備註" in texts
+    assert not any("B210" in text for text in texts)
+
 def fragmented_table_pdf():
     doc = pymupdf.open()
     page = doc.new_page(width=300, height=200)
