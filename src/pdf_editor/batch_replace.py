@@ -1,8 +1,10 @@
 """批次文字取代：在整份文件中找出內容與規則「整格完全相同」的文字，逐筆以單筆修改相同的方式取代。
+選用「部分相符」時，句子中包含規則文字的段落也會取代其中相符的部分。
 
 每筆取代都沿用手動修改文字時的設定：優先使用原字型（缺字時改用相近字型或內建中文字型），
 表格內的文字放回儲存格正中央並在放不下時縮小字級，置中的標題維持置中。"""
 import hashlib
+import re
 from dataclasses import dataclass
 
 import pymupdf
@@ -63,18 +65,36 @@ def validated_rules(rules):
     return result
 
 
-def find_candidates(pdf, rules):
-    """依頁面順序列出內容與某條規則整格相同的文字；無法安全修改的文字也列出，由介面標示略過。"""
+def _partial_replacer(lookup):
+    """部分相符：同一段文字中所有規則一次換掉，不連鎖取代；重疊時較長的「尋找」優先。"""
+    rules = {rule.find: rule.replace for rule in lookup.values()}
+    pattern = re.compile("|".join(re.escape(find)
+        for find in sorted(rules, key=len, reverse=True)))
+    return lambda text: pattern.sub(lambda match: rules[match.group(0)], text)
+
+
+def find_candidates(pdf, rules, partial=False):
+    """依頁面順序列出內容與某條規則整格相同的文字；無法安全修改的文字也列出，由介面標示略過。
+
+    partial 為 True 時，內容「包含」規則文字的段落也列入，只換掉其中相符的部分。
+    """
     lookup = validated_rules(rules)
+    replacer = _partial_replacer(lookup) if partial else None
     found = []
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         page_count = doc.page_count
     for page in range(page_count):
         for run in extract_runs(pdf, page):
             rule = lookup.get(match_key(run.text))
-            if rule is None:
+            if rule is not None:
+                new_text = rule.replace
+            elif replacer is not None:
+                new_text = replacer(run.text).strip()
+                if new_text == run.text.strip():
+                    continue
+            else:
                 continue
-            found.append(ReplaceCandidate(page, run, rule.replace))
+            found.append(ReplaceCandidate(page, run, new_text))
             if len(found) > MAX_CANDIDATES:
                 raise EditorError("REPLACE_RULE",
                     f"符合的文字超過 {MAX_CANDIDATES} 筆，請改用更明確的規則。")

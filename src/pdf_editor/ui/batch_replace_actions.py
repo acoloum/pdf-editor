@@ -7,6 +7,7 @@ from pdf_editor.batch_replace import apply_replacements
 from pdf_editor.ui.batch_replace_dialog import BatchReplaceDialog
 
 RULES_KEY="batch_replace/rules"
+PARTIAL_KEY="batch_replace/partial"
 # 失敗清單太長時只列前幾筆，其餘以筆數帶過。
 MAX_LISTED_FAILURES=10
 
@@ -32,13 +33,15 @@ class BatchReplaceActionsMixin:
         run=self.run
         if run is not None and run.editable and all(find!=run.text.strip() for find,_ in rules):
             rules.append((run.text.strip(),""))
-        dialog=BatchReplaceDialog(self.session.pdf,rules,self)
+        partial=str(self.settings.value(PARTIAL_KEY,"false")).lower()=="true"
+        dialog=BatchReplaceDialog(self.session.pdf,rules,self,partial)
         if run is not None and run.editable:
             row=next(row for row,(find,_) in enumerate(dialog.rule_pairs()) if find==run.text.strip())
             dialog.rules.setCurrentCell(row,1)
         dialog.page_requested.connect(self.goto_page)
         accepted=dialog.exec()
         self.settings.set_value(RULES_KEY,json.dumps(dialog.rule_pairs(),ensure_ascii=False))
+        self.settings.set_value(PARTIAL_KEY,"true" if dialog.partial.isChecked() else "false")
         self.settings.sync()
         if accepted:
             self.apply_batch_replace(dialog.selected_candidates())

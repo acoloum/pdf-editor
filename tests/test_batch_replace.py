@@ -67,6 +67,32 @@ def test_finds_only_whole_cell_matches_on_every_page(report_pdf):
         (1, "韋伯式(HW)", "真直度"), (1, "韋伯式硬度計", "厚薄規")]
 
 
+def test_partial_mode_also_replaces_text_inside_longer_lines(report_pdf):
+    rules = (ReplaceRule("韋伯式硬度計", "厚薄規"),)
+    assert len(find_candidates(report_pdf, rules)) == 2
+    candidates = find_candidates(report_pdf, rules, partial=True)
+    assert [(c.page, c.run.text, c.new_text) for c in candidates] == [
+        (0, "韋伯式硬度計", "厚薄規"), (0, "游標卡尺,韋伯式硬度計,厚薄規", "游標卡尺,厚薄規,厚薄規"),
+        (1, "韋伯式硬度計", "厚薄規"), (1, "游標卡尺,韋伯式硬度計,厚薄規", "游標卡尺,厚薄規,厚薄規")]
+    pdf, applied, failures = apply_replacements(report_pdf, candidates, tempfile.gettempdir())
+    assert applied == 4 and not failures
+    for page in (0, 1):
+        texts = _texts(pdf, page)
+        assert "游標卡尺,厚薄規,厚薄規" in texts and "韋伯式硬度計" not in "".join(texts)
+
+
+def test_partial_mode_applies_all_rules_at_once_longest_first():
+    with pymupdf.open() as document:
+        page = document.new_page(width=500, height=200)
+        page.insert_text((40, 60), "(6061/ASTM 210) ASTM B210 B221", fontsize=10)
+        pdf = document.tobytes()
+    rules = (ReplaceRule("B210", "B221"), ReplaceRule("B221", "B999"),
+        ReplaceRule("ASTM 210", "ASTM B221"))
+    candidates = find_candidates(pdf, rules, partial=True)
+    # 同時換掉，不連鎖（B210 不會再被換成 B999）；「ASTM 210」比「210」類規則長，整段換掉。
+    assert [c.new_text for c in candidates] == ["(6061/ASTM B221) ASTM B221 B999"]
+
+
 def test_matching_ignores_spaces_in_rule_and_page_text(report_pdf):
     candidates = find_candidates(report_pdf, (ReplaceRule(" 韋伯式 硬度計 ", "厚薄規"),))
     assert len(candidates) == 2
@@ -147,7 +173,22 @@ def test_dialog_explains_when_nothing_matches(qtbot, report_pdf):
     dialog.find()
     assert dialog.results.topLevelItemCount() == 0
     assert "找不到內容完全相同的文字" in dialog.summary.text()
+    # 整格比對找不到時，提示可改用部分相符。
+    assert "也取代句子中的部分文字" in dialog.summary.text()
     assert not dialog.apply_button.isEnabled()
+
+
+def test_dialog_partial_option_finds_text_inside_lines(qtbot, report_pdf):
+    dialog = BatchReplaceDialog(report_pdf, [("韋伯式硬度計", "厚薄規")])
+    qtbot.addWidget(dialog)
+    dialog.find()
+    assert dialog.results.topLevelItemCount() == 2
+    # 切換比對方式後，先前的結果不再適用。
+    dialog.partial.setChecked(True)
+    assert dialog.results.topLevelItemCount() == 0 and not dialog.apply_button.isEnabled()
+    dialog.find()
+    assert dialog.results.topLevelItemCount() == 4
+    assert dialog.apply_button.isEnabled()
 
 
 def test_vertical_text_is_listed_but_cannot_be_ticked(qtbot):
@@ -211,6 +252,18 @@ def test_window_applies_batch_as_one_undo_step_and_remembers_rules(qtbot, tmp_pa
             lambda dialog: seen.append(dialog.rule_pairs()) or 0)
         window.show_batch_replace_dialog()
         assert seen == [[("韋伯式(HW)", "真直度"), ("韋伯式硬度計", "厚薄規")]]
+
+        # 「也取代句子中的部分文字」的勾選狀態同樣沿用。
+        def tick_partial(dialog):
+            dialog.partial.setChecked(True)
+            return 0
+        monkeypatch.setattr(BatchReplaceDialog, "exec", tick_partial)
+        window.show_batch_replace_dialog()
+        states = []
+        monkeypatch.setattr(BatchReplaceDialog, "exec",
+            lambda dialog: states.append(dialog.partial.isChecked()) or 0)
+        window.show_batch_replace_dialog()
+        assert states == [True]
     finally:
         window.session.saved_fingerprint = window.session.history.current[2]
         window.close()
