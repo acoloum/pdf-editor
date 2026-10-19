@@ -67,19 +67,35 @@ def _analyse_page_cells(pdf: bytes, page: int):
             if any(_image_covers_rect(img, candidate) for img in images):
                 continue
             drawings.append(tuple(candidate))
-        return cells, tuple(drawings)
+        # 記錄各行文字位置，用來排除同時容納多行文字的合併儲存格。
+        texts = tuple(tuple(line["bbox"])
+            for block in current.get_text("dict")["blocks"]
+            for line in block.get("lines", [])
+            if "".join(span["text"] for span in line["spans"]).strip())
+        return cells, tuple(drawings), texts
 
 
 def find_table_cell(pdf: bytes, page: int, rect,
         key: str | None = None) -> tuple[float, float, float, float] | None:
-    """找出包含文字中心點的表格儲存格，找不到時回傳 None。"""
+    """找出包含文字中心點的表格儲存格，找不到時回傳 None。
+
+    儲存格內若還有其他行文字（例如上下兩行共用一個合併儲存格），以整格當文字框
+    會蓋到另一行，因此不視為此文字的儲存格。
+    """
     box = pymupdf.Rect(rect)
     point = pymupdf.Point((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2)
-    cells, drawings = page_cell_index(pdf, page, key)
+    cells, drawings, texts = page_cell_index(pdf, page, key)
+    others = [pymupdf.Rect(item) for item in texts if not overlaps(box, item)]
+
+    def alone(cell):
+        return not any(cell.contains(pymupdf.Point((o.x0 + o.x1) / 2, (o.y0 + o.y1) / 2))
+            for o in others)
+
     candidates = [pymupdf.Rect(cell) for cell in cells if pymupdf.Rect(cell).contains(point)]
     if not candidates:
         # 以繪圖矩形備援偵測儲存格，用於 find_tables 無法解析的矮列或單格表格。
         candidates = [pymupdf.Rect(item) for item in drawings if pymupdf.Rect(item).contains(point)]
+    candidates = [cell for cell in candidates if alone(cell)]
     if not candidates:
         return None
     cell = min(candidates, key=lambda item: item.width * item.height)

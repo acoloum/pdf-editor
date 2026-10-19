@@ -133,6 +133,25 @@ def test_find_table_cell_returns_cell_containing_text(font_path):
     cell = text_engine.find_table_cell(data, 0, run.rect)
     assert cell == pytest.approx((52, 52, 148, 98))
 
+def test_find_table_cell_skips_cell_shared_by_two_lines(font_path):
+    """材證的合併儲存格內上下兩行文字：改其中一行時不可用整格當文字框，否則會蓋到另一行。"""
+    doc = pymupdf.open()
+    page = doc.new_page(width=300, height=200)
+    page.draw_rect((20, 50, 280, 80), width=1)
+    page.insert_text((60, 62), "ASTM B210", fontsize=8)
+    page.insert_text((60, 75), "NOTE", fontsize=8)
+    data = doc.tobytes()
+    doc.close()
+    text_engine.clear_cell_cache()
+    run = next(r for r in extract_runs(data, 0) if r.text == "ASTM B210")
+    assert text_engine.find_table_cell(data, 0, run.rect) is None
+    request = TextReplacement(hashlib.sha256(data).hexdigest(), 0, run.id,
+        "ASTM B221 longer", run.rect, font_path, 8, (0, 0, 0), "left", fit="expand")
+    out = replace_text(data, request)
+    with pymupdf.open(stream=out) as result:
+        text = result[0].get_text()
+        assert "ASTM B221 longer" in text and "NOTE" in text and "B210" not in text
+
 def fragmented_table_pdf():
     doc = pymupdf.open()
     page = doc.new_page(width=300, height=200)
