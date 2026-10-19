@@ -74,6 +74,46 @@ def test_expand_shrinks_slightly_when_squeezed_between_neighbours():
     assert "右側只剩" in str(error.value)
 
 
+def test_expand_stops_at_vertical_table_border():
+    """加寬時不越過表格的直向框線：靠左向右長、置中向兩側長，都停在框線內側。"""
+    font = pymupdf.Font("helv")
+    bounds = pymupdf.Rect(0, 0, 400, 300)
+    borders = [(40, 40, 70), (260, 40, 70), (300, 0, 30)]
+    text = "A" * 30
+    width = font.text_length(text, fontsize=10)
+    assert 160 < width < 210
+    rect, size = fit_text_box((50, 50, 90, 60), text, font, 10, "expand", "left", [], bounds,
+        borders)
+    assert size == 10 and rect[2] <= 259
+    rect, size = fit_text_box((130, 50, 170, 60), text, font, 10, "expand", "hcenter", [],
+        bounds, borders)
+    assert rect[0] >= 41 and rect[2] <= 259
+    # 不在同一列高度的框線（y 0~30）不影響；放不下時照樣縮小或回報。
+    with pytest.raises(EditorError):
+        fit_text_box((50, 50, 90, 60), "A" * 60, font, 10, "expand", "left", [], bounds,
+            borders)
+
+
+def test_replace_text_keeps_inside_table_frame(font_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=400, height=200)
+    page.draw_rect((40, 40, 260, 80), width=0.6)
+    # 白色遮蓋框（其他軟體蓋掉舊字留下的）看不見，不可當成框線擋住加寬。
+    page.draw_rect((49, 52, 82, 64), color=(1, 1, 1), fill=(1, 1, 1), width=1)
+    page.insert_text((50, 62), "SHORT", fontsize=10)
+    data = doc.tobytes()
+    doc.close()
+    run = extract_runs(data, 0)[0]
+    request = _replacement(data, run, "SHORT AND A BIT LONGER TEXT", "expand")
+    out = replace_text(data, request)
+    new = next(r for r in extract_runs(out, 0) if r.text.startswith("SHORT"))
+    assert new.rect[2] <= 260
+    # 約 256 點寬：頁面放得下，但會越過右側框線（縮到 85% 仍超出）。
+    with pytest.raises(EditorError):
+        replace_text(data, _replacement(data, run,
+            "SHORT AND A MUCH LONGER TEXT THAT REACHES FAR", "expand"))
+
+
 def test_none_fit_keeps_previous_overflow_behaviour(layout_pdf):
     run = next(r for r in extract_runs(layout_pdf, 0) if r.text == "LEFT")
     with pytest.raises(EditorError) as error:

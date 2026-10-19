@@ -126,11 +126,44 @@ def _text_extent(font, text, size):
     return width, height
 
 
-def fit_text_box(rect, text, font, size, fit, alignment, obstacles, bounds):
+# 加寬時與直向框線保持的距離（點）。
+BORDER_GAP = 1.0
+
+
+def vertical_borders(page):
+    """回傳頁面上的直向線段 (x, y0, y1)，例如表格框線；加寬文字時不越過。
+
+    只取看得見的線：有描邊的直線與矩形左右邊，以及寬度 2 點以內的細長填色矩形
+    （部分產生程式以填色細條畫格線）。只有填色的一般矩形多半是底色，不算框線；
+    白色線框多為蓋掉舊字的遮蓋框，同樣略過。
+    """
+    def visible(color):
+        return color is not None and min(color, default=1) < 0.9
+
+    borders = []
+    for drawing in page.get_drawings():
+        stroked = visible(drawing.get("color")) and "s" in (drawing.get("type") or "")
+        filled = visible(drawing.get("fill"))
+        for item in drawing["items"]:
+            if item[0] == "l":
+                start, end = item[1], item[2]
+                if stroked and abs(start.x - end.x) < 1 and abs(start.y - end.y) >= 1:
+                    borders.append(((start.x + end.x) / 2, min(start.y, end.y),
+                        max(start.y, end.y)))
+            elif item[0] in ("re", "qu"):
+                box = pymupdf.Rect(item[1]) if item[0] == "re" else item[1].rect
+                if box.width <= 2 and box.height > box.width * 3 and (stroked or filled):
+                    borders.append(((box.x0 + box.x1) / 2, box.y0, box.y1))
+                elif stroked and box.height >= 1:
+                    borders.extend([(box.x0, box.y0, box.y1), (box.x1, box.y0, box.y1)])
+    return borders
+
+
+def fit_text_box(rect, text, font, size, fit, alignment, obstacles, bounds, borders=()):
     """依 fit 設定調整文字框或字級，回傳（文字框, 字級）。
 
-    expand：向右（置中時向兩側）加寬、向下加高，但不跨越其他文字與頁面邊界；
-    寬度仍不夠時字級最多縮小到原本的 85%。
+    expand：向右（置中時向兩側）加寬、向下加高，但不跨越其他文字、直向框線
+    （borders，見 vertical_borders）與頁面邊界；寬度仍不夠時字級最多縮小到原本的 85%。
     shrink：維持文字框，字級最多縮小到原本的 70%。
     """
     box = pymupdf.Rect(rect)
@@ -151,6 +184,14 @@ def fit_text_box(rect, text, font, size, fit, alignment, obstacles, bounds):
         if min(o[3], box.y0 + need_height) - max(o[1], box.y0) > 0.5]
     right = min([o.x0 for o in band if o.x0 >= box.x1 - 0.5] + [bounds.x1 - margin])
     left = max([o.x1 for o in band if o.x1 <= box.x0 + 0.5] + [bounds.x0 + margin])
+    for x, top, bottom in borders:
+        if min(bottom, box.y0 + need_height) - max(top, box.y0) <= 0.5:
+            continue
+        # 原文字框已貼著框線時不再往該側加寬，但也不因留白而縮回原框內。
+        if x >= box.x1 - 0.5:
+            right = min(right, max(box.x1, x - BORDER_GAP))
+        elif x <= box.x0 + 0.5:
+            left = max(left, min(box.x0, x + BORDER_GAP))
     if alignment in ("hcenter", "center"):
         center = (box.x0 + box.x1) / 2
         available = min(center - left, right - center) * 2
@@ -276,8 +317,9 @@ def insert_text(pdf: bytes, request: TextInsertion) -> bytes:
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         page = doc[request.page]
         bounds = pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
+        borders = vertical_borders(page) if request.fit == "expand" else ()
         fitted, size = fit_text_box(rect, request.text, font, request.size, request.fit,
-            request.alignment, others, bounds)
+            request.alignment, others, bounds, borders)
         rect = pymupdf.Rect(fitted)
         if any(overlaps(rect, other) for other in others):
             raise EditorError("OVERLAP", "文字框與其他文字重疊，請移動或縮小文字框。")
@@ -413,8 +455,9 @@ def replace_text(pdf: bytes, request: TextReplacement) -> bytes:
         bounds = pymupdf.Rect(0, 0, page.cropbox.width, page.cropbox.height)
         size = request.size
         if request.text:
+            borders = vertical_borders(page) if request.fit == "expand" else ()
             fitted, size = fit_text_box(rect, request.text, font, request.size, request.fit,
-                request.alignment, others, bounds)
+                request.alignment, others, bounds, borders)
             rect = pymupdf.Rect(fitted)
         if any(overlaps(rect, other) for other in others):
             raise EditorError("OVERLAP", "文字框與其他文字重疊，請移動或縮小文字框。")
