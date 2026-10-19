@@ -46,13 +46,14 @@ class BatchReplaceDialog(QDialog):
             "「B210」改成「B221」。\n不勾時只取代整格相同的文字，避免誤改表格中的數字。")
         self.partial.setChecked(partial)
         layout.addWidget(self.partial)
-        self.rules = QTableWidget(0, 2)
+        self.rules = QTableWidget(0, 3)
         self.rules.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.rules.verticalHeader().setVisible(False)
         self.rules.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         layout.addWidget(self.rules, 2)
-        for find, replace in rules:
-            self.add_rule(find, replace)
+        # 舊設定只有（尋找, 取代為）兩欄，同列條件視為空白。
+        for rule in rules:
+            self.add_rule(*rule)
         if not self.rules.rowCount():
             self.add_rule()
         self.rules.itemChanged.connect(self._rules_changed)
@@ -88,11 +89,12 @@ class BatchReplaceDialog(QDialog):
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
 
-    def add_rule(self, find="", replace="", focus=False):
+    def add_rule(self, find="", replace="", condition="", focus=False):
         row = self.rules.rowCount()
         self.rules.insertRow(row)
         self.rules.setItem(row, 0, QTableWidgetItem(find))
         self.rules.setItem(row, 1, QTableWidgetItem(replace))
+        self.rules.setItem(row, 2, QTableWidgetItem(condition))
         if focus:
             self.rules.setCurrentCell(row, 0)
             self.rules.editItem(self.rules.item(row, 0))
@@ -107,26 +109,30 @@ class BatchReplaceDialog(QDialog):
             self.add_rule()
         self._rules_changed()
 
-    def rule_pairs(self):
-        """表格中的規則（尋找, 取代為），略過兩欄都空白的列。"""
-        pairs = []
+    def rule_rows(self):
+        """表格中的規則（尋找, 取代為, 同列條件），略過尋找與取代為都空白的列。"""
+        rows = []
         for row in range(self.rules.rowCount()):
-            cells = [self.rules.item(row, column) for column in (0, 1)]
-            find, replace = (cell.text().strip() if cell else "" for cell in cells)
+            cells = [self.rules.item(row, column) for column in (0, 1, 2)]
+            find, replace, condition = (cell.text().strip() if cell else "" for cell in cells)
             if find or replace:
-                pairs.append((find, replace))
-        return pairs
+                rows.append((find, replace, condition))
+        return rows
 
     def _mode_changed(self, *_args):
         if self.partial.isChecked():
             self.intro.setText("整格相同或句子中包含「尋找」內容的文字都會取代（只換掉相符的部分）。\n"
                 "取代時沿用原本的字級與顏色，表格內的文字會放回儲存格正中央。")
-            self.rules.setHorizontalHeaderLabels(["尋找", "取代為"])
+            self.rules.setHorizontalHeaderLabels(["尋找", "取代為", "同一列需有（選填）"])
         else:
             self.intro.setText("整格文字與「尋找」完全相同時才取代（忽略空白）；"
                 "只包含其中一段的文字不會被修改。\n"
                 "取代時沿用原本的字級與顏色，表格內的文字會放回儲存格正中央。")
-            self.rules.setHorizontalHeaderLabels(["尋找（整格文字）", "取代為"])
+            self.rules.setHorizontalHeaderLabels(["尋找（整格文字）", "取代為", "同一列需有（選填）"])
+        self.rules.horizontalHeaderItem(2).setToolTip(
+            "表格中相同的文字只想改其中幾列時填寫：同一列其他格包含這段文字才取代。\n"
+            "例如「游標卡尺 → 厚薄規」填「厚薄差」，只改檢驗項目為厚薄差那幾列的游標卡尺。\n"
+            "以取代前的原文判斷，同一批把厚薄差改成真直度也不影響。")
         self._rules_changed()
 
     def _rules_changed(self, *_args):
@@ -138,7 +144,7 @@ class BatchReplaceDialog(QDialog):
         self.apply_button.setEnabled(False)
 
     def find(self):
-        rules = [ReplaceRule(find, replace) for find, replace in self.rule_pairs()]
+        rules = [ReplaceRule(*row) for row in self.rule_rows()]
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             candidates = find_candidates(self.pdf, rules, self.partial.isChecked())

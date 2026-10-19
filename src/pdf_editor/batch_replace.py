@@ -22,6 +22,9 @@ MAX_CANDIDATES = 2000
 class ReplaceRule:
     find: str
     replace: str
+    # 同列條件（選填）：同一列其他文字包含這段內容時才取代，用來區分表格中相同的文字，
+    # 例如只把「厚薄差」那幾列的「游標卡尺」改成「厚薄規」。
+    row: str = ""
 
 
 @dataclass(frozen=True)
@@ -44,52 +47,94 @@ def match_key(text):
 
 
 def validated_rules(rules):
-    """去掉空白規則；尋找內容重複或與取代內容相同時說明原因。"""
+    """去掉空白規則；尋找內容（含同列條件）重複或與取代內容相同時說明原因。
+
+    回傳依輸入順序排列的規則；同一個「尋找」可搭配不同的同列條件各寫一條。
+    """
     result = {}
     for rule in rules:
         find, replace = str(rule.find).strip(), str(rule.replace).strip()
+        row = str(rule.row).strip()
         if not find and not replace:
             continue
         if not match_key(find):
             raise EditorError("REPLACE_RULE", f"「{replace}」缺少要尋找的文字。")
-        key = match_key(find)
+        key = (match_key(find), match_key(row))
         if key in result:
-            raise EditorError("REPLACE_RULE", f"「{find}」重複出現在多條規則中，請只保留一條。")
-        if key == match_key(replace):
+            where = f"（同列條件「{row}」）" if row else ""
+            raise EditorError("REPLACE_RULE",
+                f"「{find}」{where}重複出現在多條規則中，請只保留一條。")
+        if key[0] == match_key(replace):
             raise EditorError("REPLACE_RULE", f"「{find}」的取代內容與原文字相同。")
-        result[key] = ReplaceRule(find, replace)
+        result[key] = ReplaceRule(find, replace, row)
     if not result:
         raise EditorError("REPLACE_RULE", "請至少輸入一條取代規則。")
     if len(result) > MAX_RULES:
         raise EditorError("REPLACE_RULE", f"取代規則最多 {MAX_RULES} 條。")
-    return result
+    return list(result.values())
 
 
-def _partial_replacer(lookup):
-    """部分相符：同一段文字中所有規則一次換掉，不連鎖取代；重疊時較長的「尋找」優先。"""
-    rules = {rule.find: rule.replace for rule in lookup.values()}
+def _partial_replacer(rules):
+    """部分相符：同一段文字中所有規則一次換掉，不連鎖取代；重疊時較長的「尋找」優先。
+
+    同一個「尋找」有多條適用時以排在前面的為準（呼叫端把有同列條件的排在前面）。
+    """
+    table = {}
+    for rule in rules:
+        table.setdefault(rule.find, rule.replace)
     pattern = re.compile("|".join(re.escape(find)
-        for find in sorted(rules, key=len, reverse=True)))
-    return lambda text: pattern.sub(lambda match: rules[match.group(0)], text)
+        for find in sorted(table, key=len, reverse=True)))
+    return lambda text: pattern.sub(lambda match: table[match.group(0)], text)
+
+
+def _row_text(run, runs):
+    """同一列其他文字的比對內容：垂直範圍涵蓋彼此中線的文字視為同列（表格的同一列）。"""
+    center = (run.rect[1] + run.rect[3]) / 2
+    parts = []
+    for other in runs:
+        if other is run:
+            continue
+        other_center = (other.rect[1] + other.rect[3]) / 2
+        if other.rect[1] <= center <= other.rect[3] or run.rect[1] <= other_center <= run.rect[3]:
+            parts.append(match_key(other.text))
+    # 以換行分隔各段，條件不會跨兩格湊成。
+    return "\n".join(parts)
 
 
 def find_candidates(pdf, rules, partial=False):
     """依頁面順序列出內容與某條規則整格相同的文字；無法安全修改的文字也列出，由介面標示略過。
 
     partial 為 True 時，內容「包含」規則文字的段落也列入，只換掉其中相符的部分。
+    有同列條件的規則只在同一列其他文字包含條件內容時適用，並優先於沒有條件的規則；
+    條件以取代前的原文判斷，同一批中改掉條件文字的規則不影響它。
     """
-    lookup = validated_rules(rules)
-    replacer = _partial_replacer(lookup) if partial else None
+    # 有條件的規則較明確，排在前面優先採用。
+    ordered = sorted(validated_rules(rules), key=lambda rule: not match_key(rule.row))
+    conditional = any(match_key(rule.row) for rule in ordered)
+    finds = {match_key(rule.find) for rule in ordered}
+    replacers = {}
     found = []
     with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         page_count = doc.page_count
     for page in range(page_count):
-        for run in extract_runs(pdf, page):
-            rule = lookup.get(match_key(run.text))
-            if rule is not None:
-                new_text = rule.replace
-            elif replacer is not None:
-                new_text = replacer(run.text).strip()
+        runs = extract_runs(pdf, page)
+        for run in runs:
+            key = match_key(run.text)
+            if not partial and key not in finds:
+                continue
+            if partial and not any(find in key for find in finds):
+                continue
+            row_text = _row_text(run, runs) if conditional else ""
+            usable = [rule for rule in ordered
+                if not match_key(rule.row) or match_key(rule.row) in row_text]
+            whole = next((rule for rule in usable if match_key(rule.find) == key), None)
+            if whole is not None:
+                new_text = whole.replace
+            elif partial and usable:
+                signature = tuple(id(rule) for rule in usable)
+                if signature not in replacers:
+                    replacers[signature] = _partial_replacer(usable)
+                new_text = replacers[signature](run.text).strip()
                 if new_text == run.text.strip():
                     continue
             else:

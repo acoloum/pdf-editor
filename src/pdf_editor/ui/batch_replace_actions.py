@@ -18,8 +18,10 @@ class BatchReplaceActionsMixin:
             rules=json.loads(str(self.settings.value(RULES_KEY,"") or "[]"))
         except ValueError:
             return []
-        return [(str(find),str(replace)) for find,replace in rules
-            if isinstance(find,str) and isinstance(replace,str)]
+        # 每條為（尋找, 取代為, 同列條件）；舊版只存兩欄，同列條件補空白。
+        return [tuple(rule)+("",)*(3-len(rule)) for rule in rules
+            if isinstance(rule,list) and len(rule) in (2,3)
+            and all(isinstance(value,str) for value in rule)]
 
     def show_batch_replace_dialog(self):
         if not self.session or self.busy:
@@ -31,16 +33,16 @@ class BatchReplaceActionsMixin:
         rules=self.saved_replace_rules()
         # 先點選一格文字再開啟時，直接把它帶入成新規則，只要再輸入要換成的內容。
         run=self.run
-        if run is not None and run.editable and all(find!=run.text.strip() for find,_ in rules):
-            rules.append((run.text.strip(),""))
+        if run is not None and run.editable and all(rule[0]!=run.text.strip() for rule in rules):
+            rules.append((run.text.strip(),"",""))
         partial=str(self.settings.value(PARTIAL_KEY,"false")).lower()=="true"
         dialog=BatchReplaceDialog(self.session.pdf,rules,self,partial)
         if run is not None and run.editable:
-            row=next(row for row,(find,_) in enumerate(dialog.rule_pairs()) if find==run.text.strip())
+            row=next(row for row,rule in enumerate(dialog.rule_rows()) if rule[0]==run.text.strip())
             dialog.rules.setCurrentCell(row,1)
         dialog.page_requested.connect(self.goto_page)
         accepted=dialog.exec()
-        self.settings.set_value(RULES_KEY,json.dumps(dialog.rule_pairs(),ensure_ascii=False))
+        self.settings.set_value(RULES_KEY,json.dumps(dialog.rule_rows(),ensure_ascii=False))
         self.settings.set_value(PARTIAL_KEY,"true" if dialog.partial.isChecked() else "false")
         self.settings.sync()
         if accepted:

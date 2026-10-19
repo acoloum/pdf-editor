@@ -98,10 +98,63 @@ def test_matching_ignores_spaces_in_rule_and_page_text(report_pdf):
     assert len(candidates) == 2
 
 
+def inspection_pdf():
+    """檢驗項目／檢驗設備表格：只有「厚薄差」那幾列的游標卡尺要改成厚薄規。"""
+    rows = (("外徑", "游標卡尺"), ("厚薄差", "游標卡尺"), ("長度", "捲尺"), ("內徑", "游標卡尺"),
+        ("厚薄差", "游標卡尺"))
+    with pymupdf.open() as document:
+        page = document.new_page(width=500, height=400)
+        page.insert_font(fontname="noto", fontfile=str(FONT))
+        top = 40
+        for y in range(top, top + 30 * len(rows) + 1, 30):
+            page.draw_line((40, y), (300, y), color=(0, 0, 0), width=0.8)
+        for x in (40, 160, 300):
+            page.draw_line((x, top), (x, top + 30 * len(rows)), color=(0, 0, 0), width=0.8)
+        for index, (item, tool) in enumerate(rows):
+            baseline = top + 30 * index + 20
+            page.insert_text((60, baseline), item, fontname="noto", fontsize=10)
+            page.insert_text((180, baseline), tool, fontname="noto", fontsize=10)
+        document.subset_fonts(fallback=True)
+        return document.tobytes()
+
+
+def _rows(pdf):
+    """依列回傳（檢驗項目, 檢驗設備）。"""
+    runs = sorted(extract_runs(pdf, 0), key=lambda run: (round(run.rect[1]), run.rect[0]))
+    rows = {}
+    for run in runs:
+        rows.setdefault(round((run.rect[1] + run.rect[3]) / 2), []).append(run.text)
+    return [tuple(texts) for _, texts in sorted(rows.items())]
+
+
+def test_row_condition_limits_replacement_to_matching_rows():
+    pdf = inspection_pdf()
+    rules = (ReplaceRule("厚薄差", "真直度"), ReplaceRule("游標卡尺", "厚薄規", "厚薄差"))
+    candidates = find_candidates(pdf, rules)
+    # 條件以取代前的原文判斷：同一批把厚薄差改成真直度，不影響第二條規則。
+    assert [(c.run.text, c.new_text) for c in candidates] == [
+        ("厚薄差", "真直度"), ("游標卡尺", "厚薄規"), ("厚薄差", "真直度"), ("游標卡尺", "厚薄規")]
+    out, applied, failures = apply_replacements(pdf, candidates, tempfile.mkdtemp())
+    assert applied == 4 and not failures
+    assert _rows(out) == [("外徑", "游標卡尺"), ("真直度", "厚薄規"), ("長度", "捲尺"),
+        ("內徑", "游標卡尺"), ("真直度", "厚薄規")]
+
+
+def test_same_find_with_different_row_conditions():
+    pdf = inspection_pdf()
+    rules = (ReplaceRule("游標卡尺", "厚薄規", "厚薄差"), ReplaceRule("游標卡尺", "內徑規", "內徑"),
+        ReplaceRule("捲尺", "鋼尺", "不存在的項目"))
+    assert [(c.new_text) for c in find_candidates(pdf, rules)] == ["厚薄規", "內徑規", "厚薄規"]
+    # 部分相符模式同樣遵守同列條件。
+    partial = find_candidates(pdf, (ReplaceRule("卡尺", "規", "厚薄差"),), partial=True)
+    assert [c.new_text for c in partial] == ["游標規", "游標規"]
+
+
 @pytest.mark.parametrize("rules,message", [
     ((), "至少輸入一條"),
     ((ReplaceRule("", "真直度"),), "缺少要尋找的文字"),
     ((ReplaceRule("長度", "A"), ReplaceRule("長 度", "B")), "重複"),
+    ((ReplaceRule("長度", "A", "外徑"), ReplaceRule("長度", "B", "外 徑")), "重複"),
     ((ReplaceRule("長度", "長度"),), "相同"),
 ])
 def test_invalid_rules_are_explained(rules, message):
@@ -191,6 +244,20 @@ def test_dialog_partial_option_finds_text_inside_lines(qtbot, report_pdf):
     assert dialog.apply_button.isEnabled()
 
 
+def test_dialog_row_condition_column(qtbot):
+    dialog = BatchReplaceDialog(inspection_pdf(), [("厚薄差", "真直度"), ("游標卡尺", "厚薄規", "厚薄差")])
+    qtbot.addWidget(dialog)
+    assert dialog.rules.columnCount() == 3
+    assert dialog.rule_rows() == [("厚薄差", "真直度", ""), ("游標卡尺", "厚薄規", "厚薄差")]
+    dialog.find()
+    assert dialog.results.topLevelItemCount() == 4
+    # 修改條件後，舊結果不再適用；拿掉條件就會找到全部游標卡尺。
+    dialog.rules.item(1, 2).setText("")
+    assert dialog.results.topLevelItemCount() == 0
+    dialog.find()
+    assert dialog.results.topLevelItemCount() == 2 + 4
+
+
 def test_vertical_text_is_listed_but_cannot_be_ticked(qtbot):
     with pymupdf.open() as document:
         page = document.new_page(width=300, height=300)
@@ -249,9 +316,25 @@ def test_window_applies_batch_as_one_undo_step_and_remembers_rules(qtbot, tmp_pa
         # 下次開啟時沿用上次的規則。
         seen = []
         monkeypatch.setattr(BatchReplaceDialog, "exec",
-            lambda dialog: seen.append(dialog.rule_pairs()) or 0)
+            lambda dialog: seen.append(dialog.rule_rows()) or 0)
         window.show_batch_replace_dialog()
-        assert seen == [[("韋伯式(HW)", "真直度"), ("韋伯式硬度計", "厚薄規")]]
+        assert seen == [[("韋伯式(HW)", "真直度", ""), ("韋伯式硬度計", "厚薄規", "")]]
+
+        # 同列條件同樣保留；舊版只存（尋找, 取代為）兩欄的設定也讀得進來。
+        def add_condition(dialog):
+            dialog.rules.item(1, 2).setText("韋伯式(HW)")
+            return 0
+        monkeypatch.setattr(BatchReplaceDialog, "exec", add_condition)
+        window.show_batch_replace_dialog()
+        seen.clear()
+        monkeypatch.setattr(BatchReplaceDialog, "exec",
+            lambda dialog: seen.append(dialog.rule_rows()) or 0)
+        window.show_batch_replace_dialog()
+        assert seen == [[("韋伯式(HW)", "真直度", ""), ("韋伯式硬度計", "厚薄規", "韋伯式(HW)")]]
+        window.settings.set_value(RULES_KEY, '[["長度", "長度2"]]')
+        seen.clear()
+        window.show_batch_replace_dialog()
+        assert seen == [[("長度", "長度2", "")]]
 
         # 「也取代句子中的部分文字」的勾選狀態同樣沿用。
         def tick_partial(dialog):
